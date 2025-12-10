@@ -53,6 +53,8 @@ pub fn stack_effect(instr: &Instruction) -> InstructionEffect {
             | U32TestW
             | U32Assert
             | U32AssertWithError(_)
+            | U32Assert2
+            | U32Assert2WithError(_)
             | U32AssertW
             | U32AssertWWithError(_)
             | U32Cast
@@ -66,22 +68,7 @@ pub fn stack_effect(instr: &Instruction) -> InstructionEffect {
             | Sdepth
             | Caller
             | Clk
-            | MemLoad
-            | MemLoadImm(_)
-            | MemLoadWBe
-            | MemLoadWBeImm(_)
-            | MemLoadWLe
-            | MemLoadWLeImm(_)
-            | LocLoad(_)
-            | LocLoadWBe(_)
-            | LocLoadWLe(_)
             | AdvLoadW
-            | Hash
-            | HMerge
-            | HPerm
-            | FriExt2Fold4
-            | HornerBase
-            | HornerExt
             | Emit
             | EmitImm(_)
             | Trace(_)
@@ -163,15 +150,6 @@ pub fn stack_effect(instr: &Instruction) -> InstructionEffect {
             | U32Gte
             | U32Min
             | U32Max
-            | MemStore
-            | MemStoreImm(_)
-            | MemStoreWBe
-            | MemStoreWBeImm(_)
-            | MemStoreWLe
-            | MemStoreWLeImm(_)
-            | LocStore(_)
-            | LocStoreWBe(_)
-            | LocStoreWLe(_)
             | MTreeGet
             | MTreeSet
             | MTreeMerge
@@ -231,20 +209,79 @@ pub fn stack_effect(instr: &Instruction) -> InstructionEffect {
         MovUp14 => InstructionEffect::known(0, 0).with_required(15),
         MovUp15 => InstructionEffect::known(0, 0).with_required(16),
 
-        MovDn2 | MovDn3 | MovDn4 | MovDn5 | MovDn6 | MovDn7 | MovDn8 | MovDn9 | MovDn10
-        | MovDn11 | MovDn12 | MovDn13 | MovDn14 | MovDn15 => InstructionEffect::known(0, 0),
+        MovDn2 => InstructionEffect::known(0, 0).with_required(3),
+        MovDn3 => InstructionEffect::known(0, 0).with_required(4),
+        MovDn4 => InstructionEffect::known(0, 0).with_required(5),
+        MovDn5 => InstructionEffect::known(0, 0).with_required(6),
+        MovDn6 => InstructionEffect::known(0, 0).with_required(7),
+        MovDn7 => InstructionEffect::known(0, 0).with_required(8),
+        MovDn8 => InstructionEffect::known(0, 0).with_required(9),
+        MovDn9 => InstructionEffect::known(0, 0).with_required(10),
+        MovDn10 => InstructionEffect::known(0, 0).with_required(11),
+        MovDn11 => InstructionEffect::known(0, 0).with_required(12),
+        MovDn12 => InstructionEffect::known(0, 0).with_required(13),
+        MovDn13 => InstructionEffect::known(0, 0).with_required(14),
+        MovDn14 => InstructionEffect::known(0, 0).with_required(15),
+        MovDn15 => InstructionEffect::known(0, 0).with_required(16),
 
-        MovUpW2 | MovUpW3 | MovDnW2 | MovDnW3 => InstructionEffect::Unknown, // treat as unknown until modeled precisely
+        MovUpW2 => InstructionEffect::known(0, 0).with_required(12),
+        MovUpW3 => InstructionEffect::known(0, 0).with_required(16),
+        MovDnW2 => InstructionEffect::known(0, 0).with_required(12),
+        MovDnW3 => InstructionEffect::known(0, 0).with_required(16),
+
+        // Cryptographic operations
+        Hash => InstructionEffect::known(4, 4).with_required(4),
+        HMerge => InstructionEffect::known(8, 4).with_required(8),
+        HPerm => InstructionEffect::known(12, 12).with_required(12),
+        MTreeGet => InstructionEffect::known(3, 2).with_required(3),
+        MTreeSet => InstructionEffect::known(4, 2).with_required(4),
+        MTreeMerge => InstructionEffect::known(2, 1).with_required(2),
+        MTreeVerify => InstructionEffect::known(4, 4).with_required(4),
+        MTreeVerifyWithError(_) => InstructionEffect::known(4, 4).with_required(4),
+
+        // Polynomial/circuit ops
+        EvalCircuit => InstructionEffect::known(0, 0).with_required(3),
+        HornerBase => InstructionEffect::known(0, 0).with_required(16),
+        HornerExt => InstructionEffect::known(0, 0).with_required(16),
+        LogPrecompile => InstructionEffect::known(12, 12).with_required(12),
+
+        // FRI folding
+        FriExt2Fold4 => InstructionEffect::known(0, 0).with_required(17),
+
+        // Memory loads/stores
+        MemLoad => InstructionEffect::known(1, 1).with_required(1),
+        MemLoadImm(_) => InstructionEffect::known(0, 1),
+        MemLoadWBe => InstructionEffect::known(1, 4).with_required(5),
+        MemLoadWBeImm(_) => InstructionEffect::known(0, 4).with_required(4),
+        MemLoadWLe => InstructionEffect::known(1, 4).with_required(5),
+        MemLoadWLeImm(_) => InstructionEffect::known(0, 4).with_required(4),
+
+        LocLoad(_) => InstructionEffect::known(0, 1),
+        LocLoadWBe(_) => InstructionEffect::known(0, 4).with_required(4),
+        LocLoadWLe(_) => InstructionEffect::known(0, 4).with_required(4),
+
+        MemStore => InstructionEffect::known(2, 0).with_required(2),
+        MemStoreImm(_) => InstructionEffect::known(1, 0).with_required(1),
+        MemStoreWBe => InstructionEffect::known(5, 0).with_required(5),
+        MemStoreWBeImm(_) => InstructionEffect::known(4, 0).with_required(4),
+        MemStoreWLe => InstructionEffect::known(5, 0).with_required(5),
+        MemStoreWLeImm(_) => InstructionEffect::known(4, 0).with_required(4),
+
+        LocStore(_) => InstructionEffect::known(1, 0).with_required(1),
+        LocStoreWBe(_) => InstructionEffect::known(4, 0).with_required(4),
+        LocStoreWLe(_) => InstructionEffect::known(4, 0).with_required(4),
+
+        MemStream => InstructionEffect::known(0, 0).with_required(13),
+
+        U32Split => InstructionEffect::known(1, 2).with_required(1),
 
         Push(_) | Locaddr(_) | EmitImm(_) | Trace(_) => InstructionEffect::known(0, 1),
         PushSlice(_, range) => InstructionEffect::known(0, range.len() as u8),
         PushFeltList(vals) => InstructionEffect::known(0, vals.len() as u8),
 
-        MemStream | AdvPipe | AdvPush(_) => InstructionEffect::known(0, 0), // opaque side effects
+        AdvPipe | AdvPush(_) => InstructionEffect::known(0, 0), // opaque side effects
 
         SysEvent(_) => InstructionEffect::known(0, 0),
-
-        EvalCircuit | LogPrecompile => InstructionEffect::known(0, 0),
 
         Exec(_) | Call(_) | SysCall(_) | DynExec | DynCall => InstructionEffect::Unknown,
 

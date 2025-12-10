@@ -36,14 +36,23 @@ pub struct Program {
 impl Program {
     pub fn from_path(path: impl AsRef<FsPath>, roots: &[LibraryRoot]) -> Result<Self, Report> {
         let path = path.as_ref();
-        let mut parser = ModuleParser::new(ModuleKind::Executable);
+        // Most MASM files we decompile are library-style modules (no `begin/end` wrapper).
+        // Prefer the library parser; fall back to executable if needed.
+        let mut parser = ModuleParser::new(ModuleKind::Library);
 
         let module_name = derive_module_path(path, roots)
             .unwrap_or_else(|_| MasmPathBuf::absolute(Module::ROOT));
 
         let source_manager: Arc<dyn miden_assembly_syntax::debuginfo::SourceManager> =
             Arc::new(DefaultSourceManager::default());
-        let module = parser.parse_file(&module_name, path, source_manager)?;
+        let module = match parser.parse_file(&module_name, path, source_manager.clone()) {
+            Ok(m) => m,
+            Err(_e) => {
+                // Retry as executable for files that use `begin/end` wrappers.
+                let mut exec_parser = ModuleParser::new(ModuleKind::Executable);
+                exec_parser.parse_file(&module_name, path, source_manager)?
+            }
+        };
 
         Ok(Self {
             module,

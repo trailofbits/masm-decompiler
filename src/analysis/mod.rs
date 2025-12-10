@@ -1,7 +1,9 @@
 //! Analysis passes (expression propagation, DCE, etc.).
-//!
-//! This module currently only contains placeholders to keep the crate layout close to `rewasm`.
 
-/// Placeholder result type for future analysis passes.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct AnalysisState;
+mod dead_code_elimination;
+mod expression_propagation;
+mod used_vars;
+
+pub use dead_code_elimination::eliminate_dead_code;
+pub use expression_propagation::propagate_expressions;
+pub use used_vars::{build_def_use_map, DefUseMap};
