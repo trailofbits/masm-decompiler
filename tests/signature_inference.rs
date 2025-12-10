@@ -34,7 +34,6 @@ fn infers_produce_and_consume() {
 
 #[test]
 fn infers_consume_only() {
-    // proc bar consumes three values => inputs=3, outputs=0
     let ws = workspace_from_modules(&[(
         "bar",
         r#"
@@ -60,7 +59,6 @@ fn infers_consume_only() {
 
 #[test]
 fn infers_produce_only() {
-    // proc baz produces three constants => inputs=0, outputs=3
     let ws = workspace_from_modules(&[(
         "baz",
         r#"
@@ -88,7 +86,8 @@ fn infers_produce_only() {
 
 #[test]
 fn infers_call_chain() {
-    // proc mid calls leaf twice; leaf consumes 1 produces 1; second call reuses first result -> consumes 1, produces 1
+    // mid calls leaf twice, and leaf consumes 1 produces 1. The second call
+    // reuses the first result, so mid consumes 1 input and produces 1 output.
     let ws = workspace_from_modules(&[
         (
             "leaf",
@@ -127,7 +126,8 @@ fn infers_call_chain() {
 
 #[test]
 fn infers_while_no_change() {
-    // while loop pops a condition each time; body push/drop nets zero height but missing loop condition drives unbounded inputs.
+    // while loop pops a condition each time and the body has zero effect. The
+    // missing loop condition yields unbounded inputs.
     let ws = workspace_from_modules(&[(
         "loop",
         r#"
@@ -147,7 +147,9 @@ fn infers_while_no_change() {
 
 #[test]
 fn infers_while_producing() {
-    // while body pushes a value; the loop condition pop consumes it, so net height is unchanged; requires one input for the initial condition.
+    // The while body pushes a value and the loop condition pop consumes it, so
+    // net height is unchanged. The proc requires one input for the initial
+    // condition.
     let ws = workspace_from_modules(&[(
         "loop_prod",
         r#"
@@ -175,9 +177,33 @@ fn infers_while_producing() {
 }
 
 #[test]
+fn infers_while_consuming() {
+    // Seed the condition with a constant. The body drops one argument and does
+    // not produce a new loop condition.
+    let ws = workspace_from_modules(&[(
+        "loop_consume",
+        r#"
+        proc loop_consume
+            push.1
+            while.true
+                drop
+            end
+        end
+        "#,
+    )]);
+    let cg = CallGraph::build_for_workspace(&ws);
+    let sigs = infer_signatures(&ws, &cg);
+    let sig = sigs
+        .signatures
+        .get("loop_consume::loop_consume")
+        .expect("sig");
+    assert!(matches!(sig, ProcSignature::Unknown));
+}
+
+#[test]
 fn infers_while_with_condition_produced() {
-    // Loop body pushes a value for the next condition, keeping height constant
-    // and providing the needed condition each iteration.
+    // Loop body pushes a value for the next condition, keeping the height
+    // constant.
     let ws = workspace_from_modules(&[(
         "loop_cond",
         r#"
@@ -207,7 +233,8 @@ fn infers_while_with_condition_produced() {
 
 #[test]
 fn infers_while_condition_from_body() {
-    // Body manufactures the next condition from existing stack data; net height stays constant.
+    // Body manufactures the next condition from existing stack, so the net
+    // height stays constant.
     let ws = workspace_from_modules(&[(
         "loop_body_cond",
         r#"
@@ -238,15 +265,15 @@ fn infers_while_condition_from_body() {
 }
 
 #[test]
-fn infers_while_consuming() {
-    // Seed the condition with a constant; the body drops one argument and does not produce outputs.
-    // Iteration count is unknown, so inputs are unbounded above; outputs stay 0. Each iteration also needs a condition value.
+fn infers_if_same_stack_effect() {
+    // Both branches drop one. The result is 2 inputs and 0 outputs.
     let ws = workspace_from_modules(&[(
-        "loop_consume",
+        "if_same",
         r#"
-        proc loop_consume
-            push.1
-            while.true
+        proc if_same
+            if.true
+                drop
+            else
                 drop
             end
         end
@@ -254,9 +281,38 @@ fn infers_while_consuming() {
     )]);
     let cg = CallGraph::build_for_workspace(&ws);
     let sigs = infer_signatures(&ws, &cg);
-    let sig = sigs
-        .signatures
-        .get("loop_consume::loop_consume")
-        .expect("sig");
+    let sig = sigs.signatures.get("if_same::if_same").expect("sig");
+    match sig {
+        ProcSignature::Known {
+            inputs, outputs, ..
+        } => {
+            // One condition plus one value dropped in both branches
+            assert_eq!(inputs.min, 2);
+            assert_eq!(inputs.max, Some(2));
+            assert_eq!(outputs.min, 0);
+            assert_eq!(outputs.max, Some(0));
+        }
+        ProcSignature::Unknown => panic!("expected known signature"),
+    }
+}
+
+#[test]
+fn infers_if_different_stack_effect() {
+    // Branches differ (one drops, one pushes). The signature should be Unknown.
+    let ws = workspace_from_modules(&[(
+        "if_diff",
+        r#"
+        proc if_diff
+            if.true
+                drop
+            else
+                push.1
+            end
+        end
+        "#,
+    )]);
+    let cg = CallGraph::build_for_workspace(&ws);
+    let sigs = infer_signatures(&ws, &cg);
+    let sig = sigs.signatures.get("if_diff::if_diff").expect("sig");
     assert!(matches!(sig, ProcSignature::Unknown));
 }
