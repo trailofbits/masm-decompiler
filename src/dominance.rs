@@ -134,7 +134,10 @@ impl<'a> DomTreeBuilder<'a> {
 
     fn build(mut self) -> DomTree {
         if self.cfg.nodes.is_empty() {
-            return DomTree { idom: Vec::new(), succs: Vec::new() };
+            return DomTree {
+                idom: Vec::new(),
+                succs: Vec::new(),
+            };
         }
 
         self.initial_dfs(0);
@@ -184,7 +187,10 @@ impl<'a> DomTreeBuilder<'a> {
             idom[0] = std::usize::MAX;
         }
 
-        DomTree { idom, succs: dom_tree }
+        DomTree {
+            idom,
+            succs: dom_tree,
+        }
     }
 }
 
@@ -197,7 +203,11 @@ struct DomFrontierBuilder<'a> {
 impl<'a> DomFrontierBuilder<'a> {
     fn new(cfg: &'a Cfg, dom_tree: &'a DomTree) -> Self {
         let n = cfg.nodes.len();
-        Self { cfg, dom_tree, df: vec![Vec::new(); n] }
+        Self {
+            cfg,
+            dom_tree,
+            df: vec![Vec::new(); n],
+        }
     }
 
     fn compute_df(&mut self, n: NodeId) {

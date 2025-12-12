@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use miden_assembly_syntax::ast::{path::PathBuf as MasmPathBuf, Invoke, InvokeKind, InvocationTarget};
+use miden_assembly_syntax::ast::{
+    InvocationTarget, Invoke, InvokeKind, path::PathBuf as MasmPathBuf,
+};
 
 use crate::frontend::{Program, Workspace};
 
@@ -41,7 +43,11 @@ impl CallGraph {
                 .map(|invoke| edge_from_invoke(invoke, program))
                 .collect();
             graph.name_to_id.insert(name.clone(), idx);
-            graph.nodes.push(ProcNode { name, module_path, edges });
+            graph.nodes.push(ProcNode {
+                name,
+                module_path,
+                edges,
+            });
         }
         graph
     }

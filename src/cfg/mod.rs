@@ -6,7 +6,7 @@ use crate::ssa::Stmt;
 use std::collections::HashSet;
 
 mod builder;
-pub use builder::{build_cfg_for_proc, CfgBuildError};
+pub use builder::{CfgBuildError, build_cfg_for_proc};
 
 pub type NodeId = usize;
 
@@ -72,7 +72,10 @@ impl Cfg {
 
     /// Iterator over forward successors (excluding back edges).
     pub fn forward_succs(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
-        self.nodes[node].next.iter().filter_map(|e| if e.back_edge { None } else { Some(e.node) })
+        self.nodes[node]
+            .next
+            .iter()
+            .filter_map(|e| if e.back_edge { None } else { Some(e.node) })
     }
 
     pub fn preds(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
@@ -105,7 +108,10 @@ struct GraphSliceBuilder {
 
 impl GraphSliceBuilder {
     fn dfs(cfg: &Cfg, head: NodeId, targets: HashSet<NodeId>) -> HashSet<NodeId> {
-        let mut performer = GraphSliceBuilder { targets, visited: HashSet::new() };
+        let mut performer = GraphSliceBuilder {
+            targets,
+            visited: HashSet::new(),
+        };
         performer.visit(cfg, head);
         performer.targets
     }

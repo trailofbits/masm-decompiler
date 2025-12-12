@@ -1,5 +1,5 @@
-use miden_decompiler::{
-    cfg::{build_cfg_for_proc, EdgeType},
+use masm_decompiler::{
+    cfg::{EdgeType, build_cfg_for_proc},
     frontend::testing::workspace_from_modules,
 };
 
@@ -42,8 +42,14 @@ fn builds_if_cfg() {
     // Entry block has condition push and two outgoing conditional edges
     assert_eq!(cfg.nodes[0].code.len(), 1);
     assert_eq!(cfg.nodes[0].next.len(), 2);
-    assert!(matches!(cfg.nodes[0].next[0].cond.edge_type, EdgeType::Conditional(_)));
-    assert!(matches!(cfg.nodes[0].next[1].cond.edge_type, EdgeType::Conditional(_)));
+    assert!(matches!(
+        cfg.nodes[0].next[0].cond.edge_type,
+        EdgeType::Conditional(_)
+    ));
+    assert!(matches!(
+        cfg.nodes[0].next[1].cond.edge_type,
+        EdgeType::Conditional(_)
+    ));
     // Join block should have two predecessors
     assert_eq!(cfg.nodes[3].prev.len(), 2);
 }

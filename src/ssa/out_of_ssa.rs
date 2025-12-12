@@ -1,4 +1,7 @@
-use crate::{cfg::Cfg, ssa::{Expr, Stmt}};
+use crate::{
+    cfg::Cfg,
+    ssa::{Expr, Stmt},
+};
 
 /// Remove SSA-specific constructs (phi nodes, subscripts) to produce a simpler IR suitable
 /// for structuring/pretty-printing.
@@ -20,13 +23,34 @@ fn strip_stmt(stmt: &mut Stmt) {
             strip_expr(expr);
         }
         Stmt::Expr(expr) | Stmt::Branch(expr) => strip_expr(expr),
-        Stmt::If { cond, then_body, else_body } => {
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
             strip_expr(cond);
             for s in then_body.iter_mut().chain(else_body.iter_mut()) {
                 strip_stmt(s);
             }
         }
-        Stmt::Switch { expr, cases, default } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            strip_stmt(init);
+            strip_expr(cond);
+            strip_stmt(step);
+            for s in body.iter_mut() {
+                strip_stmt(s);
+            }
+        }
+        Stmt::Switch {
+            expr,
+            cases,
+            default,
+        } => {
             strip_expr(expr);
             for (_, body) in cases {
                 for s in body.iter_mut() {
@@ -37,10 +61,69 @@ fn strip_stmt(stmt: &mut Stmt) {
                 strip_stmt(s);
             }
         }
+        Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => {}
         Stmt::While { cond, body } => {
             strip_expr(cond);
             for s in body.iter_mut() {
                 strip_stmt(s);
+            }
+        }
+        Stmt::Return(vals) => {
+            for v in vals.iter_mut() {
+                v.subscript = 0;
+            }
+        }
+        Stmt::MemLoad(mem) => {
+            for v in mem
+                .address
+                .iter_mut()
+                .chain(mem.outputs.iter_mut())
+            {
+                v.subscript = 0;
+            }
+        }
+        Stmt::MemStore(mem) => {
+            for v in mem
+                .address
+                .iter_mut()
+                .chain(mem.values.iter_mut())
+            {
+                v.subscript = 0;
+            }
+        }
+        Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+            for v in call.args.iter_mut().chain(call.results.iter_mut()) {
+                v.subscript = 0;
+            }
+        }
+        Stmt::AdvLoad(load) => {
+            for v in load.outputs.iter_mut() {
+                v.subscript = 0;
+            }
+        }
+        Stmt::AdvStore(store) => {
+            for v in store.values.iter_mut() {
+                v.subscript = 0;
+            }
+        }
+        Stmt::LocalLoad(load) => {
+            for v in load.outputs.iter_mut() {
+                v.subscript = 0;
+            }
+        }
+        Stmt::LocalStore(store) => {
+            for v in store.values.iter_mut() {
+                v.subscript = 0;
+            }
+        }
+        Stmt::DynCall { args, results } => {
+            for v in args.iter_mut().chain(results.iter_mut()) {
+                v.subscript = 0;
+            }
+        }
+        Stmt::Intrinsic(intr) => {
+            for v in intr.args.iter_mut().chain(intr.results.iter_mut()) {
+                v.subscript = 0;
             }
         }
         Stmt::Phi { var, sources } => {

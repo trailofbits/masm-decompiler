@@ -6,22 +6,28 @@ use crate::{
     ssa::{Expr, Stmt, Var},
 };
 
-use super::used_vars::{used_in_expr, DefUseMap};
+use super::used_vars::{DefUseMap, used_in_expr};
 
 pub fn eliminate_dead_code(cfg: &mut Cfg, def_use: &mut DefUseMap) {
     let (def_map, use_map) = def_use;
-    let mut todo =
-        Vec::from_iter(def_map.keys().filter(|var| is_dead(**var, use_map)).copied());
+    let mut todo = Vec::from_iter(
+        def_map
+            .keys()
+            .filter(|var| is_dead(**var, use_map))
+            .copied(),
+    );
 
     while let Some(var) = todo.pop() {
-        let Some(pos) = def_map.get(&var) else { continue };
+        let Some(pos) = def_map.get(&var) else {
+            continue;
+        };
         let stmt = cfg.stmt_mut(*pos);
         match stmt {
-        Stmt::Assign { expr, .. } => {
-            if can_remove_expr(expr) {
-                for v in used_in_expr(expr) {
-                    if let Some(uses) = use_map.get_mut(&v) {
-                        uses.remove(pos);
+            Stmt::Assign { expr, .. } => {
+                if can_remove_expr(expr) {
+                    for v in used_in_expr(expr) {
+                        if let Some(uses) = use_map.get_mut(&v) {
+                            uses.remove(pos);
                             if is_dead(v, use_map) {
                                 todo.push(v);
                             }
@@ -44,7 +50,33 @@ pub fn eliminate_dead_code(cfg: &mut Cfg, def_use: &mut DefUseMap) {
                 }
                 *stmt = Stmt::Nop;
             }
-            Stmt::If { then_body, else_body, .. } => {
+            Stmt::For {
+                init,
+                cond: _,
+                step,
+                body,
+            } => {
+                for s in [&mut **init, &mut **step].into_iter() {
+                    if let Stmt::Assign { dst, .. } = s {
+                        if is_dead(*dst, use_map) {
+                            todo.push(*dst);
+                        }
+                    }
+                }
+                for s in body.iter_mut() {
+                    if let Stmt::Assign { dst, .. } = s {
+                        if is_dead(*dst, use_map) {
+                            todo.push(*dst);
+                        }
+                    }
+                }
+            }
+            Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => {}
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
                 for s in then_body.iter_mut().chain(else_body.iter_mut()) {
                     if let Stmt::Assign { dst, .. } = s {
                         if is_dead(*dst, use_map) {

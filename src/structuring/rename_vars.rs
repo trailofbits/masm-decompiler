@@ -9,7 +9,10 @@ pub fn apply(code: &mut [Stmt], carriers: &HashSet<(Var, Var)>) {
     let mut next = 0u32;
     let classes = build_carrier_classes(code, carriers);
     for class in classes {
-        let rep = *class.iter().min_by_key(|v| v.index).unwrap_or(&Var::no_sub(next));
+        let rep = *class
+            .iter()
+            .min_by_key(|v| v.index)
+            .unwrap_or(&Var::no_sub(next));
         let target_val = map.get(&rep).copied().unwrap_or_else(|| {
             let v = Var::no_sub(next);
             next += 1;
@@ -32,7 +35,10 @@ fn rename_block(
     // Build equivalence classes from phi connectivity in this block (excluding nested loops).
     let classes = build_carrier_classes(code, carriers);
     for class in classes {
-        let rep = *class.iter().min_by_key(|v| v.index).unwrap_or(&Var::no_sub(*next));
+        let rep = *class
+            .iter()
+            .min_by_key(|v| v.index)
+            .unwrap_or(&Var::no_sub(*next));
         let target_val = map.get(&rep).copied().unwrap_or_else(|| {
             let v = Var::no_sub(*next);
             *next += 1;
@@ -65,24 +71,54 @@ fn rename_stmt(
             });
             *dst = *new_var;
         }
-        Stmt::If { cond, then_body, else_body } => {
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
             rename_expr(cond, map, next);
             for s in then_body.iter_mut().chain(else_body.iter_mut()) {
                 rename_stmt(s, carriers, map, next);
             }
         }
-        Stmt::Switch { expr, cases, default } => {
+        Stmt::Switch {
+            expr,
+            cases,
+            default,
+        } => {
             rename_expr(expr, map, next);
             for (_, body) in cases {
                 rename_block(body, carriers, map, next);
             }
             rename_block(default, carriers, map, next);
         }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            rename_stmt(init, carriers, map, next);
+            rename_expr(cond, map, next);
+            rename_stmt(step, carriers, map, next);
+            rename_block(body, carriers, map, next);
+        }
+        Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => {}
         Stmt::While { cond, body } => {
             rename_expr(cond, map, next);
             // Share the map so loop-carried vars keep the same names; new loop-local
             // vars will get fresh assignments without cloning outer mappings.
             rename_block(body, carriers, map, next);
+        }
+        Stmt::Return(vals) => {
+            for v in vals.iter_mut() {
+                let new = map.entry(*v).or_insert_with(|| {
+                    let v_new = Var::no_sub(*next);
+                    *next += 1;
+                    v_new
+                });
+                *v = *new;
+            }
         }
         Stmt::Phi { var, sources } => {
             // Group phi sources into the same logical variable.
@@ -101,6 +137,96 @@ fn rename_stmt(
         Stmt::Expr(expr) | Stmt::Branch(expr) => rename_expr(expr, map, next),
         Stmt::StackOp(op) => {
             for v in op.pops.iter_mut().chain(op.pushes.iter_mut()) {
+                let new = map.entry(*v).or_insert_with(|| {
+                    let v_new = Var::no_sub(*next);
+                    *next += 1;
+                    v_new
+                });
+                *v = *new;
+            }
+        }
+        Stmt::MemLoad(mem) => {
+            for v in mem.address.iter_mut().chain(mem.outputs.iter_mut()) {
+                let new = map.entry(*v).or_insert_with(|| {
+                    let v_new = Var::no_sub(*next);
+                    *next += 1;
+                    v_new
+                });
+                *v = *new;
+            }
+        }
+        Stmt::MemStore(mem) => {
+            for v in mem.address.iter_mut().chain(mem.values.iter_mut()) {
+                let new = map.entry(*v).or_insert_with(|| {
+                    let v_new = Var::no_sub(*next);
+                    *next += 1;
+                    v_new
+                });
+                *v = *new;
+            }
+        }
+        Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+            for v in call.args.iter_mut().chain(call.results.iter_mut()) {
+                let new = map.entry(*v).or_insert_with(|| {
+                    let v_new = Var::no_sub(*next);
+                    *next += 1;
+                    v_new
+                });
+                *v = *new;
+            }
+        }
+        Stmt::DynCall { args, results } => {
+            for v in args.iter_mut().chain(results.iter_mut()) {
+                let new = map.entry(*v).or_insert_with(|| {
+                    let v_new = Var::no_sub(*next);
+                    *next += 1;
+                    v_new
+                });
+                *v = *new;
+            }
+        }
+        Stmt::Intrinsic(intr) => {
+            for v in intr.args.iter_mut().chain(intr.results.iter_mut()) {
+                let new = map.entry(*v).or_insert_with(|| {
+                    let v_new = Var::no_sub(*next);
+                    *next += 1;
+                    v_new
+                });
+                *v = *new;
+            }
+        }
+        Stmt::AdvLoad(load) => {
+            for v in load.outputs.iter_mut() {
+                let new = map.entry(*v).or_insert_with(|| {
+                    let v_new = Var::no_sub(*next);
+                    *next += 1;
+                    v_new
+                });
+                *v = *new;
+            }
+        }
+        Stmt::AdvStore(store) => {
+            for v in store.values.iter_mut() {
+                let new = map.entry(*v).or_insert_with(|| {
+                    let v_new = Var::no_sub(*next);
+                    *next += 1;
+                    v_new
+                });
+                *v = *new;
+            }
+        }
+        Stmt::LocalLoad(load) => {
+            for v in load.outputs.iter_mut() {
+                let new = map.entry(*v).or_insert_with(|| {
+                    let v_new = Var::no_sub(*next);
+                    *next += 1;
+                    v_new
+                });
+                *v = *new;
+            }
+        }
+        Stmt::LocalStore(store) => {
+            for v in store.values.iter_mut() {
                 let new = map.entry(*v).or_insert_with(|| {
                     let v_new = Var::no_sub(*next);
                     *next += 1;
@@ -167,11 +293,26 @@ fn build_carrier_classes(code: &[Stmt], carriers: &HashSet<(Var, Var)>) -> Vec<H
                         union(parent, *var, *s);
                     }
                 }
+                Stmt::Assign {
+                    dst,
+                    expr: crate::ssa::Expr::BinOp(_, a, _),
+                } => {
+                    if let crate::ssa::Expr::Var(v) = &**a {
+                        union(parent, *dst, *v);
+                    }
+                }
                 // Loop-carried assignment pattern inserted by CFG pass.
-                Stmt::Assign { dst, expr: Expr::Var(v) } => {
+                Stmt::Assign {
+                    dst,
+                    expr: Expr::Var(v),
+                } => {
                     union(parent, *dst, *v);
                 }
-                Stmt::If { then_body, else_body, .. } => {
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
                     walk(then_body, parent);
                     walk(else_body, parent);
                 }
@@ -180,6 +321,12 @@ fn build_carrier_classes(code: &[Stmt], carriers: &HashSet<(Var, Var)>) -> Vec<H
                         walk(body, parent);
                     }
                     walk(default, parent);
+                }
+                Stmt::For {
+                    body, init, step, ..
+                } => {
+                    walk(&[*init.clone(), *step.clone()], parent);
+                    walk(body, parent);
                 }
                 Stmt::While { body, .. } => walk(body, parent),
                 _ => {}

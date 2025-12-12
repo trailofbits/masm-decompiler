@@ -21,6 +21,7 @@ struct Builder {
     cfg: Cfg,
     entry: NodeId,
     next_cond_idx: u32,
+    next_local_id: u32,
 }
 
 impl Builder {
@@ -28,7 +29,12 @@ impl Builder {
         let mut cfg = Cfg::default();
         let entry = cfg.nodes.len();
         cfg.nodes.push(BasicBlock::default());
-        Self { cfg, entry, next_cond_idx: 0 }
+        Self {
+            cfg,
+            entry,
+            next_cond_idx: 0,
+            next_local_id: 0,
+        }
     }
 
     fn finalize(&mut self, exit: NodeId) {
@@ -43,8 +49,16 @@ impl Builder {
     }
 
     fn add_edge(&mut self, from: NodeId, to: NodeId, cond: EdgeCond, back_edge: bool) {
-        self.cfg.nodes[from].next.push(Edge { cond, node: to, back_edge });
-        self.cfg.nodes[to].prev.push(Edge { cond, node: from, back_edge });
+        self.cfg.nodes[from].next.push(Edge {
+            cond,
+            node: to,
+            back_edge,
+        });
+        self.cfg.nodes[to].prev.push(Edge {
+            cond,
+            node: from,
+            back_edge,
+        });
     }
 
     /// Build CFG for a block starting at `current`, returning the last block ID.
@@ -52,9 +66,13 @@ impl Builder {
         for op in block.iter() {
             match op {
                 Op::Inst(inst) => {
-                    self.cfg.nodes[current].code.push(crate::ssa::Stmt::Instr(inst.inner().clone()));
+                    self.cfg.nodes[current]
+                        .code
+                        .push(crate::ssa::Stmt::Instr(inst.inner().clone()));
                 }
-                Op::If { then_blk, else_blk, .. } => {
+                Op::If {
+                    then_blk, else_blk, ..
+                } => {
                     let then_id = self.new_block();
                     let else_id = self.new_block();
                     let join_id = self.new_block();
@@ -64,13 +82,19 @@ impl Builder {
                     self.add_edge(
                         current,
                         then_id,
-                        EdgeCond { expr_index: cond_idx, edge_type: EdgeType::Conditional(true) },
+                        EdgeCond {
+                            expr_index: cond_idx,
+                            edge_type: EdgeType::Conditional(true),
+                        },
                         false,
                     );
                     self.add_edge(
                         current,
                         else_id,
-                        EdgeCond { expr_index: cond_idx, edge_type: EdgeType::Conditional(false) },
+                        EdgeCond {
+                            expr_index: cond_idx,
+                            edge_type: EdgeType::Conditional(false),
+                        },
                         false,
                     );
 
@@ -83,9 +107,7 @@ impl Builder {
                     current = join_id;
                 }
                 Op::Repeat { count, body, .. } => {
-                    for _ in 0..*count {
-                        current = self.build_block(body, current);
-                    }
+                    current = self.build_repeat(*count as u32, body, current);
                 }
                 Op::While { body, .. } => {
                     // Loop structure: current -> body (true), current -> exit (false), body -> current (back edge)
@@ -97,13 +119,19 @@ impl Builder {
                     self.add_edge(
                         current,
                         body_id,
-                        EdgeCond { expr_index: cond_idx, edge_type: EdgeType::Conditional(true) },
+                        EdgeCond {
+                            expr_index: cond_idx,
+                            edge_type: EdgeType::Conditional(true),
+                        },
                         false,
                     );
                     self.add_edge(
                         current,
                         exit_id,
-                        EdgeCond { expr_index: cond_idx, edge_type: EdgeType::Conditional(false) },
+                        EdgeCond {
+                            expr_index: cond_idx,
+                            edge_type: EdgeType::Conditional(false),
+                        },
                         false,
                     );
 
@@ -115,5 +143,57 @@ impl Builder {
             }
         }
         current
+    }
+
+    fn build_repeat(&mut self, count: u32, body: &Block, preheader: NodeId) -> NodeId {
+        let header = self.new_block();
+        let body_id = self.new_block();
+        let exit_id = self.new_block();
+        let local = self.next_local_id;
+        self.next_local_id += 1;
+
+        // Initialize counter in preheader.
+        self.cfg.nodes[preheader]
+            .code
+            .push(crate::ssa::Stmt::RepeatInit { local, count });
+
+        self.add_edge(preheader, header, EdgeCond::unconditional(), false);
+
+        // Header condition.
+        self.cfg.nodes[header]
+            .code
+            .push(crate::ssa::Stmt::RepeatCond { local, count });
+
+        let cond_idx = self.next_cond_idx;
+        self.next_cond_idx += 1;
+        self.add_edge(
+            header,
+            body_id,
+            EdgeCond {
+                expr_index: cond_idx,
+                edge_type: EdgeType::Conditional(true),
+            },
+            false,
+        );
+        self.add_edge(
+            header,
+            exit_id,
+            EdgeCond {
+                expr_index: cond_idx,
+                edge_type: EdgeType::Conditional(false),
+            },
+            false,
+        );
+
+        let body_exit = self.build_block(body, body_id);
+
+        // Counter step at latch.
+        self.cfg.nodes[body_exit]
+            .code
+            .push(crate::ssa::Stmt::RepeatStep { local });
+
+        self.add_edge(body_exit, header, EdgeCond::unconditional(), true);
+
+        exit_id
     }
 }

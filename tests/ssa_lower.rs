@@ -1,11 +1,11 @@
-use miden_decompiler::{
+use masm_decompiler::{
     callgraph::CallGraph,
     cfg::build_cfg_for_proc,
     frontend::testing::workspace_from_modules,
     signature::infer_signatures,
     ssa::{
-        lower::{lower_cfg_to_ssa, lower_proc_to_ssa},
         Expr, Stmt,
+        lower::{lower_cfg_to_ssa, lower_proc_to_ssa},
     },
 };
 
@@ -43,10 +43,15 @@ fn lowers_push_constant_to_assign() {
     let sigs = infer_signatures(&ws, &cg);
     let proc = ws.lookup_proc("const_push::const_push").expect("proc");
     let res = lower_proc_to_ssa(proc, "const_push", &sigs);
-    let has_const = res
-        .code
-        .iter()
-        .any(|s| matches!(s, Stmt::Assign { expr: Expr::Constant(..), .. }));
+    let has_const = res.code.iter().any(|s| {
+        matches!(
+            s,
+            Stmt::Assign {
+                expr: Expr::Constant(..),
+                ..
+            }
+        )
+    });
     assert!(has_const, "code: {:?}", res.code);
 }
 
@@ -64,7 +69,10 @@ fn inserts_exec_unknown_on_dynexec() {
     let sigs = infer_signatures(&ws, &cg);
     let proc = ws.lookup_proc("dyn::dyn").expect("proc");
     let res = lower_proc_to_ssa(proc, "dyn", &sigs);
-    assert!(res.code.iter().any(|s| matches!(s, Stmt::Unknown)));
+    assert!(res
+        .code
+        .iter()
+        .any(|s| matches!(s, Stmt::DynCall { .. } | Stmt::Unknown)));
 }
 
 #[test]
@@ -117,7 +125,7 @@ fn lowers_cfg_with_phi() {
     let sigs = infer_signatures(&ws, &cg);
     let proc = ws.lookup_proc("branch::branch").expect("proc");
     let cfg = build_cfg_for_proc(proc).expect("cfg");
-    let res = lower_cfg_to_ssa(cfg, "branch", &sigs);
+    let res = lower_cfg_to_ssa(cfg, "branch", "branch::branch", &sigs);
     // Expect a phi in the join block
     let has_phi = res
         .cfg
@@ -144,4 +152,46 @@ fn emits_exec_unknown_for_unknown_call() {
     let proc = ws.lookup_proc("caller::caller").expect("proc");
     let res = lower_proc_to_ssa(proc, "caller", &sigs);
     assert!(res.code.iter().any(|s| matches!(s, Stmt::Unknown)));
+}
+
+#[test]
+fn repeat_body_not_unrolled() {
+    let ws = workspace_from_modules(&[(
+        "repeat_only",
+        r#"
+        proc repeat_only
+            repeat.2
+                add
+            end
+        end
+        "#,
+    )]);
+    let cg = CallGraph::build_for_workspace(&ws);
+    let sigs = infer_signatures(&ws, &cg);
+    let proc = ws.lookup_proc("repeat_only::repeat_only").expect("proc");
+    let cfg = build_cfg_for_proc(proc).expect("cfg");
+    let lowered = lower_cfg_to_ssa(cfg, "repeat_only", "repeat_only::repeat_only", &sigs);
+
+    let has_code = lowered.cfg.nodes.iter().any(|bb| !bb.code.is_empty());
+    let no_unknowns = lowered
+        .cfg
+        .nodes
+        .iter()
+        .all(|bb| bb.code.iter().all(|s| !matches!(s, Stmt::Unknown)));
+    let has_loop = lowered
+        .cfg
+        .nodes
+        .iter()
+        .any(|bb| bb.next.iter().any(|e| e.back_edge));
+    assert!(
+        has_code,
+        "all statements eliminated in CFG: {:?}",
+        lowered.cfg
+    );
+    assert!(
+        no_unknowns,
+        "unexpected unknowns after lowering: {:?}",
+        lowered.cfg
+    );
+    assert!(has_loop, "loop body unrolled in CFG: {:?}", lowered.cfg);
 }

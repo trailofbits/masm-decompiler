@@ -1,4 +1,4 @@
-use miden_decompiler::{
+use masm_decompiler::{
     callgraph::CallGraph, frontend::testing::workspace_from_modules, signature::infer_signatures,
     ssa::Stmt, ssa::lower::lower_proc_to_ssa,
 };

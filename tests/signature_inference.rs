@@ -1,4 +1,4 @@
-use miden_decompiler::{
+use masm_decompiler::{
     callgraph::CallGraph,
     frontend::testing::workspace_from_modules,
     signature::{ProcSignature, infer_signatures},
@@ -315,4 +315,30 @@ fn infers_if_different_stack_effect() {
     let sigs = infer_signatures(&ws, &cg);
     let sig = sigs.signatures.get("if_diff::if_diff").expect("sig");
     assert!(matches!(sig, ProcSignature::Unknown));
+}
+
+#[test]
+fn infers_correct_number_of_arguments_for_testz() {
+    let ws = workspace_from_modules(&[(
+        "word",
+        r#"
+        pub proc testz
+            repeat.4
+                dup.3 eq.0
+            end
+            and and and
+        end
+        "#,
+    )]);
+    let cg = CallGraph::build_for_workspace(&ws);
+    let sigs = infer_signatures(&ws, &cg);
+    let sig = sigs.signatures.get("word::testz").expect("sig");
+    match sig {
+        ProcSignature::Known { inputs, .. } => {
+            // testz consumes 4 arguments (1 word)
+            assert_eq!(inputs.min, 4);
+            assert_eq!(inputs.max, Some(4));
+        }
+        ProcSignature::Unknown => panic!("expected known signature"),
+    }
 }

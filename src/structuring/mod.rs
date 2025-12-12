@@ -6,13 +6,13 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     cfg::{Cfg, Edge, EdgeCond, EdgeType, NodeId},
-    dominance::{compute_dom_frontier, DomTree},
+    dominance::DomTree,
     ssa::{BinOp, Constant, Expr, Stmt, UnOp, Var},
 };
 
+mod cond;
 mod rename_vars;
 mod sidefx;
-mod cond;
 mod simplify;
 
 /// Structure a CFG into a single sequence of statements.
@@ -27,9 +27,14 @@ pub fn structure(cfg: Cfg) -> Vec<Stmt> {
     let post_order = InitDfs::dfs(&cfg);
     let next_var = next_var_index(&cfg);
     let dom_tree = DomTree::build(&cfg);
-    let dom_frontier = compute_dom_frontier(&cfg, &dom_tree);
-    let mut structurer =
-        Structurer { cfg, post_order, dom_tree, dom_frontier, expr_map, next_var, carriers };
+    let mut structurer = Structurer {
+        cfg,
+        post_order,
+        dom_tree,
+        expr_map,
+        next_var,
+        carriers,
+    };
     structurer.run()
 }
 
@@ -37,7 +42,6 @@ struct Structurer {
     cfg: Cfg,
     post_order: Vec<usize>,
     dom_tree: DomTree,
-    dom_frontier: Vec<Vec<usize>>,
     expr_map: HashMap<u32, Expr>,
     next_var: u32,
     carriers: HashSet<(Var, Var)>,
@@ -69,7 +73,6 @@ impl Structurer {
                 self.rewire_after_collapse(head, &nodes, region_succs);
             }
         }
-
         let mut out = if self.cfg.nodes.len() > 1 {
             let mut out = Vec::new();
             for bb in self.cfg.nodes.drain(..) {
@@ -86,6 +89,7 @@ impl Structurer {
         sidefx::prune_side_effects(&mut out);
         simplify::apply(&mut out);
         rename_vars::apply(&mut out, &self.carriers);
+        simplify::apply(&mut out);
         out
     }
 
@@ -104,7 +108,10 @@ impl Structurer {
                 if !nodes.contains(&edge.node) {
                     continue;
                 }
-                let pred_cond = reaching_conds.get(&edge.node).cloned().unwrap_or(Expr::True);
+                let pred_cond = reaching_conds
+                    .get(&edge.node)
+                    .cloned()
+                    .unwrap_or(Expr::True);
                 let edge_expr = edge_cond_expr(&edge.cond, &self.expr_map);
                 let incoming =
                     Expr::BinOp(BinOp::And, Box::new(pred_cond), Box::new(edge_expr.clone()));
@@ -141,44 +148,22 @@ impl Structurer {
 
     fn structure_loop(&mut self, head: usize, i: usize) {
         let (nodes, succs) = self.find_loop_region(head);
+        if std::env::var("DEBUG_LOOP").is_ok() {
+            eprintln!(
+                "structure_loop start head {} initial edges {:?}",
+                head, self.cfg.nodes[head].next
+            );
+        }
         let mut exit_map: HashMap<usize, u32> = HashMap::new();
         for (idx, succ) in succs.iter().copied().enumerate() {
             exit_map.insert(succ, idx as u32);
         }
-        let exit_var = if succs.len() > 1 { Some(self.fresh_var()) } else { None };
+        let exit_var = if succs.len() > 1 {
+            Some(self.fresh_var())
+        } else {
+            None
+        };
         self.insert_breaks(&nodes, exit_var.as_ref(), &exit_map, head);
-
-        // Collapse dominated regions inside the loop where possible (acyclic subregions).
-        if nodes.len() > 1 {
-            for j in 0..i {
-                let new_head = self.post_order[j];
-                if !nodes.contains(&new_head) {
-                    continue;
-                }
-
-                let mut new_nodes = self.dom_tree.dominated_by(new_head);
-                new_nodes.retain(|n| nodes.contains(n));
-                if new_nodes.len() == 1 {
-                    continue;
-                }
-
-                let region_succs = self.cfg.region_successors(&new_nodes);
-                if region_succs.len() < 2 {
-                    self.structure_acyclic(new_head, j, &new_nodes);
-                    self.rewire_after_collapse(new_head, &new_nodes, region_succs);
-                }
-            }
-
-            let mut new_nodes = self.dom_tree.dominated_by(head);
-            new_nodes.retain(|n| nodes.contains(n));
-            if new_nodes.len() > 1 {
-                let region_succs = self.cfg.region_successors(&new_nodes);
-                if region_succs.len() < 2 {
-                    self.structure_acyclic(head, i, &new_nodes);
-                    self.rewire_after_collapse(head, &new_nodes, region_succs);
-                }
-            }
-        }
 
         // Build loop body from head + dominated nodes within the loop.
         let mut body_nodes: Vec<_> = self.post_order[..=i]
@@ -193,12 +178,27 @@ impl Structurer {
             body_code.extend(std::mem::take(&mut self.cfg.nodes[n].code));
         }
 
-        let cond = self.expr_map.get(&(head as u32)).cloned().unwrap_or(Expr::True);
+        if std::env::var("DEBUG_LOOP").is_ok() {
+            eprintln!(
+                "loop head {} nodes {:?} edges {:?}",
+                head, nodes, self.cfg.nodes[head].next
+            );
+        }
+        let cond = self.cfg.nodes[head]
+            .next
+            .iter()
+            .find(|e| matches!(e.cond.edge_type, EdgeType::Conditional(true)))
+            .map(|edge| edge_cond_expr(&edge.cond, &self.expr_map))
+            .unwrap_or(Expr::True);
+        if std::env::var("DEBUG_LOOP").is_ok() {
+            eprintln!(
+                "structure_loop head {} cond {:?} expr_map {:?}",
+                head, cond, self.expr_map
+            );
+        }
         let mut new_code = Vec::new();
         if let Some(exit_var) = exit_var {
-            let default_idx = self
-                .cfg
-                .nodes[head]
+            let default_idx = self.cfg.nodes[head]
                 .next
                 .iter()
                 .find(|e| !e.back_edge && !nodes.contains(&e.node))
@@ -209,7 +209,10 @@ impl Structurer {
                 expr: Expr::Constant(Constant::Felt(default_idx as u64)),
             });
         }
-        new_code.push(Stmt::While { cond, body: body_code });
+        new_code.push(Stmt::While {
+            cond,
+            body: body_code,
+        });
 
         if let Some(exit_var) = exit_var {
             let mut dispatch = self.build_exit_dispatch(exit_var, &succs);
@@ -219,7 +222,9 @@ impl Structurer {
         self.cfg.nodes[head].code = new_code;
 
         // Remove edges to successors outside the loop to avoid reprocessing.
-        self.cfg.nodes[head].next.retain(|e| nodes.contains(&e.node) || succs.contains(&e.node));
+        self.cfg.nodes[head]
+            .next
+            .retain(|e| nodes.contains(&e.node) || succs.contains(&e.node));
     }
 
     fn build_exit_dispatch(&mut self, exit_var: Var, succs: &HashSet<usize>) -> Vec<Stmt> {
@@ -248,7 +253,11 @@ impl Structurer {
             .map(|(idx, code)| (Constant::Felt(idx as u64), code))
             .collect();
 
-        vec![Stmt::Switch { expr: Expr::Var(exit_var), cases, default: Vec::new() }]
+        vec![Stmt::Switch {
+            expr: Expr::Var(exit_var),
+            cases,
+            default: Vec::new(),
+        }]
     }
 
     fn find_loop_region(&self, head: usize) -> (HashSet<usize>, HashSet<usize>) {
@@ -258,38 +267,27 @@ impl Structurer {
             .filter(|e| e.back_edge)
             .map(|e| e.node)
             .collect();
-        let mut loop_nodes = self.cfg.graph_slice(head, latch_nodes);
+
+        let mut loop_nodes: HashSet<usize> = HashSet::new();
         loop_nodes.insert(head);
-
-        let mut loop_succs: HashSet<usize> = self.cfg.region_successors(&loop_nodes);
-        if let Some(df) = self.dom_frontier.get(head) {
-            loop_succs.extend(df.iter().copied());
-        }
-
-        while loop_succs.len() > 1 {
-            let mut added_any = false;
-            let mut new_succs = HashSet::new();
-            for succ in loop_succs.clone() {
-                if self.cfg.nodes[succ].prev.iter().all(|e| loop_nodes.contains(&e.node)) {
-                    loop_nodes.insert(succ);
-                    added_any = true;
-                    for s in self.cfg.nodes[succ].next.iter().map(|e| e.node) {
-                        if !loop_nodes.contains(&s) {
-                            new_succs.insert(s);
-                        }
+        let mut stack: Vec<usize> = latch_nodes.iter().copied().collect();
+        while let Some(n) = stack.pop() {
+            if loop_nodes.insert(n) {
+                for pred in self.cfg.preds(n) {
+                    if pred == head || self.dom_tree.dominates_strictly(head, pred) {
+                        stack.push(pred);
                     }
                 }
             }
-            if !added_any {
-                break;
-            }
-            loop_succs = new_succs;
-            if let Some(df) = self.dom_frontier.get(head) {
-                loop_succs.extend(df.iter().copied());
-            }
         }
 
-        loop_succs.retain(|s| !loop_nodes.contains(s));
+        let loop_succs: HashSet<usize> = self.cfg.region_successors(&loop_nodes);
+        if std::env::var("DEBUG_LOOP").is_ok() {
+            eprintln!(
+                "graph_slice head {} loop_nodes {:?} loop_succs {:?}",
+                head, loop_nodes, loop_succs
+            );
+        }
         (loop_nodes, loop_succs)
     }
 
@@ -335,7 +333,11 @@ impl Structurer {
                 if matches!(edge.cond.edge_type, EdgeType::Unconditional) {
                     code.extend(break_stmts);
                 } else {
-                    code.push(Stmt::If { cond: cond_expr, then_body: break_stmts, else_body: Vec::new() });
+                    code.push(Stmt::If {
+                        cond: cond_expr,
+                        then_body: break_stmts,
+                        else_body: Vec::new(),
+                    });
                 }
             }
             self.cfg.nodes[n].next = new_edges;
@@ -358,7 +360,9 @@ impl Structurer {
                 .iter()
                 .any(|edge| edge.back_edge && nodes.contains(&edge.node));
 
-            self.cfg.nodes[succ].prev.retain(|e| !nodes.contains(&e.node));
+            self.cfg.nodes[succ]
+                .prev
+                .retain(|e| !nodes.contains(&e.node));
             self.cfg.nodes[succ].prev.push(Edge {
                 cond: EdgeCond::unconditional(),
                 node: head,
@@ -394,7 +398,10 @@ fn edge_cond_expr(cond: &EdgeCond, expr_map: &HashMap<u32, Expr>) -> Expr {
     match cond.edge_type {
         EdgeType::Unconditional => Expr::True,
         EdgeType::Conditional(expect_true) => {
-            let base = expr_map.get(&cond.expr_index).cloned().unwrap_or(Expr::Unknown);
+            let base = expr_map
+                .get(&cond.expr_index)
+                .cloned()
+                .unwrap_or(Expr::Unknown);
             if expect_true {
                 base
             } else {
@@ -414,8 +421,10 @@ impl InitDfs {
         if cfg.nodes.is_empty() {
             return Vec::new();
         }
-        let mut performer =
-            InitDfs { post_order: Vec::with_capacity(cfg.nodes.len()), visited: HashSet::new() };
+        let mut performer = InitDfs {
+            post_order: Vec::with_capacity(cfg.nodes.len()),
+            visited: HashSet::new(),
+        };
         performer.visited.insert(0);
         performer.visit(cfg, 0);
         performer.post_order
@@ -442,14 +451,59 @@ fn next_var_index(cfg: &Cfg) -> u32 {
 }
 
 fn scan_stmt(stmt: &Stmt, max: &mut u32) {
-        match stmt {
-            Stmt::Assign { dst, expr } => {
-                *max = (*max).max(dst.index);
-                scan_expr(expr, max);
-            }
+    match stmt {
+        Stmt::Assign { dst, expr } => {
+            *max = (*max).max(dst.index);
+            scan_expr(expr, max);
+        }
         Stmt::Expr(expr) | Stmt::Branch(expr) => scan_expr(expr, max),
         Stmt::StackOp(op) => {
             for v in op.pops.iter().chain(op.pushes.iter()) {
+                *max = (*max).max(v.index);
+            }
+        }
+        Stmt::AdvLoad(load) => {
+            for v in load.outputs.iter() {
+                *max = (*max).max(v.index);
+            }
+        }
+        Stmt::AdvStore(store) => {
+            for v in store.values.iter() {
+                *max = (*max).max(v.index);
+            }
+        }
+        Stmt::LocalLoad(load) => {
+            for v in load.outputs.iter() {
+                *max = (*max).max(v.index);
+            }
+        }
+        Stmt::LocalStore(store) => {
+            for v in store.values.iter() {
+                *max = (*max).max(v.index);
+            }
+        }
+        Stmt::MemLoad(mem) => {
+            for v in mem.address.iter().chain(mem.outputs.iter()) {
+                *max = (*max).max(v.index);
+            }
+        }
+        Stmt::MemStore(mem) => {
+            for v in mem.address.iter().chain(mem.values.iter()) {
+                *max = (*max).max(v.index);
+            }
+        }
+        Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+            for v in call.args.iter().chain(call.results.iter()) {
+                *max = (*max).max(v.index);
+            }
+        }
+        Stmt::DynCall { args, results } => {
+            for v in args.iter().chain(results.iter()) {
+                *max = (*max).max(v.index);
+            }
+        }
+        Stmt::Intrinsic(intr) => {
+            for v in intr.args.iter().chain(intr.results.iter()) {
                 *max = (*max).max(v.index);
             }
         }
@@ -459,13 +513,21 @@ fn scan_stmt(stmt: &Stmt, max: &mut u32) {
                 *max = (*max).max(s.index);
             }
         }
-        Stmt::If { cond, then_body, else_body } => {
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
             scan_expr(cond, max);
             for s in then_body.iter().chain(else_body.iter()) {
                 scan_stmt(s, max);
             }
         }
-        Stmt::Switch { expr, cases, default } => {
+        Stmt::Switch {
+            expr,
+            cases,
+            default,
+        } => {
             scan_expr(expr, max);
             for (_, body) in cases {
                 for s in body {
@@ -476,10 +538,29 @@ fn scan_stmt(stmt: &Stmt, max: &mut u32) {
                 scan_stmt(s, max);
             }
         }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            scan_stmt(init, max);
+            scan_expr(cond, max);
+            scan_stmt(step, max);
+            for s in body {
+                scan_stmt(s, max);
+            }
+        }
+        Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => {}
         Stmt::While { cond, body } => {
             scan_expr(cond, max);
             for s in body {
                 scan_stmt(s, max);
+            }
+        }
+        Stmt::Return(vals) => {
+            for v in vals {
+                *max = (*max).max(v.index);
             }
         }
         Stmt::Instr(_) | Stmt::Unknown | Stmt::Nop | Stmt::Break | Stmt::Continue => {}
@@ -519,10 +600,17 @@ fn hoist_shared_conditions(code: &mut Vec<Stmt>, next_var: &mut u32) {
         let var = *base_vars.entry(base_key.clone()).or_insert_with(|| {
             let v = Var::no_sub(*next_var);
             *next_var += 1;
-            hoisted_assigns.push(Stmt::Assign { dst: v, expr: base.clone() });
+            hoisted_assigns.push(Stmt::Assign {
+                dst: v,
+                expr: base.clone(),
+            });
             v
         });
-        let expr = if neg { Expr::Unary(UnOp::Not, Box::new(Expr::Var(var))) } else { Expr::Var(var) };
+        let expr = if neg {
+            Expr::Unary(UnOp::Not, Box::new(Expr::Var(var)))
+        } else {
+            Expr::Var(var)
+        };
         replacements.insert(key, expr);
     }
 
@@ -538,12 +626,20 @@ fn hoist_shared_conditions(code: &mut Vec<Stmt>, next_var: &mut u32) {
 fn collect_conds(code: &[Stmt], counts: &mut HashMap<String, (Expr, bool, u32)>) {
     for stmt in code {
         match stmt {
-            Stmt::If { cond, then_body, else_body } => {
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
                 bump_cond(cond, counts);
                 collect_conds(then_body, counts);
                 collect_conds(else_body, counts);
             }
-            Stmt::Switch { expr, cases, default } => {
+            Stmt::Switch {
+                expr,
+                cases,
+                default,
+            } => {
                 bump_cond(expr, counts);
                 for (_, body) in cases {
                     collect_conds(body, counts);
@@ -581,12 +677,20 @@ fn base_cond(expr: &Expr) -> Option<(Expr, bool)> {
 fn apply_replacements(code: &mut [Stmt], replacements: &HashMap<String, Expr>) {
     for stmt in code {
         match stmt {
-            Stmt::If { cond, then_body, else_body } => {
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
                 replace_cond_expr(cond, replacements);
                 apply_replacements(then_body, replacements);
                 apply_replacements(else_body, replacements);
             }
-            Stmt::Switch { expr, cases, default } => {
+            Stmt::Switch {
+                expr,
+                cases,
+                default,
+            } => {
                 replace_cond_expr(expr, replacements);
                 for (_, body) in cases {
                     apply_replacements(body, replacements);
@@ -661,7 +765,10 @@ fn lower_loop_phis_with_cfg(cfg: &mut Cfg) -> HashSet<(Var, Var)> {
                     for p in preds.iter() {
                         let p_node = p.node;
                         let is_back = p.back_edge;
-                        if block_defs.get(p_node).map_or(false, |defs| defs.contains(&src)) {
+                        if block_defs
+                            .get(p_node)
+                            .map_or(false, |defs| defs.contains(&src))
+                        {
                             if is_back {
                                 if update_src.is_none() {
                                     update_src = Some((src, p_node));
@@ -687,12 +794,18 @@ fn lower_loop_phis_with_cfg(cfg: &mut Cfg) -> HashSet<(Var, Var)> {
                 }
 
                 if let (Some(init), Some((upd, upd_pred))) = (init_src, update_src) {
-                    init_stmts.push(Stmt::Assign { dst: var, expr: Expr::Var(init) });
+                    init_stmts.push(Stmt::Assign {
+                        dst: var,
+                        expr: Expr::Var(init),
+                    });
                     carrier_pairs.insert((var, init));
                     pending_updates
                         .entry(upd_pred)
                         .or_default()
-                        .push(Stmt::Assign { dst: var, expr: Expr::Var(upd) });
+                        .push(Stmt::Assign {
+                            dst: var,
+                            expr: Expr::Var(upd),
+                        });
                     carrier_pairs.insert((var, upd));
                     continue;
                 }
@@ -732,10 +845,32 @@ fn collect_defs_shallow(body: &[Stmt]) -> HashSet<Var> {
             Stmt::StackOp(op) => {
                 defs.extend(op.pushes.iter().copied());
             }
-            Stmt::Phi { var, .. } => {
-                defs.insert(*var);
+            Stmt::MemLoad(mem) => {
+                defs.extend(mem.outputs.iter().copied());
             }
-            Stmt::If { then_body, else_body, .. } => {
+        Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+            defs.extend(call.results.iter().copied());
+        }
+        Stmt::DynCall { results, .. } => {
+            defs.extend(results.iter().copied());
+        }
+        Stmt::Intrinsic(intr) => {
+            defs.extend(intr.results.iter().copied());
+        }
+        Stmt::AdvLoad(load) => {
+            defs.extend(load.outputs.iter().copied());
+        }
+        Stmt::LocalLoad(load) => {
+            defs.extend(load.outputs.iter().copied());
+        }
+        Stmt::Phi { var, .. } => {
+            defs.insert(*var);
+        }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
                 defs.extend(collect_defs_shallow(then_body));
                 defs.extend(collect_defs_shallow(else_body));
             }
@@ -753,14 +888,21 @@ fn collect_defs_shallow(body: &[Stmt]) -> HashSet<Var> {
     defs
 }
 
-
 fn normalize_branches(code: &mut Vec<Stmt>) {
     for stmt in code.iter_mut() {
         match stmt {
             Stmt::Branch(expr) => {
-                *stmt = Stmt::If { cond: expr.clone(), then_body: Vec::new(), else_body: Vec::new() };
+                *stmt = Stmt::If {
+                    cond: expr.clone(),
+                    then_body: Vec::new(),
+                    else_body: Vec::new(),
+                };
             }
-            Stmt::If { then_body, else_body, .. } => {
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
                 normalize_branches(then_body);
                 normalize_branches(else_body);
             }

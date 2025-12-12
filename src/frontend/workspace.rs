@@ -61,7 +61,9 @@ impl Workspace {
                 let current_module = as_str(prog.module_path()).to_string();
                 for proc in prog.procedures() {
                     for invoke in proc.invoked() {
-                        if let Some(module_path) = invocation_module_path(&invoke.target, &current_module) {
+                        if let Some(module_path) =
+                            invocation_module_path(&invoke.target, &current_module)
+                        {
                             if !self.index.contains_key(&module_path) {
                                 to_load.push(module_path);
                             }
@@ -163,7 +165,10 @@ pub fn find_module_file(module_path: &str, roots: &[LibraryRoot]) -> Option<FsPa
     None
 }
 
-fn invocation_module_path(target: &miden_assembly_syntax::ast::InvocationTarget, current: &str) -> Option<String> {
+fn invocation_module_path(
+    target: &miden_assembly_syntax::ast::InvocationTarget,
+    current: &str,
+) -> Option<String> {
     use miden_assembly_syntax::ast::InvocationTarget::*;
     match target {
         MastRoot(_) => None,
@@ -176,7 +181,7 @@ fn invocation_module_path(target: &miden_assembly_syntax::ast::InvocationTarget,
             } else {
                 Some(module)
             }
-        },
+        }
     }
 }
 

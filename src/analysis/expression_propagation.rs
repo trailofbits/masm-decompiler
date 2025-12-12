@@ -5,7 +5,7 @@ use crate::{
     ssa::{Expr, Stmt, Var},
 };
 
-use super::used_vars::{defined_var, used_in_expr, DefUseMap};
+use super::used_vars::{DefUseMap, defined_var, used_in_expr};
 
 #[derive(Debug, Clone, Copy)]
 struct ExprProperties {
@@ -15,7 +15,10 @@ struct ExprProperties {
 
 impl ExprProperties {
     fn compute(expr: &Expr) -> Self {
-        Self { contains_unknown: contains_unknown(expr), complexity: expr.complexity() }
+        Self {
+            contains_unknown: contains_unknown(expr),
+            complexity: expr.complexity(),
+        }
     }
 
     fn can_propagate_over_expr(self, expr: &Expr) -> bool {
@@ -30,23 +33,58 @@ impl ExprProperties {
             Stmt::Assign { expr, .. } | Stmt::Expr(expr) | Stmt::Branch(expr) => {
                 self.can_propagate_over_expr(expr)
             }
-            Stmt::If { cond, then_body, else_body } => {
+            Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => false,
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
                 self.can_propagate_over_expr(cond)
                     && then_body.iter().all(|s| self.can_propagate_over_stmt(s))
                     && else_body.iter().all(|s| self.can_propagate_over_stmt(s))
             }
-            Stmt::Switch { expr, cases, default } => {
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => {
+                self.can_propagate_over_stmt(init)
+                    && self.can_propagate_over_expr(cond)
+                    && self.can_propagate_over_stmt(step)
+                    && body.iter().all(|s| self.can_propagate_over_stmt(s))
+            }
+            Stmt::Switch {
+                expr,
+                cases,
+                default,
+            } => {
                 self.can_propagate_over_expr(expr)
-                    && cases.iter().all(|(_, body)| body.iter().all(|s| self.can_propagate_over_stmt(s)))
+                    && cases
+                        .iter()
+                        .all(|(_, body)| body.iter().all(|s| self.can_propagate_over_stmt(s)))
                     && default.iter().all(|s| self.can_propagate_over_stmt(s))
             }
             Stmt::While { cond, body } => {
                 self.can_propagate_over_expr(cond)
                     && body.iter().all(|s| self.can_propagate_over_stmt(s))
             }
-            Stmt::Break => true,
+            Stmt::Break | Stmt::Return(_) => true,
             Stmt::Phi { .. } | Stmt::Nop => true,
-            Stmt::Instr(_) | Stmt::StackOp(_) | Stmt::Unknown => false,
+            Stmt::Instr(_)
+            | Stmt::StackOp(_)
+            | Stmt::AdvLoad(_)
+            | Stmt::AdvStore(_)
+            | Stmt::LocalLoad(_)
+            | Stmt::LocalStore(_)
+            | Stmt::MemLoad(_)
+            | Stmt::MemStore(_)
+            | Stmt::Call(_)
+            | Stmt::Exec(_)
+            | Stmt::SysCall(_)
+            | Stmt::DynCall { .. }
+            | Stmt::Intrinsic(_)
+            | Stmt::Unknown => false,
             Stmt::Continue => true,
         }
     }
@@ -61,7 +99,9 @@ pub fn propagate_expressions(cfg: &mut Cfg, def_use: &mut DefUseMap) {
     while changed {
         changed = false;
         for (var, def_pos) in defs.iter().copied() {
-            let Some(uses) = use_map.get(var) else { continue };
+            let Some(uses) = use_map.get(var) else {
+                continue;
+            };
             if uses.is_empty() {
                 continue;
             }
@@ -94,7 +134,10 @@ pub fn propagate_expressions(cfg: &mut Cfg, def_use: &mut DefUseMap) {
             }
 
             for v in used_in_expr(&def_expr) {
-                use_map.entry(v).or_default().extend(processed.iter().copied());
+                use_map
+                    .entry(v)
+                    .or_default()
+                    .extend(processed.iter().copied());
             }
         }
     }
@@ -111,9 +154,26 @@ fn can_propagate(
     let use_stmt = cfg.stmt(use_pos);
     match use_stmt {
         Stmt::Phi { .. } => return false,
-        Stmt::StackOp(_) | Stmt::Instr(_) | Stmt::Unknown => return false,
+        Stmt::StackOp(_)
+        | Stmt::MemLoad(_)
+        | Stmt::MemStore(_)
+        | Stmt::AdvLoad(_)
+        | Stmt::AdvStore(_)
+        | Stmt::LocalLoad(_)
+        | Stmt::LocalStore(_)
+        | Stmt::Call(_)
+        | Stmt::Exec(_)
+        | Stmt::SysCall(_)
+        | Stmt::DynCall { .. }
+        | Stmt::Intrinsic(_)
+        | Stmt::Instr(_)
+        | Stmt::Unknown => return false,
+        Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => {
+            return false;
+        }
         Stmt::If { .. } | Stmt::While { .. } | Stmt::Switch { .. } => return false,
-        Stmt::Break | Stmt::Continue => return false,
+        Stmt::For { .. } => return false,
+        Stmt::Break | Stmt::Continue | Stmt::Return(_) => return false,
         Stmt::Assign { .. } | Stmt::Expr(_) | Stmt::Branch(_) | Stmt::Nop => {}
     }
 
@@ -129,7 +189,10 @@ fn can_propagate(
         return false;
     }
 
-    let used_vars: HashSet<_> = used_in_expr(def_expr).into_iter().map(|v| v.index).collect();
+    let used_vars: HashSet<_> = used_in_expr(def_expr)
+        .into_iter()
+        .map(|v| v.index)
+        .collect();
 
     if def_pos.node == use_pos.node {
         let code = &cfg.nodes[def_pos.node].code[def_pos.instr..use_pos.instr];
@@ -162,11 +225,7 @@ fn can_propagate(
     true
 }
 
-fn can_propagate_over(
-    code: &[Stmt],
-    used_vars: &HashSet<u32>,
-    properties: ExprProperties,
-) -> bool {
+fn can_propagate_over(code: &[Stmt], used_vars: &HashSet<u32>, properties: ExprProperties) -> bool {
     for stmt in code {
         if let Some(def) = defined_var(stmt) {
             if used_vars.contains(&def.index) {
@@ -186,13 +245,35 @@ fn replace_all(stmt: &mut Stmt, var: Var, with: &Expr) {
         Stmt::Assign { expr, .. } | Stmt::Expr(expr) | Stmt::Branch(expr) => {
             replace_in_expr(expr, var, with)
         }
-        Stmt::If { cond, then_body, else_body } => {
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
             replace_in_expr(cond, var, with);
             for s in then_body.iter_mut().chain(else_body.iter_mut()) {
                 replace_all(s, var, with);
             }
         }
-        Stmt::Switch { expr, cases, default } => {
+        Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => {}
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            replace_all(init, var, with);
+            replace_in_expr(cond, var, with);
+            replace_all(step, var, with);
+            for s in body.iter_mut() {
+                replace_all(s, var, with);
+            }
+        }
+        Stmt::Switch {
+            expr,
+            cases,
+            default,
+        } => {
             replace_in_expr(expr, var, with);
             for (_, body) in cases.iter_mut() {
                 for s in body.iter_mut() {
@@ -209,6 +290,14 @@ fn replace_all(stmt: &mut Stmt, var: Var, with: &Expr) {
                 replace_all(s, var, with);
             }
         }
+        Stmt::AdvLoad(_) | Stmt::AdvStore(_) | Stmt::LocalLoad(_) | Stmt::LocalStore(_) => {}
+        Stmt::Return(vals) => {
+            for v in vals.iter_mut() {
+                if *v == var {
+                    *v = var;
+                }
+            }
+        }
         Stmt::Phi { sources, .. } => {
             for src in sources.iter_mut() {
                 if *src == var {
@@ -217,7 +306,19 @@ fn replace_all(stmt: &mut Stmt, var: Var, with: &Expr) {
                 }
             }
         }
-        Stmt::Break | Stmt::Continue | Stmt::Instr(_) | Stmt::StackOp(_) | Stmt::Unknown | Stmt::Nop => {}
+        Stmt::Break
+        | Stmt::Continue
+        | Stmt::Instr(_)
+        | Stmt::StackOp(_)
+        | Stmt::MemLoad(_)
+        | Stmt::MemStore(_)
+        | Stmt::Call(_)
+        | Stmt::Exec(_)
+        | Stmt::SysCall(_)
+        | Stmt::DynCall { .. }
+        | Stmt::Intrinsic(_)
+        | Stmt::Unknown
+        | Stmt::Nop => {}
     }
 }
 
@@ -241,21 +342,63 @@ fn count_var_occ(stmt: &Stmt, var: Var) -> u32 {
         Stmt::Assign { expr, .. } | Stmt::Expr(expr) | Stmt::Branch(expr) => {
             count_var_occ_expr(expr, var)
         }
-        Stmt::If { cond, then_body, else_body } => {
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
             count_var_occ_expr(cond, var)
                 + then_body.iter().map(|s| count_var_occ(s, var)).sum::<u32>()
                 + else_body.iter().map(|s| count_var_occ(s, var)).sum::<u32>()
         }
-        Stmt::Switch { expr, cases, default } => {
+        Stmt::Switch {
+            expr,
+            cases,
+            default,
+        } => {
             count_var_occ_expr(expr, var)
-                + cases.iter().map(|(_, body)| body.iter().map(|s| count_var_occ(s, var)).sum::<u32>()).sum::<u32>()
+                + cases
+                    .iter()
+                    .map(|(_, body)| body.iter().map(|s| count_var_occ(s, var)).sum::<u32>())
+                    .sum::<u32>()
                 + default.iter().map(|s| count_var_occ(s, var)).sum::<u32>()
         }
         Stmt::While { cond, body } => {
             count_var_occ_expr(cond, var) + body.iter().map(|s| count_var_occ(s, var)).sum::<u32>()
         }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            count_var_occ(init, var)
+                + count_var_occ_expr(cond, var)
+                + count_var_occ(step, var)
+                + body.iter().map(|s| count_var_occ(s, var)).sum::<u32>()
+        }
+        Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => 0,
         Stmt::Phi { sources, .. } => sources.iter().filter(|s| **s == var).count() as u32,
         Stmt::StackOp(op) => op.pops.iter().filter(|v| **v == var).count() as u32,
+        Stmt::MemLoad(mem) => mem.address.iter().filter(|v| **v == var).count() as u32,
+        Stmt::MemStore(mem) => mem
+            .address
+            .iter()
+            .chain(mem.values.iter())
+            .filter(|v| **v == var)
+            .count() as u32,
+        Stmt::AdvLoad(_) => 0,
+        Stmt::AdvStore(store) => store.values.iter().filter(|v| **v == var).count() as u32,
+        Stmt::LocalLoad(_) => 0,
+        Stmt::LocalStore(store) => store.values.iter().filter(|v| **v == var).count() as u32,
+        Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => call
+            .args
+            .iter()
+            .filter(|v| **v == var)
+            .count() as u32,
+        Stmt::DynCall { args, .. } => args.iter().filter(|v| **v == var).count() as u32,
+        Stmt::Intrinsic(intr) => intr.args.iter().filter(|v| **v == var).count() as u32,
+        Stmt::Return(vals) => vals.iter().filter(|v| **v == var).count() as u32,
         Stmt::Break | Stmt::Continue => 0,
         Stmt::Instr(_) | Stmt::Unknown | Stmt::Nop => 0,
     }
@@ -279,20 +422,59 @@ fn count_var_occ_expr(expr: &Expr, var: Var) -> u32 {
 fn stmt_complexity(stmt: &Stmt) -> u32 {
     match stmt {
         Stmt::Assign { expr, .. } | Stmt::Expr(expr) | Stmt::Branch(expr) => expr.complexity(),
-        Stmt::If { cond, then_body, else_body } => {
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
             cond.complexity()
                 + then_body.iter().map(stmt_complexity).sum::<u32>()
                 + else_body.iter().map(stmt_complexity).sum::<u32>()
         }
-        Stmt::Switch { expr, cases, default } => {
+        Stmt::Switch {
+            expr,
+            cases,
+            default,
+        } => {
             expr.complexity()
-                + cases.iter().map(|(_, body)| body.iter().map(stmt_complexity).sum::<u32>()).sum::<u32>()
+                + cases
+                    .iter()
+                    .map(|(_, body)| body.iter().map(stmt_complexity).sum::<u32>())
+                    .sum::<u32>()
                 + default.iter().map(stmt_complexity).sum::<u32>()
         }
-        Stmt::While { cond, body } => cond.complexity() + body.iter().map(stmt_complexity).sum::<u32>(),
+        Stmt::While { cond, body } => {
+            cond.complexity() + body.iter().map(stmt_complexity).sum::<u32>()
+        }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            stmt_complexity(init)
+                + cond.complexity()
+                + stmt_complexity(step)
+                + body.iter().map(stmt_complexity).sum::<u32>()
+        }
+        Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => 0,
         Stmt::Phi { .. } | Stmt::Nop => 0,
+        Stmt::Return(_) => 1,
         Stmt::Break | Stmt::Continue => 1,
-        Stmt::Instr(_) | Stmt::StackOp(_) | Stmt::Unknown => 10,
+        Stmt::Instr(_)
+        | Stmt::StackOp(_)
+        | Stmt::AdvLoad(_)
+        | Stmt::AdvStore(_)
+        | Stmt::LocalLoad(_)
+        | Stmt::LocalStore(_)
+        | Stmt::MemLoad(_)
+        | Stmt::MemStore(_)
+        | Stmt::Call(_)
+        | Stmt::Exec(_)
+        | Stmt::SysCall(_)
+        | Stmt::DynCall { .. }
+        | Stmt::Intrinsic(_)
+        | Stmt::Unknown => 10,
     }
 }
 

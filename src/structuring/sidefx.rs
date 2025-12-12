@@ -5,7 +5,11 @@ pub fn prune_nops(code: &mut Vec<Stmt>) {
     let mut i = 0;
     while i < code.len() {
         match &mut code[i] {
-            Stmt::If { then_body, else_body, .. } => {
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
                 prune_nops(then_body);
                 prune_nops(else_body);
             }
@@ -15,6 +19,7 @@ pub fn prune_nops(code: &mut Vec<Stmt>) {
                 }
                 prune_nops(default);
             }
+            Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => {}
             Stmt::While { body, .. } => prune_nops(body),
             _ => {}
         }
@@ -31,10 +36,31 @@ pub fn prune_side_effects(code: &mut Vec<Stmt>) {
     let mut i = 0;
     while i < code.len() {
         match &mut code[i] {
-            Stmt::If { cond, then_body, else_body } => {
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => {
+                prune_side_effects(&mut vec![init.as_mut().clone()]);
+                prune_side_effects(&mut vec![step.as_mut().clone()]);
+                prune_side_effects(body);
+                if block_side_effect_free(body) && is_side_effect_free(cond) {
+                    code.remove(i);
+                    continue;
+                }
+            }
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
                 prune_side_effects(then_body);
                 prune_side_effects(else_body);
-                if block_side_effect_free(then_body) && block_side_effect_free(else_body) && is_side_effect_free(cond) {
+                if block_side_effect_free(then_body)
+                    && block_side_effect_free(else_body)
+                    && is_side_effect_free(cond)
+                {
                     code.remove(i);
                     continue;
                 }
@@ -55,7 +81,11 @@ pub fn prune_side_effects(code: &mut Vec<Stmt>) {
                     continue;
                 }
             }
-            Stmt::Switch { expr, cases, default } => {
+            Stmt::Switch {
+                expr,
+                cases,
+                default,
+            } => {
                 for (_, body) in cases.iter_mut() {
                     prune_side_effects(body);
                 }
@@ -68,7 +98,9 @@ pub fn prune_side_effects(code: &mut Vec<Stmt>) {
                     continue;
                 }
                 if let Some(sel) = const_value(expr) {
-                    if let Some((_, body)) = cases.iter().find(|(c, _)| const_value_expr(c) == Some(sel)) {
+                    if let Some((_, body)) =
+                        cases.iter().find(|(c, _)| const_value_expr(c) == Some(sel))
+                    {
                         let body = body.clone();
                         code.remove(i);
                         code.splice(i..i, body);
@@ -83,7 +115,10 @@ pub fn prune_side_effects(code: &mut Vec<Stmt>) {
                         continue;
                     }
                 }
-                if cases.iter().all(|(_, body)| body.is_empty()) && default.is_empty() && is_side_effect_free(expr) {
+                if cases.iter().all(|(_, body)| body.is_empty())
+                    && default.is_empty()
+                    && is_side_effect_free(expr)
+                {
                     code.remove(i);
                     continue;
                 }
@@ -95,6 +130,7 @@ pub fn prune_side_effects(code: &mut Vec<Stmt>) {
                     continue;
                 }
             }
+            Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => {}
             _ => {}
         }
         i += 1;
@@ -138,14 +174,35 @@ fn block_side_effect_free(body: &[Stmt]) -> bool {
     body.iter().all(|s| match s {
         Stmt::Expr(e) | Stmt::Branch(e) => is_side_effect_free(e),
         Stmt::Nop => true,
-        Stmt::If { cond, then_body, else_body } => {
-            is_side_effect_free(cond) && block_side_effect_free(then_body) && block_side_effect_free(else_body)
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            is_side_effect_free(cond)
+                && block_side_effect_free(then_body)
+                && block_side_effect_free(else_body)
         }
-        Stmt::Switch { expr, cases, default } => {
+        Stmt::Switch {
+            expr,
+            cases,
+            default,
+        } => {
             is_side_effect_free(expr)
                 && cases.iter().all(|(_, b)| block_side_effect_free(b))
                 && block_side_effect_free(default)
         }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            block_side_effect_free(&[*init.clone(), *step.clone()])
+                && is_side_effect_free(cond)
+                && block_side_effect_free(body)
+        }
+        Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => false,
         Stmt::While { cond, body } => is_side_effect_free(cond) && block_side_effect_free(body),
         _ => false,
     })

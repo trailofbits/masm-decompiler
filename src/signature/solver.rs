@@ -131,6 +131,16 @@ fn analyze_block(
                             if pops == 0 && req > stack.required {
                                 stack.required = req;
                             }
+                            if pops == 0 && req as usize > stack.len() {
+                                // Seed missing stack slots to satisfy the required depth so that
+                                // we don't over-count inputs via underflow on later pops.
+                                let target = req as usize;
+                                while stack.len() < target {
+                                    let idx = stack.len() as u32;
+                                    stack.push(Provenance::Input(idx));
+                                }
+                                stack.required = stack.required.max(req);
+                            }
                             if pops == 0 && req > 0 {
                                 accessed_existing = true;
                             }

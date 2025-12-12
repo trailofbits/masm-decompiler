@@ -3,11 +3,15 @@
 use std::path::{Path as FsPath, PathBuf as FsPathBuf};
 
 use miden_assembly_syntax::{
-    ast::{path::PathBuf as MasmPathBuf, Module, ModuleKind, Procedure},
-    debuginfo::DefaultSourceManager,
     ModuleParser, Report,
+    ast::{Module, ModuleKind, Procedure, path::PathBuf as MasmPathBuf},
+    debuginfo::DefaultSourceManager,
 };
 use std::sync::Arc;
+
+mod workspace;
+pub use workspace::Workspace;
+pub mod testing;
 
 /// A library root maps a namespace (e.g. "std") to a filesystem directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,8 +44,8 @@ impl Program {
         // Prefer the library parser; fall back to executable if needed.
         let mut parser = ModuleParser::new(ModuleKind::Library);
 
-        let module_name = derive_module_path(path, roots)
-            .unwrap_or_else(|_| MasmPathBuf::absolute(Module::ROOT));
+        let module_name =
+            derive_module_path(path, roots).unwrap_or_else(|_| MasmPathBuf::absolute(Module::ROOT));
 
         let source_manager: Arc<dyn miden_assembly_syntax::debuginfo::SourceManager> =
             Arc::new(DefaultSourceManager::default());
@@ -62,7 +66,11 @@ impl Program {
     }
 
     /// Construct a program from an already-parsed module and explicit metadata.
-    pub fn from_parts(module: Box<Module>, source_path: FsPathBuf, module_path: MasmPathBuf) -> Self {
+    pub fn from_parts(
+        module: Box<Module>,
+        source_path: FsPathBuf,
+        module_path: MasmPathBuf,
+    ) -> Self {
         Self {
             module,
             source_path,
@@ -86,10 +94,6 @@ impl Program {
         self.module.procedures()
     }
 }
-
-mod workspace;
-pub use workspace::Workspace;
-pub mod testing;
 
 /// Derive a MASM module path (e.g. `std::math::u64`) from a filesystem path and library roots.
 ///

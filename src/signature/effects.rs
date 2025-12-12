@@ -21,8 +21,10 @@ impl InstructionEffect {
 
     pub const fn with_required(self, required: u32) -> Self {
         match self {
-            InstructionEffect::Known { pops, pushes, .. } => {
-                InstructionEffect::Known { pops, pushes, required }
+            InstructionEffect::Known { pops, pushes, .. } => InstructionEffect::Known {
+                pops,
+                pushes,
+                required,
             },
             InstructionEffect::Unknown => InstructionEffect::Unknown,
         }
@@ -188,8 +190,8 @@ pub fn stack_effect(instr: &Instruction) -> InstructionEffect {
         DupW2 => InstructionEffect::known(0, 4).with_required(12),
         DupW3 => InstructionEffect::known(0, 4).with_required(16),
 
-        Swap1 | Swap2 | Swap3 | Swap4 | Swap5 | Swap6 | Swap7 | Swap8 | Swap9 | Swap10
-        | Swap11 | Swap12 | Swap13 | Swap14 | Swap15 => InstructionEffect::known(2, 2),
+        Swap1 | Swap2 | Swap3 | Swap4 | Swap5 | Swap6 | Swap7 | Swap8 | Swap9 | Swap10 | Swap11
+        | Swap12 | Swap13 | Swap14 | Swap15 => InstructionEffect::known(2, 2),
         SwapW1 | SwapW2 | SwapW3 | SwapDw | Reversew | CSwap | CSwapW | CDrop | CDropW => {
             InstructionEffect::known(4, 4)
         }

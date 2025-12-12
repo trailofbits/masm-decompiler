@@ -2,8 +2,10 @@
 
 mod dead_code_elimination;
 mod expression_propagation;
+mod loop_indices;
 mod used_vars;
 
 pub use dead_code_elimination::eliminate_dead_code;
 pub use expression_propagation::propagate_expressions;
-pub use used_vars::{build_def_use_map, DefUseMap};
+pub use loop_indices::{IndexExpr, compute_loop_indices};
+pub use used_vars::{DefUseMap, build_def_use_map};

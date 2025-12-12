@@ -15,7 +15,10 @@ pub fn build_def_use_map(cfg: &Cfg) -> DefUseMap {
 
     for (node_idx, block) in cfg.nodes.iter().enumerate() {
         for (instr_idx, stmt) in block.code.iter().enumerate() {
-            let pos = InstrPos { node: node_idx, instr: instr_idx };
+            let pos = InstrPos {
+                node: node_idx,
+                instr: instr_idx,
+            };
 
             if let Some(def) = defined_var(stmt) {
                 def_map.insert(def, pos);
@@ -24,6 +27,23 @@ pub fn build_def_use_map(cfg: &Cfg) -> DefUseMap {
 
             for var in used_vars(stmt) {
                 use_map.entry(var).or_default().insert(pos);
+            }
+        }
+    }
+
+    // Treat values defined in exit blocks (no forward successors) as observable outputs.
+    for (node_idx, block) in cfg.nodes.iter().enumerate() {
+        let has_forward_succ = block.next.iter().any(|e| !e.back_edge);
+        if has_forward_succ {
+            continue;
+        }
+        for (instr_idx, stmt) in block.code.iter().enumerate() {
+            if let Some(def) = defined_var(stmt) {
+                let pos = InstrPos {
+                    node: node_idx,
+                    instr: instr_idx,
+                };
+                use_map.entry(def).or_default().insert(pos);
             }
         }
     }
@@ -37,8 +57,40 @@ pub fn used_vars(stmt: &Stmt) -> Vec<Var> {
         Stmt::Assign { expr, .. } => used_in_expr(expr),
         Stmt::Expr(expr) | Stmt::Branch(expr) => used_in_expr(expr),
         Stmt::StackOp(op) => op.pops.clone(),
+        Stmt::MemLoad(mem) => mem.address.clone(),
+        Stmt::MemStore(mem) => {
+            let mut vars = mem.address.clone();
+            vars.extend(mem.values.iter().copied());
+            vars
+        }
+        Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => call.args.clone(),
+        Stmt::DynCall { args, .. } => args.clone(),
+        Stmt::Intrinsic(intr) => intr.args.clone(),
+        Stmt::AdvLoad(_) => Vec::new(),
+        Stmt::AdvStore(store) => store.values.clone(),
+        Stmt::LocalLoad(_) => Vec::new(),
+        Stmt::LocalStore(store) => store.values.clone(),
         Stmt::Phi { sources, .. } => sources.clone(),
-        Stmt::If { cond, then_body, else_body } => {
+        Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => Vec::new(),
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            let mut vars = used_vars(init);
+            vars.extend(used_in_expr(cond));
+            vars.extend(used_vars(step));
+            for s in body {
+                vars.extend(used_vars(s));
+            }
+            vars
+        }
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
             let mut vars = used_in_expr(cond);
             for s in then_body {
                 vars.extend(used_vars(s));
@@ -48,7 +100,11 @@ pub fn used_vars(stmt: &Stmt) -> Vec<Var> {
             }
             vars
         }
-        Stmt::Switch { expr, cases, default } => {
+        Stmt::Switch {
+            expr,
+            cases,
+            default,
+        } => {
             let mut vars = used_in_expr(expr);
             for (_, body) in cases {
                 for s in body {
@@ -67,6 +123,7 @@ pub fn used_vars(stmt: &Stmt) -> Vec<Var> {
             }
             vars
         }
+        Stmt::Return(vals) => vals.clone(),
         Stmt::Break => Vec::new(),
         Stmt::Continue => Vec::new(),
         Stmt::Instr(_) | Stmt::Unknown | Stmt::Nop => Vec::new(),
@@ -78,6 +135,8 @@ pub fn defined_var(stmt: &Stmt) -> Option<Var> {
     match stmt {
         Stmt::Assign { dst, .. } => Some(*dst),
         Stmt::Phi { var, .. } => Some(*var),
+        Stmt::For { init, step, .. } => defined_var(init).or_else(|| defined_var(step)),
+        Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => None,
         _ => None,
     }
 }
