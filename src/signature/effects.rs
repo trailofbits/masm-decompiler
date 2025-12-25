@@ -1,30 +1,38 @@
 use miden_assembly_syntax::ast::Instruction;
 
 /// Describes the local stack effect of a single instruction.
-///
-/// `required` is the minimum stack height needed before executing the instruction.
-/// For example, `dup4` has `required = 5`, `pops = 0`, `pushes = 1`.
 #[derive(Debug, Clone, Copy)]
 pub enum InstructionEffect {
-    Known { pops: u8, pushes: u8, required: u32 },
+    Known {
+        // The number of elements popped from the stack
+        pops: u32,
+        // The number of new elements pushed onto the stack
+        pushes: u32,
+        // The stack depth required to execute the instruction
+        required_depth: u32,
+    },
     Unknown,
 }
 
 impl InstructionEffect {
-    pub const fn known(pops: u8, pushes: u8) -> Self {
+    pub const fn known(pops: u32, pushes: u32) -> Self {
         InstructionEffect::Known {
             pops,
             pushes,
-            required: pops as u32,
+            required_depth: pops,
         }
     }
 
-    pub const fn with_required(self, required: u32) -> Self {
+    pub const fn unknown() -> Self {
+        InstructionEffect::Unknown
+    }
+
+    pub const fn with_required_depth(self, required_depth: u32) -> Self {
         match self {
             InstructionEffect::Known { pops, pushes, .. } => InstructionEffect::Known {
                 pops,
                 pushes,
-                required,
+                required_depth,
             },
             InstructionEffect::Unknown => InstructionEffect::Unknown,
         }
@@ -32,250 +40,231 @@ impl InstructionEffect {
 }
 
 /// Returns an `InstructionEffect`; `Unknown` indicates an unmodeled effect.
-pub fn stack_effect(instr: &Instruction) -> InstructionEffect {
+pub fn stack_effect(inst: &Instruction) -> InstructionEffect {
     use Instruction::*;
 
+    // Unary instructions
     let unary = matches!(
-        instr,
-        Assert
-            | AssertWithError(_)
-            | Assertz
-            | AssertzWithError(_)
-            | Neg
-            | ILog2
+        inst,
+        Exp | ILog2
             | Inv
             | Incr
-            | Pow2
-            | Exp
-            | ExpImm(_)
-            | ExpBitLength(_)
-            | Not
             | IsOdd
-            | U32Test
-            | U32TestW
-            | U32Assert
-            | U32AssertWithError(_)
-            | U32Assert2
-            | U32Assert2WithError(_)
-            | U32AssertW
-            | U32AssertWWithError(_)
+            | Pow2
+            | Neg
+            | Not
+            | AddImm(_)
+            | SubImm(_)
+            | MulImm(_)
             | U32Cast
-            | U32Not
-            | U32Popcnt
-            | U32Ctz
             | U32Clz
             | U32Clo
             | U32Cto
-            | Locaddr(_)
-            | Sdepth
-            | Caller
-            | Clk
-            | AdvLoadW
-            | Emit
-            | EmitImm(_)
-            | Trace(_)
-            | ProcRef(_)
+            | U32Ctz
+            | U32Not
+            | U32Popcnt
+            | U32Cast
+            | U32WrappingAddImm(_)
+            | U32WrappingSubImm(_)
+            | U32WrappingMulImm(_)
     );
-
     if unary {
         return InstructionEffect::known(1, 1);
     }
 
     let binary = matches!(
-        instr,
-        AssertEq
-            | AssertEqWithError(_)
-            | AssertEqw
-            | AssertEqwWithError(_)
-            | Add
-            | AddImm(_)
-            | Sub
-            | SubImm(_)
+        inst,
+        Add | Sub
             | Mul
-            | MulImm(_)
             | Div
-            | DivImm(_)
             | And
             | Or
             | Xor
             | Eq
-            | EqImm(_)
             | Neq
-            | NeqImm(_)
             | Eqw
             | Lt
             | Lte
             | Gt
             | Gte
-            | Ext2Add
-            | Ext2Sub
-            | Ext2Mul
-            | Ext2Div
-            | Ext2Neg
-            | Ext2Inv
             | U32WrappingAdd
-            | U32WrappingAddImm(_)
-            | U32OverflowingAdd
-            | U32OverflowingAddImm(_)
-            | U32OverflowingAdd3
-            | U32WrappingAdd3
             | U32WrappingSub
-            | U32WrappingSubImm(_)
-            | U32OverflowingSub
-            | U32OverflowingSubImm(_)
             | U32WrappingMul
-            | U32WrappingMulImm(_)
-            | U32OverflowingMul
-            | U32OverflowingMulImm(_)
-            | U32OverflowingMadd
-            | U32WrappingMadd
             | U32Div
-            | U32DivImm(_)
             | U32Mod
-            | U32ModImm(_)
-            | U32DivMod
-            | U32DivModImm(_)
             | U32And
             | U32Or
             | U32Xor
-            | U32Shr
-            | U32ShrImm(_)
             | U32Shl
-            | U32ShlImm(_)
-            | U32Rotr
-            | U32RotrImm(_)
+            | U32Shr
             | U32Rotl
-            | U32RotlImm(_)
+            | U32Rotr
             | U32Lt
             | U32Lte
             | U32Gt
             | U32Gte
             | U32Min
             | U32Max
-            | MTreeGet
-            | MTreeSet
-            | MTreeMerge
-            | MTreeVerify
-            | MTreeVerifyWithError(_)
     );
 
     if binary {
         return InstructionEffect::known(2, 1);
     }
 
-    match instr {
-        Nop | Breakpoint => InstructionEffect::known(0, 0),
+    match inst {
+        // Nop
+        Nop => InstructionEffect::known(0, 0),
+
+        // Stack operations
         Drop => InstructionEffect::known(1, 0),
-        DropW | Reversedw => InstructionEffect::known(4, 0),
+        DropW => InstructionEffect::known(4, 0),
         PadW => InstructionEffect::known(0, 4),
 
-        Dup0 => InstructionEffect::known(0, 1).with_required(1),
-        Dup1 => InstructionEffect::known(0, 1).with_required(2),
-        Dup2 => InstructionEffect::known(0, 1).with_required(3),
-        Dup3 => InstructionEffect::known(0, 1).with_required(4),
-        Dup4 => InstructionEffect::known(0, 1).with_required(5),
-        Dup5 => InstructionEffect::known(0, 1).with_required(6),
-        Dup6 => InstructionEffect::known(0, 1).with_required(7),
-        Dup7 => InstructionEffect::known(0, 1).with_required(8),
-        Dup8 => InstructionEffect::known(0, 1).with_required(9),
-        Dup9 => InstructionEffect::known(0, 1).with_required(10),
-        Dup10 => InstructionEffect::known(0, 1).with_required(11),
-        Dup11 => InstructionEffect::known(0, 1).with_required(12),
-        Dup12 => InstructionEffect::known(0, 1).with_required(13),
-        Dup13 => InstructionEffect::known(0, 1).with_required(14),
-        Dup14 => InstructionEffect::known(0, 1).with_required(15),
-        Dup15 => InstructionEffect::known(0, 1).with_required(16),
-        DupW0 => InstructionEffect::known(0, 4).with_required(4),
-        DupW1 => InstructionEffect::known(0, 4).with_required(8),
-        DupW2 => InstructionEffect::known(0, 4).with_required(12),
-        DupW3 => InstructionEffect::known(0, 4).with_required(16),
+        Dup0 => InstructionEffect::known(0, 1).with_required_depth(1),
+        Dup1 => InstructionEffect::known(0, 1).with_required_depth(2),
+        Dup2 => InstructionEffect::known(0, 1).with_required_depth(3),
+        Dup3 => InstructionEffect::known(0, 1).with_required_depth(4),
+        Dup4 => InstructionEffect::known(0, 1).with_required_depth(5),
+        Dup5 => InstructionEffect::known(0, 1).with_required_depth(6),
+        Dup6 => InstructionEffect::known(0, 1).with_required_depth(7),
+        Dup7 => InstructionEffect::known(0, 1).with_required_depth(8),
+        Dup8 => InstructionEffect::known(0, 1).with_required_depth(9),
+        Dup9 => InstructionEffect::known(0, 1).with_required_depth(10),
+        Dup10 => InstructionEffect::known(0, 1).with_required_depth(11),
+        Dup11 => InstructionEffect::known(0, 1).with_required_depth(12),
+        Dup12 => InstructionEffect::known(0, 1).with_required_depth(13),
+        Dup13 => InstructionEffect::known(0, 1).with_required_depth(14),
+        Dup14 => InstructionEffect::known(0, 1).with_required_depth(15),
+        Dup15 => InstructionEffect::known(0, 1).with_required_depth(16),
 
-        Swap1 | Swap2 | Swap3 | Swap4 | Swap5 | Swap6 | Swap7 | Swap8 | Swap9 | Swap10 | Swap11
-        | Swap12 | Swap13 | Swap14 | Swap15 => InstructionEffect::known(2, 2),
-        SwapW1 | SwapW2 | SwapW3 | SwapDw | Reversew | CSwap | CSwapW | CDrop | CDropW => {
-            InstructionEffect::known(4, 4)
-        }
+        DupW0 => InstructionEffect::known(0, 4).with_required_depth(4),
+        DupW1 => InstructionEffect::known(0, 4).with_required_depth(8),
+        DupW2 => InstructionEffect::known(0, 4).with_required_depth(12),
+        DupW3 => InstructionEffect::known(0, 4).with_required_depth(16),
 
-        MovUp2 => InstructionEffect::known(0, 0).with_required(3),
-        MovUp3 => InstructionEffect::known(0, 0).with_required(4),
-        MovUp4 => InstructionEffect::known(0, 0).with_required(5),
-        MovUp5 => InstructionEffect::known(0, 0).with_required(6),
-        MovUp6 => InstructionEffect::known(0, 0).with_required(7),
-        MovUp7 => InstructionEffect::known(0, 0).with_required(8),
-        MovUp8 => InstructionEffect::known(0, 0).with_required(9),
-        MovUp9 => InstructionEffect::known(0, 0).with_required(10),
-        MovUp10 => InstructionEffect::known(0, 0).with_required(11),
-        MovUp11 => InstructionEffect::known(0, 0).with_required(12),
-        MovUp12 => InstructionEffect::known(0, 0).with_required(13),
-        MovUp13 => InstructionEffect::known(0, 0).with_required(14),
-        MovUp14 => InstructionEffect::known(0, 0).with_required(15),
-        MovUp15 => InstructionEffect::known(0, 0).with_required(16),
+        Swap1 => InstructionEffect::known(0, 0).with_required_depth(2),
+        Swap2 => InstructionEffect::known(0, 0).with_required_depth(3),
+        Swap3 => InstructionEffect::known(0, 0).with_required_depth(4),
+        Swap4 => InstructionEffect::known(0, 0).with_required_depth(5),
+        Swap5 => InstructionEffect::known(0, 0).with_required_depth(6),
+        Swap6 => InstructionEffect::known(0, 0).with_required_depth(7),
+        Swap7 => InstructionEffect::known(0, 0).with_required_depth(8),
+        Swap8 => InstructionEffect::known(0, 0).with_required_depth(9),
+        Swap9 => InstructionEffect::known(0, 0).with_required_depth(10),
+        Swap10 => InstructionEffect::known(0, 0).with_required_depth(11),
+        Swap11 => InstructionEffect::known(0, 0).with_required_depth(12),
+        Swap12 => InstructionEffect::known(0, 0).with_required_depth(13),
+        Swap13 => InstructionEffect::known(0, 0).with_required_depth(14),
+        Swap14 => InstructionEffect::known(0, 0).with_required_depth(15),
+        Swap15 => InstructionEffect::known(0, 0).with_required_depth(16),
 
-        MovDn2 => InstructionEffect::known(0, 0).with_required(3),
-        MovDn3 => InstructionEffect::known(0, 0).with_required(4),
-        MovDn4 => InstructionEffect::known(0, 0).with_required(5),
-        MovDn5 => InstructionEffect::known(0, 0).with_required(6),
-        MovDn6 => InstructionEffect::known(0, 0).with_required(7),
-        MovDn7 => InstructionEffect::known(0, 0).with_required(8),
-        MovDn8 => InstructionEffect::known(0, 0).with_required(9),
-        MovDn9 => InstructionEffect::known(0, 0).with_required(10),
-        MovDn10 => InstructionEffect::known(0, 0).with_required(11),
-        MovDn11 => InstructionEffect::known(0, 0).with_required(12),
-        MovDn12 => InstructionEffect::known(0, 0).with_required(13),
-        MovDn13 => InstructionEffect::known(0, 0).with_required(14),
-        MovDn14 => InstructionEffect::known(0, 0).with_required(15),
-        MovDn15 => InstructionEffect::known(0, 0).with_required(16),
+        SwapW1 => InstructionEffect::known(0, 0).with_required_depth(8),
+        SwapW2 => InstructionEffect::known(0, 0).with_required_depth(12),
+        SwapW3 => InstructionEffect::known(0, 0).with_required_depth(16),
+        SwapDw => InstructionEffect::known(0, 0).with_required_depth(16),
 
-        MovUpW2 => InstructionEffect::known(0, 0).with_required(12),
-        MovUpW3 => InstructionEffect::known(0, 0).with_required(16),
-        MovDnW2 => InstructionEffect::known(0, 0).with_required(12),
-        MovDnW3 => InstructionEffect::known(0, 0).with_required(16),
+        CSwap => InstructionEffect::known(1, 0).with_required_depth(3),
+        CSwapW => InstructionEffect::known(1, 0).with_required_depth(9),
+        CDrop => InstructionEffect::known(3, 1),
+        CDropW => InstructionEffect::known(9, 4),
+        Reversew => InstructionEffect::known(4, 4),
+
+        MovUp2 => InstructionEffect::known(0, 0).with_required_depth(3),
+        MovUp3 => InstructionEffect::known(0, 0).with_required_depth(4),
+        MovUp4 => InstructionEffect::known(0, 0).with_required_depth(5),
+        MovUp5 => InstructionEffect::known(0, 0).with_required_depth(6),
+        MovUp6 => InstructionEffect::known(0, 0).with_required_depth(7),
+        MovUp7 => InstructionEffect::known(0, 0).with_required_depth(8),
+        MovUp8 => InstructionEffect::known(0, 0).with_required_depth(9),
+        MovUp9 => InstructionEffect::known(0, 0).with_required_depth(10),
+        MovUp10 => InstructionEffect::known(0, 0).with_required_depth(11),
+        MovUp11 => InstructionEffect::known(0, 0).with_required_depth(12),
+        MovUp12 => InstructionEffect::known(0, 0).with_required_depth(13),
+        MovUp13 => InstructionEffect::known(0, 0).with_required_depth(14),
+        MovUp14 => InstructionEffect::known(0, 0).with_required_depth(15),
+        MovUp15 => InstructionEffect::known(0, 0).with_required_depth(16),
+
+        MovDn2 => InstructionEffect::known(0, 0).with_required_depth(3),
+        MovDn3 => InstructionEffect::known(0, 0).with_required_depth(4),
+        MovDn4 => InstructionEffect::known(0, 0).with_required_depth(5),
+        MovDn5 => InstructionEffect::known(0, 0).with_required_depth(6),
+        MovDn6 => InstructionEffect::known(0, 0).with_required_depth(7),
+        MovDn7 => InstructionEffect::known(0, 0).with_required_depth(8),
+        MovDn8 => InstructionEffect::known(0, 0).with_required_depth(9),
+        MovDn9 => InstructionEffect::known(0, 0).with_required_depth(10),
+        MovDn10 => InstructionEffect::known(0, 0).with_required_depth(11),
+        MovDn11 => InstructionEffect::known(0, 0).with_required_depth(12),
+        MovDn12 => InstructionEffect::known(0, 0).with_required_depth(13),
+        MovDn13 => InstructionEffect::known(0, 0).with_required_depth(14),
+        MovDn14 => InstructionEffect::known(0, 0).with_required_depth(15),
+        MovDn15 => InstructionEffect::known(0, 0).with_required_depth(16),
+
+        MovUpW2 => InstructionEffect::known(0, 0).with_required_depth(12),
+        MovUpW3 => InstructionEffect::known(0, 0).with_required_depth(16),
+        MovDnW2 => InstructionEffect::known(0, 0).with_required_depth(12),
+        MovDnW3 => InstructionEffect::known(0, 0).with_required_depth(16),
+
+        // Remaining U32 operations
+        U32OverflowingAdd => InstructionEffect::known(2, 2),
+        U32OverflowingSub => InstructionEffect::known(2, 2),
+        U32OverflowingMul => InstructionEffect::known(2, 2),
+        U32OverflowingMadd => InstructionEffect::known(2, 3),
+        U32OverflowingAdd3 => InstructionEffect::known(2, 3),
+        U32WrappingAdd3 => InstructionEffect::known(1, 3),
+        U32WrappingMadd => InstructionEffect::known(1, 3),
+        U32DivMod => InstructionEffect::known(2, 2),
+        U32Test => InstructionEffect::known(1, 0).with_required_depth(1),
+        U32TestW => InstructionEffect::known(1, 0).with_required_depth(4),
+        U32Assert => InstructionEffect::known(0, 0).with_required_depth(1),
+        U32Assert2 => InstructionEffect::known(0, 0).with_required_depth(2),
+        U32AssertW => InstructionEffect::known(0, 0).with_required_depth(4),
+        U32Split => InstructionEffect::known(2, 1),
 
         // Cryptographic operations
-        Hash => InstructionEffect::known(4, 4).with_required(4),
-        HMerge => InstructionEffect::known(8, 4).with_required(8),
-        HPerm => InstructionEffect::known(12, 12).with_required(12),
-        MTreeGet => InstructionEffect::known(3, 2).with_required(3),
-        MTreeSet => InstructionEffect::known(4, 2).with_required(4),
-        MTreeMerge => InstructionEffect::known(2, 1).with_required(2),
-        MTreeVerify => InstructionEffect::known(4, 4).with_required(4),
-        MTreeVerifyWithError(_) => InstructionEffect::known(4, 4).with_required(4),
+        Hash => InstructionEffect::known(4, 4),
+        HMerge => InstructionEffect::known(8, 4),
+        HPerm => InstructionEffect::known(12, 12),
+        MTreeGet => InstructionEffect::known(2, 4).with_required_depth(6),
+        MTreeSet => InstructionEffect::known(10, 8),
+        MTreeMerge => InstructionEffect::known(8, 4),
+        MTreeVerify => InstructionEffect::known(0, 0).with_required_depth(10),
+        MTreeVerifyWithError(_) => InstructionEffect::known(0, 0).with_required_depth(10),
 
-        // Polynomial/circuit ops
-        EvalCircuit => InstructionEffect::known(0, 0).with_required(3),
-        HornerBase => InstructionEffect::known(0, 0).with_required(16),
-        HornerExt => InstructionEffect::known(0, 0).with_required(16),
-        LogPrecompile => InstructionEffect::known(12, 12).with_required(12),
+        // Polynomial/circuit operations
+        EvalCircuit => InstructionEffect::known(0, 0).with_required_depth(3),
+        HornerBase => InstructionEffect::known(0, 0).with_required_depth(16),
+        HornerExt => InstructionEffect::known(0, 0).with_required_depth(16),
+        LogPrecompile => InstructionEffect::known(12, 12).with_required_depth(12),
 
         // FRI folding
-        FriExt2Fold4 => InstructionEffect::known(0, 0).with_required(17),
+        FriExt2Fold4 => InstructionEffect::known(0, 0).with_required_depth(17),
 
         // Memory loads/stores
-        MemLoad => InstructionEffect::known(1, 1).with_required(1),
+        MemLoad => InstructionEffect::known(1, 1).with_required_depth(1),
         MemLoadImm(_) => InstructionEffect::known(0, 1),
-        MemLoadWBe => InstructionEffect::known(1, 4).with_required(5),
-        MemLoadWBeImm(_) => InstructionEffect::known(0, 4).with_required(4),
-        MemLoadWLe => InstructionEffect::known(1, 4).with_required(5),
-        MemLoadWLeImm(_) => InstructionEffect::known(0, 4).with_required(4),
+        MemLoadWBe => InstructionEffect::known(1, 4).with_required_depth(5),
+        MemLoadWBeImm(_) => InstructionEffect::known(0, 4).with_required_depth(4),
+        MemLoadWLe => InstructionEffect::known(1, 4).with_required_depth(5),
+        MemLoadWLeImm(_) => InstructionEffect::known(0, 4).with_required_depth(4),
 
         LocLoad(_) => InstructionEffect::known(0, 1),
-        LocLoadWBe(_) => InstructionEffect::known(0, 4).with_required(4),
-        LocLoadWLe(_) => InstructionEffect::known(0, 4).with_required(4),
+        LocLoadWBe(_) => InstructionEffect::known(0, 4).with_required_depth(4),
+        LocLoadWLe(_) => InstructionEffect::known(0, 4).with_required_depth(4),
 
-        MemStore => InstructionEffect::known(2, 0).with_required(2),
-        MemStoreImm(_) => InstructionEffect::known(1, 0).with_required(1),
-        MemStoreWBe => InstructionEffect::known(5, 0).with_required(5),
-        MemStoreWBeImm(_) => InstructionEffect::known(4, 0).with_required(4),
-        MemStoreWLe => InstructionEffect::known(5, 0).with_required(5),
-        MemStoreWLeImm(_) => InstructionEffect::known(4, 0).with_required(4),
+        MemStore => InstructionEffect::known(2, 0).with_required_depth(2),
+        MemStoreImm(_) => InstructionEffect::known(1, 0).with_required_depth(1),
+        MemStoreWBe => InstructionEffect::known(5, 0).with_required_depth(5),
+        MemStoreWBeImm(_) => InstructionEffect::known(4, 0).with_required_depth(4),
+        MemStoreWLe => InstructionEffect::known(5, 0).with_required_depth(5),
+        MemStoreWLeImm(_) => InstructionEffect::known(4, 0).with_required_depth(4),
 
-        LocStore(_) => InstructionEffect::known(1, 0).with_required(1),
-        LocStoreWBe(_) => InstructionEffect::known(4, 0).with_required(4),
-        LocStoreWLe(_) => InstructionEffect::known(4, 0).with_required(4),
+        LocStore(_) => InstructionEffect::known(1, 0).with_required_depth(1),
+        LocStoreWBe(_) => InstructionEffect::known(4, 0).with_required_depth(4),
+        LocStoreWLe(_) => InstructionEffect::known(4, 0).with_required_depth(4),
 
-        MemStream => InstructionEffect::known(0, 0).with_required(13),
+        MemStream => InstructionEffect::known(0, 0).with_required_depth(13),
 
-        U32Split => InstructionEffect::known(1, 2).with_required(1),
+        U32Split => InstructionEffect::known(1, 2).with_required_depth(1),
 
         Push(_) | Locaddr(_) | EmitImm(_) | Trace(_) => InstructionEffect::known(0, 1),
         PushSlice(_, range) => InstructionEffect::known(0, range.len() as u8),
