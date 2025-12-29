@@ -1,119 +1,229 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
-/// Shape of a stack slot; currently coarse.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SlotShape {
-    Unknown,
-    Felt,
-    Word(u8),
-    Tuple(u8),
-}
+use crate::signature::InstructionEffect;
 
-/// Inclusive range with optional upper bound (None = unbounded).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Range {
-    pub min: u32,
-    pub max: Option<u32>,
-}
-
-impl Range {
-    pub const fn exact(v: u32) -> Self {
-        Self {
-            min: v,
-            max: Some(v),
-        }
-    }
-
-    pub const fn unknown() -> Self {
-        Self { min: 0, max: None }
-    }
-
-    pub fn add(&self, other: &Range) -> Range {
-        Range {
-            min: self.min.saturating_add(other.min),
-            max: match (self.max, other.max) {
-                (Some(a), Some(b)) => a.checked_add(b),
-                _ => None,
-            },
-        }
-    }
-}
-
+/// A procedures signature, as determined during signature inference.
+///
+/// The number of inputs are determined by tracking the provenance of each stack
+/// slot. Stack slots pushed during execution of the procedure are marked as
+/// local. Stack slots below the entry stack depth that are read by the
+/// procedure are marked as inputs.
+///
+/// When execution has completed, the stack has the following layout if the net
+/// effect is > 0:
+///
+///   ┌────────────────────┬─────────────────────┐
+///   │  Remaining inputs  │  Procedure outputs  │ → Stack grows this way
+///   └────────────────────┴─────────────────────┘
+///                            ↑                 ↑
+///                      Depth on entry    Depth on exit
+///   ╰────────────┬───────────┴────────┬────────╯
+///         Required depth        Net effect > 0
+///
+/// If the net effect is < 0, we have the following stack layout:
+///
+///   ┌────────────────────┬─────────────────────┐ - - - - - - - - ┐
+///   │  Remaining inputs  │  Procedure outputs  │                 │ → Stack grows this way
+///   └────────────────────┴─────────────────────┘ - - - - - - - - ┘
+///                                              ↑                 ↑
+///                                        Depth on exit     Depth on entry
+///   ╰────────────┬─────────────────────────────┴────────┬────────╯
+///         Required depth                          Net effect < 0
+///
+/// When the procedure exits, the number of inputs are given by the required
+/// depth. The number of outputs are determined to be the difference between the
+/// current depth (i.e. the depth on exit) and the depth of the first local
+/// value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcSignature {
     Known {
-        inputs: Range,
-        outputs: Range,
-        slots: Vec<SlotShape>,
-        side_effects: bool,
+        /// The number of inputs to the procedure
+        inputs: usize,
+        /// The number of outputs from the procedure
+        outputs: usize,
+        /// Net stack effect of the procedure
+        net_effect: isize,
     },
     Unknown,
 }
 
 impl ProcSignature {
+    pub fn known(inputs: usize, outputs: usize, net_effect: isize) -> Self {
+        ProcSignature::Known {
+            inputs,
+            outputs,
+            net_effect,
+        }
+    }
+
     pub fn unknown() -> Self {
         ProcSignature::Unknown
     }
 }
 
-/// Provenance of a stack slot during abstract interpretation.
+/// Convert a [ProcSignature] to the stack effect of a corresponding `exec`
+/// call.
+///
+/// To convert the signature to the corresponding stack effect, we make use of
+/// the following relationships (see above):
+///
+///   1. pops = number of outputs - net effect
+///   2. pushes = number of outputs
+///   3. required depth = number of inputs
+///
+impl From<&ProcSignature> for InstructionEffect {
+    fn from(signature: &ProcSignature) -> Self {
+        match signature {
+            ProcSignature::Known {
+                inputs,
+                outputs,
+                net_effect,
+            } => {
+                assert!(*outputs > (*net_effect as usize));
+                InstructionEffect::Known {
+                    pops: *outputs - (*net_effect as usize),
+                    pushes: *outputs,
+                    required_depth: *inputs,
+                }
+            }
+            ProcSignature::Unknown => InstructionEffect::Unknown,
+        }
+    }
+}
+
+impl From<&ProvenanceStack> for ProcSignature {
+    fn from(stack: &ProvenanceStack) -> Self {
+        ProcSignature::Known {
+            inputs: stack.inputs(),
+            outputs: stack.outputs(),
+            net_effect: stack.net_effect(),
+        }
+    }
+}
+
+/// Provenance of a stack slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provenance {
-    Input(u32),
-    New(u32),
-    Rewritten,
-    Unknown,
+    /// An input to the procedure.
+    Input,
+    /// A locally computed value.
+    Local,
 }
 
-#[derive(Debug, Default)]
-pub struct SignatureMap {
-    pub signatures: HashMap<String, ProcSignature>,
+impl Provenance {
+    /// Merge two individual stack slot values from two different branches.
+    ///
+    /// If either branch writes to the slot, the slot is marked as local.
+    pub fn merge(&self, other: Self) -> Self {
+        match (self, other) {
+            (Provenance::Input, Provenance::Input) => Provenance::Input,
+            _ => Provenance::Local,
+        }
+    }
 }
 
-/// Small helper around a Vec<Provenance> with required-depth tracking.
+/// A map from proc names to signatures
+pub type SignatureMap = HashMap<String, ProcSignature>;
+
+/// Symbolic stack to track stack slot provenance.
+///
+/// Required depth tracks the required stack depth compared to the depth at
+/// procedure entry. This is the number of inputs to the procedure. The number
+/// of outputs is given by the number of local values on the stack on exit.
+///
+/// If the procedure contains branches with different stack effects, non-neutral
+/// while loops, or calls to procedures with unknown stack effects, the analysis
+/// fails.
 #[derive(Debug, Default, Clone)]
 pub struct ProvenanceStack {
-    stack: Vec<Provenance>,
-    pub required: u32,
+    stack: VecDeque<Provenance>,
+    pub current_depth: isize,
+    pub required_depth: usize,
 }
 
 impl ProvenanceStack {
-    pub fn pop(&mut self) -> Provenance {
-        if let Some(v) = self.stack.pop() {
-            v
-        } else {
-            self.required = self.required.saturating_add(1);
-            Provenance::Input(self.required - 1)
+    /// Ensure that the stack depth is at least `required_depth` by pushing
+    /// additional inputs to the stack. Must be called before popping values
+    /// from the stack.
+    fn ensure_depth(&mut self, required_depth: usize) {
+        while self.stack.len() < required_depth as usize {
+            self.stack.push_front(Provenance::Input);
+            self.required_depth += 1;
         }
     }
 
-    pub fn push(&mut self, prov: Provenance) {
-        self.stack.push(prov);
+    /// Pop a single value from the stack.
+    pub fn pop(&mut self) {
+        assert!(self.stack.len() > 0);
+        self.stack.pop_back();
+        self.current_depth -= 1;
     }
 
-    pub fn new_count_bounds(&self) -> (u32, Option<u32>) {
-        let min = self
+    /// Push a single local value onto the stack.
+    fn push(&mut self) {
+        self.stack.push_back(Provenance::Local);
+        self.current_depth += 1;
+    }
+
+    /// Apply the known stack effects of a single instruction.
+    pub fn apply(&mut self, pops: usize, pushes: usize, required_depth: usize) {
+        self.ensure_depth(required_depth);
+        for _ in 0..pops {
+            self.pop();
+        }
+        for _ in 0..pushes {
+            self.push()
+        }
+    }
+
+    /// Returns the number of inputs to the procedure.
+    pub fn inputs(&self) -> usize {
+        self.required_depth
+    }
+
+    /// Returns the number of outputs from the procedure.
+    pub fn outputs(&self) -> usize {
+        let remaining_inputs = self
             .stack
             .iter()
-            .filter(|p| matches!(p, Provenance::New(_)))
-            .count() as u32;
-        let max = self
-            .stack
-            .iter()
-            .filter(|p| matches!(p, Provenance::New(_) | Provenance::Rewritten))
-            .count() as u32;
-        (min, Some(max))
+            .position(|value| matches!(value, Provenance::Local))
+            .unwrap_or(self.stack.len());
+        // This cannot underflow.
+        self.stack.len() - remaining_inputs
     }
 
-    pub fn len(&self) -> usize {
-        self.stack.len()
+    /// Returns the net stack effect of the procedure on exit.
+    pub fn net_effect(&self) -> isize {
+        self.current_depth
     }
 
-    pub fn clone_slots(&self) -> Vec<Provenance> {
-        self.stack.clone()
-    }
+    // Merge stack effects of two branches. This assumes that the stack depth is
+    // the same for both versions of the stack. The required depth of the merged
+    // stack is the maximum depth across the two inputs. Individual slots are
+    // marked as local if either of the inputs has marked the slot as local.
+    pub fn merge(&self, other: &Self) -> Self {
+        assert!(self.current_depth == other.current_depth);
 
-    pub fn replace_slots(&mut self, slots: Vec<Provenance>) {
-        self.stack = slots;
+        let mut self_stack = self.stack.clone();
+        let mut other_stack = other.stack.clone();
+
+        let mut stack = VecDeque::new();
+        loop {
+            let value = match (self_stack.pop_back(), other_stack.pop_back()) {
+                (Some(self_value), Some(other_value)) => self_value.merge(other_value),
+                (Some(self_value), None) => self_value,
+                (None, Some(other_value)) => other_value,
+                (None, None) => break,
+            };
+            stack.push_front(value);
+        }
+
+        let current_depth = self.current_depth;
+        let required_depth = self.required_depth.max(other.required_depth);
+        ProvenanceStack {
+            stack,
+            current_depth,
+            required_depth,
+        }
     }
 }

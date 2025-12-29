@@ -4,6 +4,6 @@ mod domain;
 mod effects;
 mod solver;
 
-pub use domain::{ProcSignature, Range, SignatureMap, SlotShape};
-pub use effects::{InstructionEffect, stack_effect};
+pub use domain::{ProcSignature, SignatureMap};
+pub use effects::InstructionEffect;
 pub use solver::infer_signatures;
