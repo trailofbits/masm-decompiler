@@ -1,9 +1,9 @@
 //! Stack-signature inference.
 
+mod analysis;
 mod domain;
 mod effects;
-mod solver;
 
+pub use analysis::infer_signatures;
 pub use domain::{ProcSignature, SignatureMap};
 pub use effects::InstructionEffect;
-pub use solver::infer_signatures;

@@ -73,17 +73,17 @@ impl ProcSignature {
 ///
 impl From<&ProcSignature> for InstructionEffect {
     fn from(signature: &ProcSignature) -> Self {
-        match signature {
+        match *signature {
             ProcSignature::Known {
                 inputs,
                 outputs,
                 net_effect,
             } => {
-                assert!(*outputs > (*net_effect as usize));
+                assert!(net_effect < 0 || net_effect < (outputs as isize));
                 InstructionEffect::Known {
-                    pops: *outputs - (*net_effect as usize),
-                    pushes: *outputs,
-                    required_depth: *inputs,
+                    pops: ((outputs as isize) - net_effect) as usize,
+                    pushes: outputs,
+                    required_depth: inputs,
                 }
             }
             ProcSignature::Unknown => InstructionEffect::Unknown,
@@ -145,7 +145,7 @@ impl ProvenanceStack {
     /// Ensure that the stack depth is at least `required_depth` by pushing
     /// additional inputs to the stack. Must be called before popping values
     /// from the stack.
-    fn ensure_depth(&mut self, required_depth: usize) {
+    pub fn ensure_depth(&mut self, required_depth: usize) {
         while self.stack.len() < required_depth as usize {
             self.stack.push_front(Provenance::Input);
             self.required_depth += 1;
