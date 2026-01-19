@@ -2,46 +2,62 @@
 //!
 //! These mirror the `rewasm` layout but are trimmed down until stack/SSA plumbing lands.
 
-use crate::ssa::Stmt;
+use crate::ssa::{Stmt, VarArena};
 use std::collections::HashSet;
 
 mod builder;
-pub use builder::{CfgBuildError, build_cfg_for_proc};
+pub use builder::{CfgError, build_cfg_for_proc};
 
 pub type NodeId = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct InstrPos {
+pub struct StmtPos {
     pub node: NodeId,
     pub instr: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EdgeType {
-    Unconditional,
-    Conditional(bool),
+pub enum Edge {
+    /// An unconditional edge from the source to `node`.
+    Unconditional {
+        /// Target node ID.
+        node: NodeId,
+        /// True when this edge points back to a loop header.
+        back_edge: bool,
+    },
+    /// A conditional edge from the source to `node`.
+    Conditional {
+        /// Target node ID.
+        node: NodeId,
+        /// True when this edge points back to a loop header.
+        back_edge: bool,
+        /// True if this edge is taken when the condition evaluates to true.
+        true_branch: bool,
+    },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EdgeCond {
-    pub expr_index: u32,
-    pub edge_type: EdgeType,
-}
-
-impl EdgeCond {
-    pub const fn unconditional() -> Self {
-        Self {
-            expr_index: 0,
-            edge_type: EdgeType::Unconditional,
+impl Edge {
+    pub fn node(&self) -> NodeId {
+        match self {
+            Edge::Unconditional { node, .. } => *node,
+            Edge::Conditional { node, .. } => *node,
         }
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Edge {
-    pub cond: EdgeCond,
-    pub node: NodeId,
-    pub back_edge: bool,
+    pub fn back_edge(&self) -> bool {
+        match self {
+            Edge::Unconditional { back_edge, .. } => *back_edge,
+            Edge::Conditional { back_edge, .. } => *back_edge,
+        }
+    }
+
+    pub fn true_branch(&self) -> Option<bool> {
+        if let Edge::Conditional { true_branch, .. } = self {
+            Some(*true_branch)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -51,42 +67,44 @@ pub struct BasicBlock {
     pub prev: Vec<Edge>,
 }
 
-/// Skeleton CFG used until the builder/structuring passes are in place.
 #[derive(Debug, Default)]
 pub struct Cfg {
     pub nodes: Vec<BasicBlock>,
+    pub arena: VarArena,
 }
 
 impl Cfg {
-    pub fn stmt(&self, pos: InstrPos) -> &Stmt {
+    pub fn stmt(&self, pos: StmtPos) -> &Stmt {
         &self.nodes[pos.node].code[pos.instr]
     }
 
-    pub fn stmt_mut(&mut self, pos: InstrPos) -> &mut Stmt {
+    pub fn stmt_mut(&mut self, pos: StmtPos) -> &mut Stmt {
         &mut self.nodes[pos.node].code[pos.instr]
     }
 
-    pub fn succs(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
-        self.nodes[node].next.iter().map(|e| e.node)
+    /// Iterator over the nodes successors.
+    pub fn successors(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        self.nodes[node].next.iter().map(|e| e.node())
     }
 
-    /// Iterator over forward successors (excluding back edges).
-    pub fn forward_succs(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+    /// Iterator over the nodes forward successors (excluding back edges).
+    pub fn forward_successors(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         self.nodes[node]
             .next
             .iter()
-            .filter_map(|e| if e.back_edge { None } else { Some(e.node) })
+            .filter_map(|e| if e.back_edge() { None } else { Some(e.node()) })
     }
 
-    pub fn preds(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
-        self.nodes[node].prev.iter().map(|e| e.node)
+    /// Iterator over the nodes predecessors.
+    pub fn predecessors(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        self.nodes[node].prev.iter().map(|e| e.node())
     }
 
     /// Return successors that leave the given region of nodes.
     pub fn region_successors(&self, region_nodes: &HashSet<NodeId>) -> HashSet<NodeId> {
         let mut result = HashSet::new();
         for &n in region_nodes {
-            for s in self.nodes[n].next.iter().map(|e| e.node) {
+            for s in self.successors(n) {
                 if !region_nodes.contains(&s) {
                     result.insert(s);
                 }
@@ -108,25 +126,25 @@ struct GraphSliceBuilder {
 
 impl GraphSliceBuilder {
     fn dfs(cfg: &Cfg, head: NodeId, targets: HashSet<NodeId>) -> HashSet<NodeId> {
-        let mut performer = GraphSliceBuilder {
+        let mut builder = GraphSliceBuilder {
             targets,
             visited: HashSet::new(),
         };
-        performer.visit(cfg, head);
-        performer.targets
+        builder.visit(cfg, head);
+        builder.targets
     }
 
     fn visit(&mut self, cfg: &Cfg, n: usize) -> bool {
         let mut inserted = self.targets.contains(&n);
-        for u in cfg.forward_succs(n) {
-            if !self.visited.insert(u) {
-                if !inserted && self.targets.contains(&u) {
+        for s in cfg.forward_successors(n) {
+            if !self.visited.insert(s) {
+                if !inserted && self.targets.contains(&s) {
                     self.targets.insert(n);
                     inserted = true;
                 }
                 continue;
             }
-            if self.visit(cfg, u) && !inserted {
+            if self.visit(cfg, s) && !inserted {
                 self.targets.insert(n);
                 inserted = true;
             }

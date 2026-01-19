@@ -2,25 +2,65 @@
 //!
 //! This keeps the crate layout aligned with `rewasm` while inference/SSA lowering is implemented.
 
-pub mod lower;
+use miden_assembly_syntax::ast::Instruction;
+
+pub mod lift;
 pub mod out_of_ssa;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum IndexExpr {
+    Const(usize),
+    LoopVar(usize),
+    Add(Box<IndexExpr>, Box<IndexExpr>),
+    Mul(Box<IndexExpr>, Box<IndexExpr>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Subscript {
+    None,
+    Expr(IndexExpr),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Var {
-    pub index: u32,
-    pub subscript: u32,
+    pub index: usize,
+    pub subscript: Subscript,
 }
 
 impl Var {
-    pub const fn new(index: u32, subscript: u32) -> Self {
-        Self { index, subscript }
-    }
-
-    pub const fn no_sub(index: u32) -> Self {
+    pub const fn new(index: usize) -> Self {
         Self {
             index,
-            subscript: 0,
+            subscript: Subscript::None,
         }
+    }
+
+    pub fn with_subscript(&self, subscript: Subscript) -> Self {
+        let mut result = self.clone();
+        result.subscript = subscript;
+        result
+    }
+}
+
+/// Allocator for unique SSA variable IDs.
+#[derive(Debug, Clone, Default)]
+pub struct VarArena {
+    next_id: usize,
+}
+
+impl VarArena {
+    pub const fn new() -> Self {
+        Self { next_id: 0 }
+    }
+
+    pub fn new_var(&mut self) -> Var {
+        let v = Var::new(self.next_id);
+        self.next_id += 1;
+        v
+    }
+
+    pub fn next_id(&self) -> usize {
+        self.next_id
     }
 }
 
@@ -151,18 +191,19 @@ pub struct Intrinsic {
     pub results: Vec<Var>,
 }
 
-pub type LocalId = u32;
+pub type LocalId = usize;
 
+/// Intermediate representation used for SSA.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
     Assign {
-        dst: Var,
+        dest: Var,
         expr: Expr,
     },
-    /// Return the given values (top of stack order).
-    Return(Vec<Var>),
-    Expr(Expr),
-    Instr(miden_assembly_syntax::ast::Instruction),
+    Branch(Expr),
+    Inst(Instruction),
+    Unknown,
+    Nop,
     StackOp(StackOp),
     MemLoad(MemLoad),
     MemStore(MemStore),
@@ -182,25 +223,10 @@ pub enum Stmt {
         var: Var,
         sources: Vec<Var>,
     },
-    Branch(Expr),
-    /// Lowering marker for repeat.N: initialize the synthetic loop counter.
-    RepeatInit {
+    /// Lowering of repeat.N with synthetic loop counter.
+    Repeat {
         local: LocalId,
-        count: u32,
-    },
-    /// Lowering marker for repeat.N: branch on the synthetic loop counter.
-    RepeatCond {
-        local: LocalId,
-        count: u32,
-    },
-    /// Lowering marker for repeat.N: increment the synthetic loop counter.
-    RepeatStep {
-        local: LocalId,
-    },
-    For {
-        init: Box<Stmt>,
-        cond: Expr,
-        step: Box<Stmt>,
+        count: usize,
         body: Vec<Stmt>,
     },
     If {
@@ -208,17 +234,10 @@ pub enum Stmt {
         then_body: Vec<Stmt>,
         else_body: Vec<Stmt>,
     },
-    Switch {
-        expr: Expr,
-        cases: Vec<(Constant, Vec<Stmt>)>,
-        default: Vec<Stmt>,
-    },
     While {
         cond: Expr,
         body: Vec<Stmt>,
     },
-    Break,
-    Continue,
-    Unknown,
-    Nop,
+    /// Return the given values (top of stack order).
+    Return(Vec<Var>),
 }

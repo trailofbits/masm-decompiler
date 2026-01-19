@@ -1,198 +1,294 @@
-use miden_assembly_syntax::ast::{Block, Op, Procedure};
+use miden_assembly_syntax::ast::{Block, Instruction, Op, Procedure};
 
-use super::{BasicBlock, Cfg, Edge, EdgeCond, EdgeType, NodeId};
+use crate::ssa::{BinOp, Constant, Expr, Stmt, Var};
+
+use super::{BasicBlock, Cfg, Edge, NodeId};
 
 #[derive(Debug)]
-pub enum CfgBuildError {
+pub enum CfgError {
     EmptyProcedure,
 }
 
-pub fn build_cfg_for_proc(proc: &Procedure) -> Result<Cfg, CfgBuildError> {
+pub fn build_cfg_for_proc(proc: &Procedure) -> Result<Cfg, CfgError> {
     let mut builder = Builder::new();
     if proc.body().is_empty() {
-        return Err(CfgBuildError::EmptyProcedure);
+        return Err(CfgError::EmptyProcedure);
     }
-    let exit = builder.build_block(proc.body(), builder.entry);
-    builder.finalize(exit);
+    let entry_id = builder.new_block();
+    builder.build_block(proc.body(), entry_id);
     Ok(builder.cfg)
 }
 
 struct Builder {
     cfg: Cfg,
-    entry: NodeId,
-    next_cond_idx: u32,
-    next_local_id: u32,
 }
 
 impl Builder {
     fn new() -> Self {
-        let mut cfg = Cfg::default();
-        let entry = cfg.nodes.len();
-        cfg.nodes.push(BasicBlock::default());
         Self {
-            cfg,
-            entry,
-            next_cond_idx: 0,
-            next_local_id: 0,
+            cfg: Cfg::default(),
         }
     }
 
-    fn finalize(&mut self, exit: NodeId) {
-        // No special exit handling needed yet; ensure exit has no dangling prev/next symmetry issues.
-        let _ = exit;
+    /// Create a new variable.
+    fn new_var(&mut self) -> Var {
+        self.cfg.arena.new_var()
     }
 
+    /// Create a new basic block.
     fn new_block(&mut self) -> NodeId {
         let id = self.cfg.nodes.len();
         self.cfg.nodes.push(BasicBlock::default());
         id
     }
 
-    fn add_edge(&mut self, from: NodeId, to: NodeId, cond: EdgeCond, back_edge: bool) {
-        self.cfg.nodes[from].next.push(Edge {
-            cond,
-            node: to,
-            back_edge,
-        });
-        self.cfg.nodes[to].prev.push(Edge {
-            cond,
-            node: from,
-            back_edge,
-        });
+    /// Add an edge between two basic blocks.
+    fn add_edge(&mut self, from: NodeId, to: NodeId, edge: Edge) {
+        self.cfg.nodes[from].next.push(edge);
+        let prev_edge = match edge {
+            Edge::Unconditional { back_edge, .. } => Edge::Unconditional {
+                node: from,
+                back_edge,
+            },
+            Edge::Conditional {
+                back_edge,
+                true_branch,
+                ..
+            } => Edge::Conditional {
+                node: from,
+                back_edge,
+                true_branch,
+            },
+        };
+        self.cfg.nodes[to].prev.push(prev_edge);
     }
 
     /// Build CFG for a block starting at `current`, returning the last block ID.
-    fn build_block(&mut self, block: &Block, mut current: NodeId) -> NodeId {
+    fn build_block(&mut self, block: &Block, mut current_id: NodeId) -> NodeId {
         for op in block.iter() {
             match op {
                 Op::Inst(inst) => {
-                    self.cfg.nodes[current]
-                        .code
-                        .push(crate::ssa::Stmt::Instr(inst.inner().clone()));
+                    current_id = self.build_inst(inst.inner(), current_id);
                 }
                 Op::If {
                     then_blk, else_blk, ..
                 } => {
-                    let then_id = self.new_block();
-                    let else_id = self.new_block();
-                    let join_id = self.new_block();
-
-                    let cond_idx = self.next_cond_idx;
-                    self.next_cond_idx += 1;
-                    self.add_edge(
-                        current,
-                        then_id,
-                        EdgeCond {
-                            expr_index: cond_idx,
-                            edge_type: EdgeType::Conditional(true),
-                        },
-                        false,
-                    );
-                    self.add_edge(
-                        current,
-                        else_id,
-                        EdgeCond {
-                            expr_index: cond_idx,
-                            edge_type: EdgeType::Conditional(false),
-                        },
-                        false,
-                    );
-
-                    let then_exit = self.build_block(then_blk, then_id);
-                    let else_exit = self.build_block(else_blk, else_id);
-
-                    self.add_edge(then_exit, join_id, EdgeCond::unconditional(), false);
-                    self.add_edge(else_exit, join_id, EdgeCond::unconditional(), false);
-
-                    current = join_id;
+                    current_id = self.build_if(then_blk, else_blk, current_id);
                 }
                 Op::Repeat { count, body, .. } => {
-                    current = self.build_repeat(*count as u32, body, current);
+                    current_id = self.build_repeat(*count, body, current_id);
                 }
                 Op::While { body, .. } => {
-                    // Loop structure: current -> body (true), current -> exit (false), body -> current (back edge)
-                    let body_id = self.new_block();
-                    let exit_id = self.new_block();
-
-                    let cond_idx = self.next_cond_idx;
-                    self.next_cond_idx += 1;
-                    self.add_edge(
-                        current,
-                        body_id,
-                        EdgeCond {
-                            expr_index: cond_idx,
-                            edge_type: EdgeType::Conditional(true),
-                        },
-                        false,
-                    );
-                    self.add_edge(
-                        current,
-                        exit_id,
-                        EdgeCond {
-                            expr_index: cond_idx,
-                            edge_type: EdgeType::Conditional(false),
-                        },
-                        false,
-                    );
-
-                    let body_exit = self.build_block(body, body_id);
-                    self.add_edge(body_exit, current, EdgeCond::unconditional(), true);
-
-                    current = exit_id;
+                    current_id = self.build_while(body, current_id);
                 }
             }
         }
-        current
+        current_id
     }
 
-    fn build_repeat(&mut self, count: u32, body: &Block, preheader: NodeId) -> NodeId {
-        let header = self.new_block();
+    /// Build an instruction in the current block.
+    fn build_inst(&mut self, inst: &Instruction, current_id: NodeId) -> NodeId {
+        self.cfg.nodes[current_id]
+            .code
+            .push(Stmt::Inst(inst.clone()));
+
+        current_id
+    }
+
+    /// If statements are lifted into a CFG structure with explicit header,
+    /// then, else, and join blocks.
+    fn build_if(&mut self, then_body: &Block, else_body: &Block, preheader_id: NodeId) -> NodeId {
+        let header_id = self.new_block();
+        let then_id = self.new_block();
+        let else_id = self.new_block();
+        let join_id = self.new_block();
+
+        self.add_edge(
+            preheader_id,
+            header_id,
+            Edge::Unconditional {
+                node: header_id,
+                back_edge: false,
+            },
+        );
+
+        // Create branch header with condition. The condition is unknown in this
+        // phase, and is filled in with the correct value during SSA lifting.
+        self.cfg.nodes[header_id]
+            .code
+            .push(Stmt::Branch(Expr::Unknown));
+        self.add_edge(
+            header_id,
+            then_id,
+            Edge::Conditional {
+                node: then_id,
+                back_edge: false,
+                true_branch: true,
+            },
+        );
+        self.add_edge(
+            header_id,
+            else_id,
+            Edge::Conditional {
+                node: else_id,
+                back_edge: false,
+                true_branch: false,
+            },
+        );
+
+        // Build then body.
+        let then_exit_id = self.build_block(then_body, then_id);
+        self.add_edge(
+            then_exit_id,
+            join_id,
+            Edge::Unconditional {
+                node: join_id,
+                back_edge: false,
+            },
+        );
+
+        // Build else body.
+        let else_exit_id = self.build_block(else_body, else_id);
+        self.add_edge(
+            else_exit_id,
+            join_id,
+            Edge::Unconditional {
+                node: join_id,
+                back_edge: false,
+            },
+        );
+
+        join_id
+    }
+
+    // While loops are lifted into a CFG structure with explicit loop header, body, and exit blocks.
+    fn build_while(&mut self, body: &Block, preheader_id: NodeId) -> NodeId {
+        let header_id = self.new_block();
         let body_id = self.new_block();
         let exit_id = self.new_block();
-        let local = self.next_local_id;
-        self.next_local_id += 1;
 
-        // Initialize counter in preheader.
-        self.cfg.nodes[preheader]
-            .code
-            .push(crate::ssa::Stmt::RepeatInit { local, count });
-
-        self.add_edge(preheader, header, EdgeCond::unconditional(), false);
-
-        // Header condition.
-        self.cfg.nodes[header]
-            .code
-            .push(crate::ssa::Stmt::RepeatCond { local, count });
-
-        let cond_idx = self.next_cond_idx;
-        self.next_cond_idx += 1;
         self.add_edge(
-            header,
+            preheader_id,
+            header_id,
+            Edge::Unconditional {
+                node: header_id,
+                back_edge: false,
+            },
+        );
+
+        // Create loop header with condition. The condition is unknown in this
+        // phase, and is filled in with the correct value during SSA lifting.
+        self.cfg.nodes[header_id]
+            .code
+            .push(Stmt::Branch(Expr::Unknown));
+        self.add_edge(
+            header_id,
             body_id,
-            EdgeCond {
-                expr_index: cond_idx,
-                edge_type: EdgeType::Conditional(true),
+            Edge::Conditional {
+                node: body_id,
+                back_edge: false,
+                true_branch: true,
             },
-            false,
         );
         self.add_edge(
-            header,
+            header_id,
             exit_id,
-            EdgeCond {
-                expr_index: cond_idx,
-                edge_type: EdgeType::Conditional(false),
+            Edge::Conditional {
+                node: exit_id,
+                back_edge: false,
+                true_branch: false,
             },
-            false,
         );
 
-        let body_exit = self.build_block(body, body_id);
+        // Build loop body.
+        let body_exit_id = self.build_block(body, body_id);
+        self.add_edge(
+            body_exit_id,
+            header_id,
+            Edge::Unconditional {
+                node: header_id,
+                back_edge: true,
+            },
+        );
 
-        // Counter step at latch.
-        self.cfg.nodes[body_exit]
+        exit_id
+    }
+
+    /// Repeat loops are lifted into a CFG structure with explicit loop header, body, and exit blocks.
+    fn build_repeat(&mut self, count: u32, body: &Block, preheader_id: NodeId) -> NodeId {
+        let header_id = self.new_block();
+        let body_id = self.new_block();
+        let exit_id = self.new_block();
+
+        let phi_var = self.new_var();
+        let step_var = self.new_var();
+
+        // We need to introduce a loop counter variable here to distinguish
+        // repeat loops from while loops during SSA lifting.
+        let init_var = self.new_var();
+        self.cfg.nodes[preheader_id].code.push(Stmt::Assign {
+            dest: init_var.clone(),
+            expr: Expr::Constant(Constant::Felt(0)),
+        });
+        self.add_edge(
+            preheader_id,
+            header_id,
+            Edge::Unconditional {
+                node: header_id,
+                back_edge: false,
+            },
+        );
+
+        // Create loop header with phi and condition.
+        self.cfg.nodes[header_id].code.push(Stmt::Phi {
+            var: phi_var.clone(),
+            sources: vec![init_var, step_var.clone()],
+        });
+        self.cfg.nodes[header_id]
             .code
-            .push(crate::ssa::Stmt::RepeatStep { local });
+            .push(Stmt::Branch(Expr::BinOp(
+                BinOp::Lt,
+                Box::new(Expr::Var(phi_var.clone())),
+                Box::new(Expr::Constant(Constant::Felt(count as u64))),
+            )));
 
-        self.add_edge(body_exit, header, EdgeCond::unconditional(), true);
+        self.add_edge(
+            header_id,
+            body_id,
+            Edge::Conditional {
+                node: body_id,
+                back_edge: false,
+                true_branch: true,
+            },
+        );
+        self.add_edge(
+            header_id,
+            exit_id,
+            Edge::Conditional {
+                node: exit_id,
+                back_edge: false,
+                true_branch: false,
+            },
+        );
+
+        // Build loop body and increment loop counter.
+        let body_exit_id = self.build_block(body, body_id);
+        self.cfg.nodes[body_exit_id].code.push(Stmt::Assign {
+            dest: step_var,
+            expr: Expr::BinOp(
+                BinOp::Add,
+                Box::new(Expr::Var(phi_var)),
+                Box::new(Expr::Constant(Constant::Felt(1))),
+            ),
+        });
+        self.add_edge(
+            body_exit_id,
+            header_id,
+            Edge::Unconditional {
+                node: header_id,
+                back_edge: true,
+            },
+        );
 
         exit_id
     }
