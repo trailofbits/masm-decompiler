@@ -246,7 +246,7 @@ impl Builder {
         });
         self.cfg.nodes[header_id]
             .code
-            .push(Stmt::Branch(Expr::BinOp(
+            .push(Stmt::Branch(Expr::Binary(
                 BinOp::Lt,
                 Box::new(Expr::Var(phi_var.clone())),
                 Box::new(Expr::Constant(Constant::Felt(count as u64))),
@@ -275,7 +275,7 @@ impl Builder {
         let body_exit_id = self.build_block(body, body_id);
         self.cfg.nodes[body_exit_id].code.push(Stmt::Assign {
             dest: step_var,
-            expr: Expr::BinOp(
+            expr: Expr::Binary(
                 BinOp::Add,
                 Box::new(Expr::Var(phi_var)),
                 Box::new(Expr::Constant(Constant::Felt(1))),
