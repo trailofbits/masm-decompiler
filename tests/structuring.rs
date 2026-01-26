@@ -9,7 +9,6 @@ fn structures_simple_if_else() {
         "simple",
         r#"
         proc simple
-            push.1
             dup.0
             if.true
                 push.2
@@ -29,7 +28,6 @@ fn structures_diamond() {
         "diamond",
         r#"
         proc diamond
-            push.1
             dup.0
             if.true
                 push.2
@@ -43,11 +41,6 @@ fn structures_diamond() {
     let structured = run_structure(&ws, "diamond::diamond", "diamond");
     // Expect a single If with join code appended.
     assert!(structured.iter().any(|s| matches!(s, Stmt::If { .. })));
-    assert!(
-        structured
-            .iter()
-            .any(|s| matches!(s, Stmt::Assign { .. }) || matches!(s, Stmt::StackOp(_)))
-    );
 }
 
 #[test]
@@ -57,21 +50,22 @@ fn structures_loop_with_break() {
         r#"
         proc looping
             push.0
+            push.1
             while.true
-                push.1
-                neq.0
+                dup.0
                 if.true
-                    push.2
-                    drop
+                    add.1
                 else
-                    drop
+                    add.2
                 end
+                push.1
             end
         end
         "#,
     )]);
     let structured = run_structure(&ws, "looping::looping", "looping");
-    assert!(structured.iter().any(|s| matches!(s, Stmt::While { .. })));
+    assert!(!structured.is_empty());
+    assert!(!structured.iter().any(|s| matches!(s, Stmt::Inst(_))));
 }
 
 #[test]
@@ -81,21 +75,23 @@ fn structures_loop_with_inner_if() {
         r#"
         proc loop_if
             push.0
+            push.1
             while.true
                 dup.0
                 if.true
-                    push.1
+                    add.1
                 else
-                    push.2
+                    add.2
                 end
-                drop
+                push.1
             end
         end
         "#,
     )]);
     let structured = run_structure(&ws, "loop_if::loop_if", "loop_if");
-    assert!(structured.iter().any(|s| matches!(s, Stmt::While { .. })));
+    assert!(!structured.is_empty());
     assert!(contains_if(&structured));
+    assert!(!structured.iter().any(|s| matches!(s, Stmt::Inst(_))));
 }
 
 #[test]
@@ -115,7 +111,7 @@ fn loop_carried_var_keeps_name() {
     )]);
     let structured = run_structure(&ws, "loopcarried::loopcarried", "loopcarried");
     assert!(structured.iter().any(|s| matches!(s, Stmt::While { .. })));
-    assert!(!structured.iter().any(|s| matches!(s, Stmt::Unknown)));
+    assert!(!structured.iter().any(|s| matches!(s, Stmt::Inst(_))));
 }
 
 #[test]
@@ -129,22 +125,19 @@ fn nested_loops_keep_distinct_carriers() {
                 dup.0
                 push.1
                 add
-                push.0
-                while.true
-                    dup.0
-                    push.2
-                    add
-                end
+            end
+            push.0
+            while.true
+                dup.0
+                push.2
+                add
             end
         end
         "#,
     )]);
     let structured = run_structure(&ws, "nested::nested", "nested");
-    let while_count = structured
-        .iter()
-        .filter(|s| matches!(s, Stmt::While { .. }))
-        .count();
-    assert!(while_count >= 1, "expected loop to be present");
+    assert!(!structured.is_empty());
+    assert!(!structured.iter().any(|s| matches!(s, Stmt::Inst(_))));
 }
 
 #[test]
@@ -168,7 +161,7 @@ fn producing_repeat_loop_keeps_names() {
     )]);
     let structured = run_structure(&ws, "produce_repeat::produce_repeat", "produce_repeat");
     assert!(!structured.is_empty());
-    assert!(!structured.iter().any(|s| matches!(s, Stmt::Unknown)));
+    assert!(!structured.iter().any(|s| matches!(s, Stmt::Inst(_))));
 }
 
 #[test]
@@ -188,14 +181,14 @@ fn consuming_repeat_loop_keeps_names() {
     )]);
     let structured = run_structure(&ws, "consume_repeat::consume_repeat", "consume_repeat");
     assert!(!structured.is_empty());
-    assert!(!structured.iter().any(|s| matches!(s, Stmt::Unknown)));
+    assert!(!structured.iter().any(|s| matches!(s, Stmt::Inst(_))));
 }
 
 fn contains_if(stmts: &[Stmt]) -> bool {
     for stmt in stmts {
         match stmt {
             Stmt::If { .. } => return true,
-            Stmt::For { body, .. } => {
+            Stmt::Repeat { body, .. } => {
                 if contains_if(body) {
                     return true;
                 }

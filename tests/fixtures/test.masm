@@ -1,0 +1,20 @@
+pub proc producing_repeat_0
+  push.1
+  repeat.4
+    dup.0
+    add
+  end
+end
+
+
+pub proc producing_repeat_1
+  repeat.4
+    push.0
+  end
+end
+
+pub proc consuming_repeat_0
+  repeat.4
+    add
+  end
+end

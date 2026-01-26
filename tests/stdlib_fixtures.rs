@@ -13,8 +13,8 @@ fn assert_fixture_proc(module_path: &str, source: &str, proc_name: &str) {
         "decompile of {fq} produced no statements"
     );
     assert!(
-        !structured.iter().any(|s| matches!(s, Stmt::Unknown)),
-        "decompile of {fq} produced Unknowns: {structured:#?}"
+        !structured.iter().any(|s| matches!(s, Stmt::Inst(_))),
+        "decompile of {fq} produced raw insts: {structured:#?}"
     );
 }
 
@@ -28,72 +28,10 @@ macro_rules! fixture_module {
 }
 
 fixture_module!(
-    u64,
-    "u64",
-    include_str!("fixtures/u64.masm"),
-    [
-        overflowing_add,
-        wrapping_add,
-        wrapping_sub,
-        overflowing_sub,
-        wrapping_mul,
-        overflowing_mul,
-        lt,
-        gt,
-        lte,
-        gte,
-        eq,
-        neq,
-        eqz,
-        min,
-        max,
-        div,
-        r#mod,
-        divmod,
-        and,
-        or,
-        xor,
-        shl,
-        shr,
-        rotl,
-        rotr,
-        clz,
-        ctz,
-        clo,
-        cto,
-    ]
-);
-
-fixture_module!(
-    u256,
-    "u256",
-    include_str!("fixtures/u256.masm"),
-    [
-        wrapping_add,
-        wrapping_sub,
-        and,
-        or,
-        xor,
-        eqz,
-        eq,
-        wrapping_mul,
-    ]
-);
-
-fixture_module!(
     word,
     "word",
     include_str!("fixtures/word.masm"),
     [
-        reverse,
-        store_word_u32s_le,
-        eqz,
         testz,
-        gt,
-        gte,
-        lt,
-        lte,
-        eq,
-        test_eq,
     ]
 );

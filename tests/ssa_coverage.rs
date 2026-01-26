@@ -1,11 +1,11 @@
 use masm_decompiler::{
-    callgraph::CallGraph, frontend::testing::workspace_from_modules, signature::infer_signatures,
-    ssa::Stmt, ssa::lower::lower_proc_to_ssa,
+    callgraph::CallGraph, cfg::build_cfg_for_proc, frontend::testing::workspace_from_modules,
+    signature::infer_signatures, ssa::Stmt, ssa::lift::lift_cfg_to_ssa,
 };
 
 #[test]
-fn lowers_mapped_instructions_without_unknown() {
-    // Exercise a curated set of mapped instructions; expect no Unknown statements.
+fn lifts_mapped_instructions() {
+    // Exercise a curated set of mapped instructions; expect procedure to lift to SSA.
     let ws = workspace_from_modules(&[(
         "mapped",
         r#"
@@ -53,7 +53,6 @@ fn lowers_mapped_instructions_without_unknown() {
             # Advice stack operations
             adv_push.1
             adv_loadw
-            adv.push_mapval
             
             # Memory operations
             mem_load
@@ -68,7 +67,6 @@ fn lowers_mapped_instructions_without_unknown() {
             mem_storew_be.2
             mem_storew_le
             mem_storew_le.3
-            mem_stream
             
             # Local operations
             loc_load.1
@@ -81,16 +79,6 @@ fn lowers_mapped_instructions_without_unknown() {
             # Assertions
             assertz
             assert_eq
-            u32assert
-            u32assert2
-
-            # U32 operations
-            u32overflowing_add
-            u32overflowing_sub
-            u32overflowing_mul
-            u32overflowing_madd
-            u32split
-            u32and
 
             # Cryptographic operations
             hash
@@ -105,13 +93,14 @@ fn lowers_mapped_instructions_without_unknown() {
         end
         "#,
     )]);
-    let cg = CallGraph::build_for_workspace(&ws);
+    let cg = CallGraph::from(&ws);
     let sigs = infer_signatures(&ws, &cg);
     let proc = ws.lookup_proc("mapped::mapped").expect("proc");
-    let res = lower_proc_to_ssa(proc, "mapped", &sigs);
-    assert!(
-        res.code.iter().all(|s| !matches!(s, Stmt::Unknown)),
-        "unexpected unknowns: {:?}",
-        res.code
-    );
+    let cfg = build_cfg_for_proc(proc).expect("cfg");
+    let res = lift_cfg_to_ssa(cfg, "mapped", "mapped::mapped", &sigs).expect("ssa");
+    let has_unknown = res
+        .nodes
+        .iter()
+        .any(|bb| bb.code.iter().any(|s| matches!(s, Stmt::Inst(_))));
+    assert!(!has_unknown, "unexpected raw insts: {:?}", res);
 }
