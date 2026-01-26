@@ -6,3 +6,6 @@ edition = "2024"
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 miden-assembly-syntax = { version = "0.20", default-features = false, features = ["std", "arbitrary"] }
+
+[dev-dependencies]
+proptest = "1.5"
