@@ -154,6 +154,25 @@ impl SsaStack {
         }
     }
 
+    /// Pad the bottom of the stack with new values, preserving the top.
+    pub fn pad_front<F>(&mut self, count: usize, mut make_value: F)
+    where
+        F: FnMut() -> Var,
+    {
+        for _ in 0..count {
+            let value = make_value();
+            self.stack.push_front(value);
+            self.required_depth += 1;
+        }
+    }
+
+    /// Truncate the bottom of the stack to keep the top `len` values.
+    pub fn truncate_front(&mut self, len: usize) {
+        while self.stack.len() > len {
+            self.stack.pop_front();
+        }
+    }
+
     /// Get a value by absolute index from the bottom.
     pub fn get(&self, index: usize) -> Option<Var> {
         self.stack.get(index).cloned()

@@ -2,16 +2,13 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use masm_decompiler::{
-    analysis::{
-        IndexExpr, build_def_use_map, compute_loop_indices, eliminate_dead_code,
-        propagate_expressions,
-    },
+    analysis::{build_def_use_map, eliminate_dead_code, propagate_expressions},
     callgraph::CallGraph,
     cfg::build_cfg_for_proc,
     fmt::CodeWriter,
     frontend::{LibraryRoot, Workspace},
-    signature::infer_signatures,
-    ssa::{lower::lower_cfg_to_ssa, out_of_ssa::transform_out_of_ssa},
+    signature::{infer_signatures, ProcSignature},
+    ssa::lift::lift_cfg_to_ssa,
     structuring::structure,
 };
 
@@ -57,7 +54,7 @@ fn run(cli: Cli) -> Result<(), String> {
     workspace.load_dependencies();
     let proc_count: usize = workspace.modules().map(|m| m.procedures().count()).sum();
 
-    let callgraph = CallGraph::build_for_workspace(&workspace);
+    let callgraph = CallGraph::from(&workspace);
     let signatures = infer_signatures(&workspace, &callgraph);
     let target_proc = cli.procedure.as_deref();
 
@@ -66,9 +63,9 @@ fn run(cli: Cli) -> Result<(), String> {
         cli.input.to_string_lossy()
     );
     println!("Call graph nodes: {}", callgraph.nodes.len());
-    println!("Signatures inferred: {}", signatures.signatures.len());
+    println!("Signatures inferred: {}", signatures.len());
 
-    // TODO: wire proc selection; for now lower all
+    // TODO: wire proc selection; for now lift all
     for module in workspace.modules() {
         for proc in module.procedures() {
             if let Some(target) = target_proc {
@@ -79,29 +76,26 @@ fn run(cli: Cli) -> Result<(), String> {
             let cfg = build_cfg_for_proc(proc).map_err(|e| format!("{e:?}"))?;
             let proc_name = proc.name().to_string();
             let fq = format!("{}::{}", module.module_path(), proc.name());
-            let lowered =
-                lower_cfg_to_ssa(cfg, &module.module_path().to_string(), &fq, &signatures);
-            let mut cfg = lowered.cfg;
-            let mut def_use = build_def_use_map(&cfg);
-            propagate_expressions(&mut cfg, &mut def_use);
-            eliminate_dead_code(&mut cfg, &mut def_use);
-            transform_out_of_ssa(&mut cfg);
-            let mut structured = structure(cfg);
-            append_return(&mut structured, lowered.outputs);
+            let (sig_inputs, sig_outputs) = match signatures.get(&fq) {
+                Some(ProcSignature::Known { inputs, outputs, .. }) => (*inputs, Some(*outputs)),
+                _ => (0, None),
+            };
+            let mut ssa = lift_cfg_to_ssa(cfg, &module.module_path().to_string(), &fq, &signatures)
+                .map_err(|e| format!("{e:?}"))?;
+            let mut def_use = build_def_use_map(&ssa);
+            propagate_expressions(&mut ssa, &mut def_use);
+            eliminate_dead_code(&mut ssa, &mut def_use);
+            let mut structured = structure(ssa);
+            append_return(&mut structured, sig_outputs);
             if cli.show_graph {
                 println!("CFG for {}::{}", module.module_path(), proc.name());
-                let name_map = build_var_name_map(&structured);
-                let mut writer = if name_map.is_empty() {
-                    CodeWriter::new()
-                } else {
-                    CodeWriter::with_var_names(name_map)
-                };
+                let mut writer = CodeWriter::new();
                 let ret_vars = find_return_vars(&structured);
                 let header = build_header(
                     proc_name,
-                    lowered.inputs,
+                    sig_inputs,
                     ret_vars.as_deref(),
-                    lowered.outputs,
+                    sig_outputs,
                     &writer,
                 );
                 writer.write_line(&header);
@@ -132,14 +126,14 @@ fn parse_library_spec(spec: &str) -> Result<LibraryRoot, String> {
 
 fn build_header(
     proc_name: String,
-    inputs: u32,
+    inputs: usize,
     outputs: Option<&[masm_decompiler::ssa::Var]>,
-    inferred: Option<u32>,
+    inferred: Option<usize>,
     names: &CodeWriter,
 ) -> String {
     let mut args = Vec::new();
     for i in 0..inputs {
-        let v = masm_decompiler::ssa::Var::no_sub(i);
+        let v = masm_decompiler::ssa::Var::new(i);
         args.push(names.fmt_var(&v));
     }
     let arg_list = args.join(", ");
@@ -149,12 +143,12 @@ fn build_header(
                 if n == 0 {
                     String::new()
                 } else if n == 1 {
-                    let v = masm_decompiler::ssa::Var::no_sub(0);
+                    let v = masm_decompiler::ssa::Var::new(0);
                     format!(" -> {}", names.fmt_var(&v))
                 } else {
                     let mut parts = Vec::new();
                     for i in 0..n {
-                        let v = masm_decompiler::ssa::Var::no_sub(i);
+                        let v = masm_decompiler::ssa::Var::new(i);
                         parts.push(names.fmt_var(&v));
                     }
                     format!(" -> ({})", parts.join(", "))
@@ -177,46 +171,7 @@ fn build_header(
     format!("proc {}({}){} {{", proc_name, arg_list, ret_list)
 }
 
-fn build_loop_var_names(
-    structured: &[masm_decompiler::ssa::Stmt],
-) -> std::collections::HashMap<masm_decompiler::ssa::Var, String> {
-    let mut map = std::collections::HashMap::new();
-    let idx_map = compute_loop_indices(structured);
-    for (var, idx) in idx_map {
-        if let IndexExpr::Affine {
-            base,
-            stride,
-            counter,
-        } = idx
-        {
-            let counter_name = CodeWriter::new().fmt_var(&counter);
-            let stride_part = if stride == 1 {
-                counter_name.clone()
-            } else {
-                format!("{stride}*{counter_name}")
-            };
-            let name = if base == 0 {
-                format!("v_({stride_part})")
-            } else if base > 0 {
-                format!("v_({stride_part} + {base})")
-            } else {
-                format!("v_({stride_part} - {})", -base)
-            };
-            map.insert(var, name);
-        }
-    }
-    map
-}
-
-fn build_var_name_map(
-    structured: &[masm_decompiler::ssa::Stmt],
-) -> std::collections::HashMap<masm_decompiler::ssa::Var, String> {
-    let mut map = std::collections::HashMap::new();
-    map.extend(build_loop_var_names(structured));
-    map
-}
-
-fn append_return(code: &mut Vec<masm_decompiler::ssa::Stmt>, outputs: Option<u32>) {
+fn append_return(code: &mut Vec<masm_decompiler::ssa::Stmt>, outputs: Option<usize>) {
     let Some(count) = outputs else { return };
     if let Some(outs) = simulate_linear_stack(code, count) {
         code.push(masm_decompiler::ssa::Stmt::Return(outs));
@@ -225,32 +180,103 @@ fn append_return(code: &mut Vec<masm_decompiler::ssa::Stmt>, outputs: Option<u32
 
 fn simulate_linear_stack(
     code: &[masm_decompiler::ssa::Stmt],
-    outputs: u32,
+    outputs: usize,
 ) -> Option<Vec<masm_decompiler::ssa::Var>> {
     use masm_decompiler::ssa::Stmt::*;
     let mut stack: Vec<masm_decompiler::ssa::Var> = Vec::new();
     for stmt in code {
         match stmt {
-            StackOp(op) => {
-                if op.pops.len() > stack.len() {
+            MemLoad(load) => {
+                if load.address.len() > stack.len() {
                     return None;
                 }
-                for _ in 0..op.pops.len() {
+                for _ in 0..load.address.len() {
                     stack.pop();
                 }
-                for v in &op.pushes {
-                    stack.push(*v);
+                for v in &load.outputs {
+                    stack.push(v.clone());
+                }
+            }
+            MemStore(store) => {
+                let pops = store.address.len() + store.values.len();
+                if pops > stack.len() {
+                    return None;
+                }
+                for _ in 0..pops {
+                    stack.pop();
+                }
+            }
+            AdvLoad(load) => {
+                for v in &load.outputs {
+                    stack.push(v.clone());
+                }
+            }
+            AdvStore(store) => {
+                if store.values.len() > stack.len() {
+                    return None;
+                }
+                for _ in 0..store.values.len() {
+                    stack.pop();
+                }
+            }
+            LocalLoad(load) => {
+                for v in &load.outputs {
+                    stack.push(v.clone());
+                }
+            }
+            LocalStore(store) => {
+                if store.values.len() > stack.len() {
+                    return None;
+                }
+                for _ in 0..store.values.len() {
+                    stack.pop();
+                }
+            }
+            Call(call) | Exec(call) | SysCall(call) => {
+                if call.args.len() > stack.len() {
+                    return None;
+                }
+                for _ in 0..call.args.len() {
+                    stack.pop();
+                }
+                for v in &call.results {
+                    stack.push(v.clone());
+                }
+            }
+            DynCall { args, results } => {
+                if args.len() > stack.len() {
+                    return None;
+                }
+                for _ in 0..args.len() {
+                    stack.pop();
+                }
+                for v in results {
+                    stack.push(v.clone());
+                }
+            }
+            Intrinsic(intr) => {
+                if intr.args.len() > stack.len() {
+                    return None;
+                }
+                for _ in 0..intr.args.len() {
+                    stack.pop();
+                }
+                for v in &intr.results {
+                    stack.push(v.clone());
                 }
             }
             Return(vals) => return Some(vals.clone()),
             If { .. }
-            | Switch { .. }
             | While { .. }
-            | For { .. }
-            | RepeatInit { .. }
-            | RepeatCond { .. }
-            | RepeatStep { .. } => return None,
-            _ => {}
+            | Repeat { .. }
+            | Phi { .. }
+            | Branch(_)
+            | Break
+            | Continue
+            | Inst(_)
+            | Nop
+            => return None,
+            Assign { .. } => {}
         }
     }
     if stack.len() < outputs as usize {

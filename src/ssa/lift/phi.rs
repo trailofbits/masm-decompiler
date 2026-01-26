@@ -5,6 +5,7 @@ use std::collections::{HashSet, VecDeque};
 use crate::cfg::NodeId;
 
 use super::context::{Frame, SsaContext};
+use super::repeat::RepeatInfo;
 use super::{SsaError, SsaResult};
 use crate::ssa::{Expr, SsaStack, Stmt, Var};
 
@@ -46,7 +47,7 @@ pub(super) fn reconcile_stack_len(
     is_back_edge: bool,
     existing_stack: &mut SsaStack,
     incoming_stack: &mut SsaStack,
-    repeat_counts: &[Option<usize>],
+    repeat_infos: &[Option<RepeatInfo>],
     base_stack_len: &[Option<usize>],
     phi_state: &mut [BlockPhiState],
     ctx: &mut SsaContext,
@@ -59,22 +60,25 @@ pub(super) fn reconcile_stack_len(
     if !is_back_edge {
         return Err(SsaError::UnbalancedIf);
     }
-    let Some(count) = repeat_counts.get(block).copied().flatten() else {
-        return Err(SsaError::NonNeutralWhile);
-    };
-    let Some(base_len) = base_stack_len[block] else {
-        return Err(SsaError::NonNeutralWhile);
-    };
-    let delta = incoming_len as isize - base_len as isize;
-    let target_len = base_len as isize + delta.saturating_mul(count as isize);
-    if target_len <= 0 {
+    if repeat_infos.get(block).and_then(|r| r.as_ref()).is_none() {
+        if std::env::var("DEBUG_SSA").is_ok() {
+            eprintln!(
+                "non-neutral while at block {}: existing_len {}, incoming_len {}",
+                block, existing_len, incoming_len
+            );
+        }
         return Err(SsaError::NonNeutralWhile);
     }
-    let target_len = target_len as usize;
-    existing_stack.pad_to_len(target_len, || ctx.new_var());
-    incoming_stack.pad_to_len(target_len, || ctx.new_var());
-    existing_stack.truncate(target_len);
-    incoming_stack.truncate(target_len);
+    let target_len = base_stack_len
+        .get(block)
+        .and_then(|v| *v)
+        .unwrap_or(existing_len);
+    if incoming_len > target_len {
+        incoming_stack.truncate_front(target_len);
+    } else if incoming_len < target_len {
+        let padding = target_len - incoming_len;
+        incoming_stack.pad_front(padding, || ctx.new_var());
+    }
     if let Some(phi) = phi_state.get_mut(block) {
         if phi.stack.len() < target_len {
             phi.stack.resize_with(target_len, PhiInfo::default);
@@ -93,7 +97,7 @@ pub(super) fn merge_into_block(
     incoming: &Frame,
     in_state: &mut [Option<Frame>],
     phi_state: &mut [BlockPhiState],
-    repeat_counts: &[Option<usize>],
+    repeat_infos: &[Option<RepeatInfo>],
     base_stack_len: &mut [Option<usize>],
     ctx: &mut SsaContext,
 ) -> SsaResult<bool> {
@@ -114,7 +118,7 @@ pub(super) fn merge_into_block(
                 is_back_edge,
                 &mut existing_stack,
                 &mut incoming_stack,
-                repeat_counts,
+                repeat_infos,
                 base_stack_len,
                 phi_state,
                 ctx,

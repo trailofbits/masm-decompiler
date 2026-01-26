@@ -5,7 +5,7 @@ pub fn apply(code: &mut Vec<Stmt>) {
     let mut i = 0;
     while i < code.len() {
         if let Stmt::Assign {
-            dst,
+            dest: dst,
             expr: crate::ssa::Expr::Var(v),
         } = &code[i]
         {
@@ -22,8 +22,8 @@ pub fn apply(code: &mut Vec<Stmt>) {
             if let Some(first) = sources.first() {
                 if sources.iter().all(|s| s == first) {
                     code[i] = Stmt::Assign {
-                        dst: *var,
-                        expr: crate::ssa::Expr::Var(*first),
+                        dest: var.clone(),
+                        expr: crate::ssa::Expr::Var(first.clone()),
                     };
                     continue;
                 }
@@ -50,6 +50,10 @@ pub fn apply(code: &mut Vec<Stmt>) {
                     invert_cond(cond);
                     std::mem::swap(then_body, else_body);
                 }
+                if is_trivially_false(cond) && else_body.is_empty() {
+                    code.remove(i);
+                    continue;
+                }
                 if is_trivially_true(cond) && else_body.is_empty() {
                     let mut body = std::mem::take(then_body);
                     code.splice(i..=i, body.drain(..));
@@ -61,22 +65,13 @@ pub fn apply(code: &mut Vec<Stmt>) {
                     }
                 }
             }
-            Stmt::Switch {
-                expr: _,
-                cases,
-                default,
-            } => {
-                for (_, body) in cases.iter_mut() {
-                    apply(body);
-                }
-                apply(default);
-                // Drop empty cases/default if everything is empty.
-                if cases.iter().all(|(_, body)| body.is_empty()) && default.is_empty() {
+            Stmt::Repeat { body, .. } => {
+                apply(body);
+                if body.is_empty() {
                     code.remove(i);
                     continue;
                 }
             }
-            Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => {}
             Stmt::While { cond, body } => {
                 apply(body);
                 if let Some(Stmt::If {
@@ -93,15 +88,6 @@ pub fn apply(code: &mut Vec<Stmt>) {
                         body.remove(0);
                     }
                 }
-                if body.is_empty() {
-                    code.remove(i);
-                    continue;
-                }
-                if body.len() == 1 && matches!(body[0], Stmt::Break | Stmt::Continue) {
-                    // Loop immediately breaks; drop it.
-                    code.remove(i);
-                    continue;
-                }
             }
             _ => {}
         }
@@ -112,11 +98,25 @@ pub fn apply(code: &mut Vec<Stmt>) {
 fn is_trivially_true(expr: &crate::ssa::Expr) -> bool {
     match expr {
         crate::ssa::Expr::True => true,
-        crate::ssa::Expr::BinOp(crate::ssa::BinOp::And, a, b) => {
+        crate::ssa::Expr::Constant(c) => const_truth(c) == Some(true),
+        crate::ssa::Expr::Binary(crate::ssa::BinOp::And, a, b) => {
             is_trivially_true(a) && is_trivially_true(b)
         }
-        crate::ssa::Expr::BinOp(crate::ssa::BinOp::Or, a, b) => {
+        crate::ssa::Expr::Binary(crate::ssa::BinOp::Or, a, b) => {
             is_trivially_true(a) || is_trivially_true(b)
+        }
+        _ => false,
+    }
+}
+
+fn is_trivially_false(expr: &crate::ssa::Expr) -> bool {
+    match expr {
+        crate::ssa::Expr::Constant(c) => const_truth(c) == Some(false),
+        crate::ssa::Expr::Binary(crate::ssa::BinOp::And, a, b) => {
+            is_trivially_false(a) || is_trivially_false(b)
+        }
+        crate::ssa::Expr::Binary(crate::ssa::BinOp::Or, a, b) => {
+            is_trivially_false(a) && is_trivially_false(b)
         }
         _ => false,
     }
@@ -128,4 +128,12 @@ fn invert_cond(cond: &mut crate::ssa::Expr) {
 
 fn is_negation_of(loop_cond: &crate::ssa::Expr, guard: &crate::ssa::Expr) -> bool {
     matches!(guard, crate::ssa::Expr::Unary(crate::ssa::UnOp::Not, inner) if **inner == *loop_cond)
+}
+
+fn const_truth(c: &crate::ssa::Constant) -> Option<bool> {
+    match c {
+        crate::ssa::Constant::Felt(v) => Some(*v != 0),
+        crate::ssa::Constant::Word(w) => Some(w.iter().any(|x| *x != 0)),
+        crate::ssa::Constant::Defined(_) => None,
+    }
 }

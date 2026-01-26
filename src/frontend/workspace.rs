@@ -103,8 +103,8 @@ impl Workspace {
         self.modules.iter()
     }
 
-    pub fn lookup_proc(&self, fq_name: &str) -> Option<&miden_assembly_syntax::ast::Procedure> {
-        let (m_idx, p_idx) = self.proc_index.get(fq_name).copied()?;
+    pub fn lookup_proc(&self, name: &str) -> Option<&miden_assembly_syntax::ast::Procedure> {
+        let (m_idx, p_idx) = self.proc_index.get(name).copied()?;
         self.modules
             .get(m_idx)
             .and_then(|m| m.procedures().nth(p_idx))

@@ -101,7 +101,7 @@ impl<'a> DomTreeBuilder<'a> {
         self.dsu[idx] = idx;
         self.label[idx] = idx;
 
-        for w in self.cfg.succs(u) {
+        for w in self.cfg.successors(u) {
             let w = w as usize;
             if self.index[w] == 0 && w != 0 {
                 self.initial_dfs(w);
@@ -211,7 +211,7 @@ impl<'a> DomFrontierBuilder<'a> {
     }
 
     fn compute_df(&mut self, n: NodeId) {
-        for succ in self.cfg.succs(n) {
+        for succ in self.cfg.successors(n) {
             if self.dom_tree.idom[succ] != n {
                 self.df[n].push(succ);
             }

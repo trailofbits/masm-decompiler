@@ -117,12 +117,14 @@ fn lift_arith_inst(
         Instruction::Eq => lift_binop(BinOp::Eq, state, ctx, alloc),
         Instruction::EqImm(imm) => lift_binop_imm(BinOp::Eq, imm, state, ctx, alloc),
         Instruction::Neq => lift_binop(BinOp::Neq, state, ctx, alloc),
+        Instruction::NeqImm(imm) => lift_binop_imm(BinOp::Neq, imm, state, ctx, alloc),
         Instruction::Lt => lift_binop(BinOp::Lt, state, ctx, alloc),
         Instruction::Lte => lift_binop(BinOp::Lte, state, ctx, alloc),
         Instruction::Gt => lift_binop(BinOp::Gt, state, ctx, alloc),
         Instruction::Gte => lift_binop(BinOp::Gte, state, ctx, alloc),
         Instruction::Not => lift_unop(UnOp::Not, state, ctx, alloc),
         Instruction::Neg => lift_unop(UnOp::Neg, state, ctx, alloc),
+        Instruction::Incr => lift_incr(state, ctx, alloc),
         _ => return Ok(None),
     };
     Ok(Some(vec![stmt]))
@@ -657,6 +659,12 @@ fn lift_intrinsic_inst(
     alloc: &mut impl VarAlloc,
 ) -> SsaResult<Option<Vec<Stmt>>> {
     let name = match inst {
+        Instruction::Assert => "assert".to_string(),
+        Instruction::AssertWithError(err) => format!("assert.{err}"),
+        Instruction::AssertEq => "assert_eq".to_string(),
+        Instruction::AssertEqWithError(err) => format!("assert_eq.{err}"),
+        Instruction::Assertz => "assertz".to_string(),
+        Instruction::AssertzWithError(err) => format!("assertz.{err}"),
         Instruction::Hash => "hash".to_string(),
         Instruction::HMerge => "hmerge".to_string(),
         Instruction::HPerm => "hperm".to_string(),
@@ -805,6 +813,18 @@ fn lift_unop(op: UnOp, state: &mut Frame, ctx: &mut SsaContext, alloc: &mut impl
     let a = state.pop_one(ctx, alloc, 1);
     let res = state.push_many(ctx, alloc, 1).pop().unwrap();
     let expr = Expr::Unary(op, Box::new(ctx.lookup_expr(state, a)));
+    state.exprs.insert(res.clone(), expr.clone());
+    Stmt::Assign { dest: res, expr }
+}
+
+fn lift_incr(state: &mut Frame, ctx: &mut SsaContext, alloc: &mut impl VarAlloc) -> Stmt {
+    let a = state.pop_one(ctx, alloc, 1);
+    let res = state.push_many(ctx, alloc, 1).pop().unwrap();
+    let expr = Expr::Binary(
+        BinOp::Add,
+        Box::new(ctx.lookup_expr(state, a)),
+        Box::new(Expr::Constant(Constant::Felt(1))),
+    );
     state.exprs.insert(res.clone(), expr.clone());
     Stmt::Assign { dest: res, expr }
 }

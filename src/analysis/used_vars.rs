@@ -1,49 +1,32 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    cfg::{Cfg, InstrPos},
+    cfg::{Cfg, StmtPos},
     ssa::{Expr, Stmt, Var},
 };
 
 /// Mapping from variable definitions to their uses (and vice versa).
-pub type DefUseMap = (HashMap<Var, InstrPos>, HashMap<Var, HashSet<InstrPos>>);
+pub type DefUseMap = (HashMap<Var, StmtPos>, HashMap<Var, HashSet<StmtPos>>);
 
 /// Build def→use and use→def maps for a CFG.
 pub fn build_def_use_map(cfg: &Cfg) -> DefUseMap {
-    let mut def_map: HashMap<Var, InstrPos> = HashMap::new();
-    let mut use_map: HashMap<Var, HashSet<InstrPos>> = HashMap::new();
+    let mut def_map: HashMap<Var, StmtPos> = HashMap::new();
+    let mut use_map: HashMap<Var, HashSet<StmtPos>> = HashMap::new();
 
     for (node_idx, block) in cfg.nodes.iter().enumerate() {
         for (instr_idx, stmt) in block.code.iter().enumerate() {
-            let pos = InstrPos {
+            let pos = StmtPos {
                 node: node_idx,
                 instr: instr_idx,
             };
 
-            if let Some(def) = defined_var(stmt) {
-                def_map.insert(def, pos);
-                use_map.entry(def).or_default();
+            for var in stmt.defines_vars() {
+                def_map.insert(var.clone(), pos);
+                use_map.entry(var).or_default();
             }
 
-            for var in used_vars(stmt) {
+            for var in stmt.uses_vars() {
                 use_map.entry(var).or_default().insert(pos);
-            }
-        }
-    }
-
-    // Treat values defined in exit blocks (no forward successors) as observable outputs.
-    for (node_idx, block) in cfg.nodes.iter().enumerate() {
-        let has_forward_succ = block.next.iter().any(|e| !e.back_edge);
-        if has_forward_succ {
-            continue;
-        }
-        for (instr_idx, stmt) in block.code.iter().enumerate() {
-            if let Some(def) = defined_var(stmt) {
-                let pos = InstrPos {
-                    node: node_idx,
-                    instr: instr_idx,
-                };
-                use_map.entry(def).or_default().insert(pos);
             }
         }
     }
@@ -51,111 +34,107 @@ pub fn build_def_use_map(cfg: &Cfg) -> DefUseMap {
     (def_map, use_map)
 }
 
-/// Return variables used by a statement.
-pub fn used_vars(stmt: &Stmt) -> Vec<Var> {
-    match stmt {
-        Stmt::Assign { expr, .. } => used_in_expr(expr),
-        Stmt::Expr(expr) | Stmt::Branch(expr) => used_in_expr(expr),
-        Stmt::StackOp(op) => op.pops.clone(),
-        Stmt::MemLoad(mem) => mem.address.clone(),
-        Stmt::MemStore(mem) => {
-            let mut vars = mem.address.clone();
-            vars.extend(mem.values.iter().copied());
-            vars
-        }
-        Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => call.args.clone(),
-        Stmt::DynCall { args, .. } => args.clone(),
-        Stmt::Intrinsic(intr) => intr.args.clone(),
-        Stmt::AdvLoad(_) => Vec::new(),
-        Stmt::AdvStore(store) => store.values.clone(),
-        Stmt::LocalLoad(_) => Vec::new(),
-        Stmt::LocalStore(store) => store.values.clone(),
-        Stmt::Phi { sources, .. } => sources.clone(),
-        Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => Vec::new(),
-        Stmt::For {
-            init,
-            cond,
-            step,
-            body,
-        } => {
-            let mut vars = used_vars(init);
-            vars.extend(used_in_expr(cond));
-            vars.extend(used_vars(step));
-            for s in body {
-                vars.extend(used_vars(s));
-            }
-            vars
-        }
-        Stmt::If {
-            cond,
-            then_body,
-            else_body,
-        } => {
-            let mut vars = used_in_expr(cond);
-            for s in then_body {
-                vars.extend(used_vars(s));
-            }
-            for s in else_body {
-                vars.extend(used_vars(s));
-            }
-            vars
-        }
-        Stmt::Switch {
-            expr,
-            cases,
-            default,
-        } => {
-            let mut vars = used_in_expr(expr);
-            for (_, body) in cases {
-                for s in body {
-                    vars.extend(used_vars(s));
+pub trait UsesVars {
+    /// Return the set of variables used by this statement/expression.
+    fn uses_vars(&self) -> HashSet<Var>;
+}
+
+pub trait DefinesVars {
+    /// Return the set of variables defined by this statement.
+    fn defines_vars(&self) -> HashSet<Var>;
+}
+
+impl UsesVars for Stmt {
+    fn uses_vars(&self) -> HashSet<Var> {
+        match self {
+            Stmt::Assign { expr, .. } => expr.uses_vars(),
+            Stmt::Branch(expr) => expr.uses_vars(),
+            Stmt::MemLoad(load) => {
+                let mut vars = HashSet::new();
+                for v in load.address.iter().chain(load.outputs.iter()) {
+                    vars.insert(v.clone());
                 }
+                vars
             }
-            for s in default {
-                vars.extend(used_vars(s));
+            Stmt::MemStore(store) => {
+                let mut vars = HashSet::new();
+                for v in store.address.iter().chain(store.values.iter()) {
+                    vars.insert(v.clone());
+                }
+                vars
             }
-            vars
+            Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+                call.args.iter().cloned().collect()
+            }
+            Stmt::DynCall { args, .. } => args.iter().cloned().collect(),
+            Stmt::Intrinsic(intr) => intr.args.iter().cloned().collect(),
+            Stmt::AdvLoad(_) => HashSet::new(),
+            Stmt::AdvStore(store) => store.values.iter().cloned().collect(),
+            Stmt::LocalLoad(_) => HashSet::new(),
+            Stmt::LocalStore(store) => store.values.iter().cloned().collect(),
+            Stmt::Phi { sources, .. } => sources.iter().cloned().collect(),
+            Stmt::Repeat { body, .. } => {
+                let mut vars = HashSet::new();
+                for s in body {
+                    vars.extend(s.uses_vars());
+                }
+                vars
+            }
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                let mut vars = cond.uses_vars();
+                for s in then_body {
+                    vars.extend(s.uses_vars());
+                }
+                for s in else_body {
+                    vars.extend(s.uses_vars());
+                }
+                vars
+            }
+            Stmt::While { cond, body } => {
+                let mut vars = cond.uses_vars();
+                for s in body {
+                    vars.extend(s.uses_vars());
+                }
+                vars
+            }
+            Stmt::Return(values) => values.iter().cloned().collect(),
+            Stmt::Inst(_) | Stmt::Nop | Stmt::Break | Stmt::Continue => HashSet::new(),
         }
-        Stmt::While { cond, body } => {
-            let mut vars = used_in_expr(cond);
-            for s in body {
-                vars.extend(used_vars(s));
-            }
-            vars
-        }
-        Stmt::Return(vals) => vals.clone(),
-        Stmt::Break => Vec::new(),
-        Stmt::Continue => Vec::new(),
-        Stmt::Instr(_) | Stmt::Unknown | Stmt::Nop => Vec::new(),
     }
 }
 
 /// Return the variable defined by a statement, if any.
-pub fn defined_var(stmt: &Stmt) -> Option<Var> {
-    match stmt {
-        Stmt::Assign { dst, .. } => Some(*dst),
-        Stmt::Phi { var, .. } => Some(*var),
-        Stmt::For { init, step, .. } => defined_var(init).or_else(|| defined_var(step)),
-        Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => None,
-        _ => None,
+impl DefinesVars for Stmt {
+    fn defines_vars(&self) -> HashSet<Var> {
+        match self {
+            Stmt::Assign { dest, .. } => vec![dest.clone()].into_iter().collect(),
+            Stmt::Phi { var, .. } => vec![var.clone()].into_iter().collect(),
+            _ => HashSet::new(),
+        }
     }
 }
 
-/// Collect variables used within an expression.
-pub fn used_in_expr(expr: &Expr) -> Vec<Var> {
-    let mut out = Vec::new();
-    collect_expr_vars(expr, &mut out);
-    out
-}
-
-fn collect_expr_vars(expr: &Expr, out: &mut Vec<Var>) {
-    match expr {
-        Expr::Var(v) => out.push(*v),
-        Expr::BinOp(_, a, b) => {
-            collect_expr_vars(a, out);
-            collect_expr_vars(b, out);
+/// Return the variable used by an expression, if any.
+impl UsesVars for Expr {
+    fn uses_vars(&self) -> HashSet<Var> {
+        let mut result = HashSet::new();
+        match self {
+            Expr::Var(v) => {
+                result.insert(v.clone());
+            }
+            Expr::Binary(_, a, b) => {
+                result.extend(a.uses_vars());
+                result.extend(b.uses_vars());
+            }
+            Expr::Unary(_, a) => {
+                result.extend(a.uses_vars());
+            }
+            Expr::Constant(_) | Expr::True | Expr::Unknown => {}
         }
-        Expr::Unary(_, a) => collect_expr_vars(a, out),
-        Expr::Constant(_) | Expr::True | Expr::Unknown => {}
+        result
     }
 }

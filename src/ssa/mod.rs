@@ -1,8 +1,6 @@
 //! SSA intermediate representation.
 
-use std::collections::HashSet;
-
-use miden_assembly_syntax::ast::{Immediate, ImmFelt, ImmU32, Instruction};
+use miden_assembly_syntax::ast::{ImmFelt, ImmU32, Immediate, Instruction};
 use miden_assembly_syntax::parser::PushValue;
 
 pub mod lift;
@@ -13,8 +11,8 @@ pub use stack::SsaStack;
 /// Index expression used for SSA subscripts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum IndexExpr {
-    /// Constant index value.
-    Const(usize),
+    /// Signed constant index value.
+    Const(i64),
     /// Loop counter reference.
     LoopVar(usize),
     /// Sum of two index expressions.
@@ -237,17 +235,6 @@ impl From<&ImmU32> for Expr {
     }
 }
 
-/// Stack operation capturing explicit pops and pushes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StackOp {
-    /// Instruction that produced this stack operation.
-    pub inst: miden_assembly_syntax::ast::Instruction,
-    /// Variables popped from the stack.
-    pub pops: Vec<Var>,
-    /// Variables pushed onto the stack.
-    pub pushes: Vec<Var>,
-}
-
 /// SSA representation of a memory load.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemLoad {
@@ -324,20 +311,13 @@ pub struct Intrinsic {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
     /// Assignment to a new SSA variable.
-    Assign {
-        dest: Var,
-        expr: Expr,
-    },
-    /// Side-effect-free expression used as a statement.
-    Expr(Expr),
+    Assign { dest: Var, expr: Expr },
     /// Branch condition marker.
     Branch(Expr),
     /// Raw instruction placeholder.
     Inst(Instruction),
     /// No-op placeholder.
     Nop,
-    /// Stack operation with explicit pops/pushes.
-    StackOp(StackOp),
     /// Memory load operation.
     MemLoad(MemLoad),
     /// Memory store operation.
@@ -357,17 +337,11 @@ pub enum Stmt {
     /// Syscall to a known procedure.
     SysCall(Call),
     /// Dynamic call with unknown target.
-    DynCall {
-        args: Vec<Var>,
-        results: Vec<Var>,
-    },
+    DynCall { args: Vec<Var>, results: Vec<Var> },
     /// Named intrinsic operation.
     Intrinsic(Intrinsic),
     /// Phi-node merging multiple sources.
-    Phi {
-        var: Var,
-        sources: Vec<Var>,
-    },
+    Phi { var: Var, sources: Vec<Var> },
     /// Repeat loop with a known iteration count.
     Repeat {
         loop_var: Var,
@@ -380,133 +354,12 @@ pub enum Stmt {
         then_body: Vec<Stmt>,
         else_body: Vec<Stmt>,
     },
-    /// Switch statement over a selector expression.
-    Switch {
-        expr: Expr,
-        cases: Vec<(Constant, Vec<Stmt>)>,
-        default: Vec<Stmt>,
-    },
-    /// For loop with explicit init/step.
-    For {
-        init: Box<Stmt>,
-        cond: Expr,
-        step: Box<Stmt>,
-        body: Vec<Stmt>,
-    },
     /// While loop with a condition expression.
-    While {
-        cond: Expr,
-        body: Vec<Stmt>,
-    },
-    /// Break out of a loop.
+    While { cond: Expr, body: Vec<Stmt> },
+    /// Break out of the nearest loop.
     Break,
-    /// Continue to the next loop iteration.
+    /// Continue to the next iteration of the nearest loop.
     Continue,
-    /// Placeholder for unknown operations.
-    Unknown,
     /// Return the given values (top of stack order).
     Return(Vec<Var>),
-}
-
-impl Expr {
-    /// Return the set of variables referenced by this expression.
-    pub fn used_vars(&self) -> HashSet<Var> {
-        match self {
-            Expr::Var(v) => HashSet::from([v.clone()]),
-            Expr::Binary(_, left, right) => {
-                let mut vars = left.used_vars();
-                vars.extend(right.used_vars());
-                vars
-            }
-            Expr::Unary(_, expr) => expr.used_vars(),
-            _ => HashSet::new(),
-        }
-    }
-}
-
-impl Stmt {
-    /// Return variables used by this statement.
-    pub fn used_vars(&self) -> HashSet<Var> {
-        match self {
-            Stmt::Assign { expr, .. } => expr.used_vars(),
-            Stmt::Expr(expr) => expr.used_vars(),
-            Stmt::Branch(expr) => expr.used_vars(),
-            Stmt::StackOp(op) => op.pops.iter().cloned().collect(),
-            Stmt::MemLoad(mem) => mem.address.iter().cloned().collect(),
-            Stmt::MemStore(mem) => mem
-                .address
-                .iter()
-                .chain(mem.values.iter())
-                .cloned()
-                .collect(),
-            Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
-                call.args.iter().cloned().collect()
-            }
-            Stmt::DynCall { args, .. } => args.iter().cloned().collect(),
-            Stmt::Intrinsic(intr) => intr.args.iter().cloned().collect(),
-            Stmt::AdvLoad(_) => HashSet::new(),
-            Stmt::AdvStore(store) => store.values.iter().cloned().collect(),
-            Stmt::LocalLoad(_) => HashSet::new(),
-            Stmt::LocalStore(store) => store.values.iter().cloned().collect(),
-            Stmt::Phi { sources, .. } => sources.iter().cloned().collect(),
-            Stmt::Repeat { body, .. } => body.iter().flat_map(|s| s.used_vars()).collect(),
-            Stmt::If {
-                cond,
-                then_body,
-                else_body,
-            } => {
-                let mut vars = cond.used_vars();
-                for s in then_body {
-                    vars.extend(s.used_vars());
-                }
-                for s in else_body {
-                    vars.extend(s.used_vars());
-                }
-                vars
-            }
-            Stmt::Switch {
-                expr,
-                cases,
-                default,
-            } => {
-                let mut vars = expr.used_vars();
-                for (_, body) in cases {
-                    for s in body {
-                        vars.extend(s.used_vars());
-                    }
-                }
-                for s in default {
-                    vars.extend(s.used_vars());
-                }
-                vars
-            }
-            Stmt::For {
-                init,
-                cond,
-                step,
-                body,
-            } => {
-                let mut vars = init.used_vars();
-                vars.extend(cond.used_vars());
-                vars.extend(step.used_vars());
-                for s in body {
-                    vars.extend(s.used_vars());
-                }
-                vars
-            }
-            Stmt::While { cond, body } => {
-                let mut vars = cond.used_vars();
-                for s in body {
-                    vars.extend(s.used_vars());
-                }
-                vars
-            }
-            Stmt::Return(vals) => vals.iter().cloned().collect(),
-            Stmt::Inst(_)
-            | Stmt::Nop
-            | Stmt::Break
-            | Stmt::Continue
-            | Stmt::Unknown => HashSet::new(),
-        }
-    }
 }

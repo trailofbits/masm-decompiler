@@ -10,11 +10,11 @@ use miden_assembly_syntax::ast::{Instruction, InvocationTarget};
 use crate::cfg::{Cfg, Edge, NodeId};
 use crate::signature::SignatureMap;
 
-use super::{Expr, Stmt, Var};
+use super::{Expr, SsaStack, Stmt, Var};
 use context::{Frame, SsaContext, VarAlloc, alloc_scope, build_entry_frame, retain_live_exprs};
 use inst::lift_inst_to_stmt;
 use phi::{BlockPhiState, emit_phis, merge_into_block};
-use repeat::extract_repeat_count;
+use repeat::{RepeatBodySummary, RepeatInfo, extract_repeat_info, summarize_repeat_body};
 
 /// Errors produced during CFG-to-SSA lifting.
 #[derive(Debug)]
@@ -56,7 +56,8 @@ pub fn lift_cfg_to_ssa(
     sigs: &SignatureMap,
 ) -> SsaResult<Cfg> {
     let original_codes = collect_original_codes(&cfg);
-    let repeat_counts = compute_repeat_counts(&original_codes);
+    let repeat_infos = compute_repeat_infos(&original_codes);
+    let mut repeat_summaries: Vec<Option<RepeatBodySummary>> = vec![None; cfg.nodes.len()];
 
     let mut ctx = SsaContext::new(std::mem::take(&mut cfg.arena));
     let (mut in_state, mut base_stack_len, mut phi_state, mut def_cache, mut queue) =
@@ -78,7 +79,8 @@ pub fn lift_cfg_to_ssa(
             sigs,
             &mut in_state,
             &mut base_stack_len,
-            &repeat_counts,
+            &repeat_infos,
+            &mut repeat_summaries,
             &mut def_cache,
             &mut ctx,
             &mut queue,
@@ -93,11 +95,11 @@ fn collect_original_codes(cfg: &Cfg) -> Vec<Vec<Stmt>> {
     cfg.nodes.iter().map(|n| n.code.clone()).collect()
 }
 
-/// Pre-compute repeat loop counts per block, if detectable.
-fn compute_repeat_counts(original_codes: &[Vec<Stmt>]) -> Vec<Option<usize>> {
+/// Pre-compute repeat loop info per block, if detectable.
+fn compute_repeat_infos(original_codes: &[Vec<Stmt>]) -> Vec<Option<RepeatInfo>> {
     original_codes
         .iter()
-        .map(|code| extract_repeat_count(code))
+        .map(|code| extract_repeat_info(code))
         .collect()
 }
 
@@ -137,7 +139,8 @@ fn process_node(
     sigs: &SignatureMap,
     in_state: &mut [Option<Frame>],
     base_stack_len: &mut [Option<usize>],
-    repeat_counts: &[Option<usize>],
+    repeat_infos: &[Option<RepeatInfo>],
+    repeat_summaries: &mut [Option<RepeatBodySummary>],
     def_cache: &mut Vec<Vec<Vec<Var>>>,
     ctx: &mut SsaContext,
     queue: &mut Vec<NodeId>,
@@ -167,10 +170,49 @@ fn process_node(
     )?;
     cfg.nodes[node].code = new_code;
     retain_live_exprs(&mut state);
+    if cfg.nodes[node].next.is_empty() {
+        let has_return = cfg.nodes[node]
+            .code
+            .last()
+            .map(|stmt| matches!(stmt, Stmt::Return(_)))
+            .unwrap_or(false);
+        if !has_return {
+            let mut outputs: Vec<Var> = state.stack.iter().cloned().collect();
+            outputs.reverse();
+            if !outputs.is_empty() {
+                cfg.nodes[node].code.push(Stmt::Return(outputs));
+            }
+        }
+    }
+
+    maybe_record_repeat_summary(node, cfg, repeat_infos, repeat_summaries, queue)?;
 
     // Propagate to successors
     for edge in cfg.nodes[node].next.clone() {
         let succ = edge.node();
+        if let Some(info) = repeat_infos.get(node).and_then(|r| r.as_ref()) {
+            if matches!(edge, Edge::Conditional { true_branch: false, .. }) {
+                let Some(summary) = repeat_summaries.get(node).and_then(|s| s.as_ref()) else {
+                    continue;
+                };
+                let exit_frame = compute_repeat_exit_frame(&state, info, summary)?;
+                let updated = merge_into_block(
+                    succ,
+                    node,
+                    edge.back_edge(),
+                    &exit_frame,
+                    in_state,
+                    phi_state,
+                    repeat_infos,
+                    base_stack_len,
+                    ctx,
+                )?;
+                if updated {
+                    queue.push(succ);
+                }
+                continue;
+            }
+        }
         let updated = merge_into_block(
             succ,
             node,
@@ -178,7 +220,7 @@ fn process_node(
             &state,
             in_state,
             phi_state,
-            repeat_counts,
+            repeat_infos,
             base_stack_len,
             ctx,
         )?;
@@ -187,6 +229,60 @@ fn process_node(
         }
     }
     Ok(())
+}
+
+fn maybe_record_repeat_summary(
+    node: NodeId,
+    cfg: &Cfg,
+    repeat_infos: &[Option<RepeatInfo>],
+    repeat_summaries: &mut [Option<RepeatBodySummary>],
+    queue: &mut Vec<NodeId>,
+) -> SsaResult<()> {
+    for edge in cfg.nodes[node].next.iter() {
+        if !edge.back_edge() {
+            continue;
+        }
+        let header = edge.node();
+        let Some(info) = repeat_infos.get(header).and_then(|r| r.as_ref()) else {
+            continue;
+        };
+        if repeat_summaries.get(header).and_then(|s| s.as_ref()).is_some() {
+            continue;
+        }
+        let summary = summarize_repeat_body(&cfg.nodes[node].code, &info.loop_var)
+            .ok_or(SsaError::NonNeutralWhile)?;
+        repeat_summaries[header] = Some(summary);
+        queue.push(header);
+    }
+    Ok(())
+}
+
+fn compute_repeat_exit_frame(
+    entry: &Frame,
+    info: &RepeatInfo,
+    summary: &RepeatBodySummary,
+) -> SsaResult<Frame> {
+    let mut stack: Vec<Var> = entry.stack.iter().cloned().collect();
+    for _ in 0..info.count {
+        if summary.pops > stack.len() {
+            return Err(SsaError::NonNeutralWhile);
+        }
+        let keep = stack.len().saturating_sub(summary.pops);
+        stack.truncate(keep);
+        stack.extend(summary.outputs.iter().cloned());
+    }
+    let mut exprs = entry.exprs.clone();
+    let live: std::collections::HashSet<Var> = stack.iter().cloned().collect();
+    exprs.retain(|k, _| live.contains(k));
+    for var in &stack {
+        exprs.entry(var.clone()).or_insert_with(|| Expr::Var(var.clone()));
+    }
+    let required_depth = entry.stack.required_depth().max(stack.len());
+    let stack = std::collections::VecDeque::from(stack);
+    Ok(Frame {
+        stack: SsaStack::from_parts(stack, required_depth),
+        exprs,
+    })
 }
 
 /// Lift all statements in a block, inserting any leading phis.
@@ -250,34 +346,4 @@ fn ensure_branch_stmt(
         }
     }
     Ok(())
-}
-
-/// Compute the maximum required input stack depth across blocks.
-fn compute_inputs(in_state: &[Option<Frame>]) -> usize {
-    in_state
-        .iter()
-        .filter_map(|f| f.as_ref().map(|f| f.stack.required_depth()))
-        .max()
-        .unwrap_or(0)
-}
-
-/// Compute a common output stack depth if all exits agree.
-fn compute_outputs(cfg: &Cfg, in_state: &[Option<Frame>]) -> Option<usize> {
-    let mut outputs: Option<usize> = None;
-    for (idx, bb) in cfg.nodes.iter().enumerate() {
-        let has_forward_succ = bb.next.iter().any(|e| !e.back_edge());
-        if !has_forward_succ {
-            if let Some(frame) = &in_state[idx] {
-                match outputs {
-                    None => outputs = Some(frame.stack.len()),
-                    Some(prev) if prev == frame.stack.len() => {}
-                    _ => {
-                        outputs = None;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    outputs
 }

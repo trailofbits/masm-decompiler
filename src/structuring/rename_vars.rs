@@ -6,21 +6,22 @@ use crate::ssa::{Expr, Stmt, Var};
 /// and optional alphabetic names for readability.
 pub fn apply(code: &mut [Stmt], carriers: &HashSet<(Var, Var)>) {
     let mut map: HashMap<Var, Var> = HashMap::new();
-    let mut next = 0u32;
+    let mut next = 0usize;
     let classes = build_carrier_classes(code, carriers);
     for class in classes {
-        let rep = *class
+        let rep = class
             .iter()
             .min_by_key(|v| v.index)
-            .unwrap_or(&Var::no_sub(next));
-        let target_val = map.get(&rep).copied().unwrap_or_else(|| {
-            let v = Var::no_sub(next);
+            .cloned()
+            .unwrap_or_else(|| Var::new(next));
+        let target_val = map.get(&rep).cloned().unwrap_or_else(|| {
+            let v = Var::new(next);
             next += 1;
-            map.insert(rep, v);
+            map.insert(rep.clone(), v.clone());
             v
         });
         for v in class {
-            map.entry(v).or_insert(target_val);
+            map.entry(v).or_insert_with(|| target_val.clone());
         }
     }
     rename_block(code, carriers, &mut map, &mut next);
@@ -30,23 +31,24 @@ fn rename_block(
     code: &mut [Stmt],
     carriers: &HashSet<(Var, Var)>,
     map: &mut HashMap<Var, Var>,
-    next: &mut u32,
+    next: &mut usize,
 ) {
     // Build equivalence classes from phi connectivity in this block (excluding nested loops).
     let classes = build_carrier_classes(code, carriers);
     for class in classes {
-        let rep = *class
+        let rep = class
             .iter()
             .min_by_key(|v| v.index)
-            .unwrap_or(&Var::no_sub(*next));
-        let target_val = map.get(&rep).copied().unwrap_or_else(|| {
-            let v = Var::no_sub(*next);
+            .cloned()
+            .unwrap_or_else(|| Var::new(*next));
+        let target_val = map.get(&rep).cloned().unwrap_or_else(|| {
+            let v = Var::new(*next);
             *next += 1;
-            map.insert(rep, v);
+            map.insert(rep.clone(), v.clone());
             v
         });
         for v in class {
-            map.entry(v).or_insert(target_val);
+            map.entry(v).or_insert_with(|| target_val.clone());
         }
     }
 
@@ -59,17 +61,17 @@ fn rename_stmt(
     stmt: &mut Stmt,
     carriers: &HashSet<(Var, Var)>,
     map: &mut HashMap<Var, Var>,
-    next: &mut u32,
+    next: &mut usize,
 ) {
     match stmt {
-        Stmt::Assign { dst, expr } => {
+        Stmt::Assign { dest: dst, expr } => {
             rename_expr(expr, map, next);
-            let new_var = map.entry(*dst).or_insert_with(|| {
-                let v = Var::no_sub(*next);
+            let new_var = map.entry(dst.clone()).or_insert_with(|| {
+                let v = Var::new(*next);
                 *next += 1;
                 v
             });
-            *dst = *new_var;
+            *dst = new_var.clone();
         }
         Stmt::If {
             cond,
@@ -81,29 +83,19 @@ fn rename_stmt(
                 rename_stmt(s, carriers, map, next);
             }
         }
-        Stmt::Switch {
-            expr,
-            cases,
-            default,
-        } => {
-            rename_expr(expr, map, next);
-            for (_, body) in cases {
-                rename_block(body, carriers, map, next);
-            }
-            rename_block(default, carriers, map, next);
-        }
-        Stmt::For {
-            init,
-            cond,
-            step,
+        Stmt::Repeat {
+            loop_var,
             body,
+            ..
         } => {
-            rename_stmt(init, carriers, map, next);
-            rename_expr(cond, map, next);
-            rename_stmt(step, carriers, map, next);
+            let new_var = map.entry(loop_var.clone()).or_insert_with(|| {
+                let v = Var::new(*next);
+                *next += 1;
+                v
+            });
+            *loop_var = new_var.clone();
             rename_block(body, carriers, map, next);
         }
-        Stmt::RepeatInit { .. } | Stmt::RepeatCond { .. } | Stmt::RepeatStep { .. } => {}
         Stmt::While { cond, body } => {
             rename_expr(cond, map, next);
             // Share the map so loop-carried vars keep the same names; new loop-local
@@ -112,144 +104,137 @@ fn rename_stmt(
         }
         Stmt::Return(vals) => {
             for v in vals.iter_mut() {
-                let new = map.entry(*v).or_insert_with(|| {
-                    let v_new = Var::no_sub(*next);
+                let new = map.entry(v.clone()).or_insert_with(|| {
+                    let v_new = Var::new(*next);
                     *next += 1;
                     v_new
                 });
-                *v = *new;
+                *v = new.clone();
             }
         }
         Stmt::Phi { var, sources } => {
             // Group phi sources into the same logical variable.
-            let target = *map.entry(*var).or_insert_with(|| {
-                let v = Var::no_sub(*next);
-                *next += 1;
-                v
-            });
-            *var = target;
+            let target = map
+                .entry(var.clone())
+                .or_insert_with(|| {
+                    let v = Var::new(*next);
+                    *next += 1;
+                    v
+                })
+                .clone();
+            *var = target.clone();
             for src in sources.iter_mut() {
-                let v = map.entry(*src).or_insert(target);
-                *src = *v;
+                let v = map.entry(src.clone()).or_insert_with(|| target.clone());
+                *src = v.clone();
             }
         }
         Stmt::Break | Stmt::Continue => {}
-        Stmt::Expr(expr) | Stmt::Branch(expr) => rename_expr(expr, map, next),
-        Stmt::StackOp(op) => {
-            for v in op.pops.iter_mut().chain(op.pushes.iter_mut()) {
-                let new = map.entry(*v).or_insert_with(|| {
-                    let v_new = Var::no_sub(*next);
-                    *next += 1;
-                    v_new
-                });
-                *v = *new;
-            }
-        }
+        Stmt::Branch(expr) => rename_expr(expr, map, next),
         Stmt::MemLoad(mem) => {
             for v in mem.address.iter_mut().chain(mem.outputs.iter_mut()) {
-                let new = map.entry(*v).or_insert_with(|| {
-                    let v_new = Var::no_sub(*next);
+                let new = map.entry(v.clone()).or_insert_with(|| {
+                    let v_new = Var::new(*next);
                     *next += 1;
                     v_new
                 });
-                *v = *new;
+                *v = new.clone();
             }
         }
         Stmt::MemStore(mem) => {
             for v in mem.address.iter_mut().chain(mem.values.iter_mut()) {
-                let new = map.entry(*v).or_insert_with(|| {
-                    let v_new = Var::no_sub(*next);
+                let new = map.entry(v.clone()).or_insert_with(|| {
+                    let v_new = Var::new(*next);
                     *next += 1;
                     v_new
                 });
-                *v = *new;
+                *v = new.clone();
             }
         }
         Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
             for v in call.args.iter_mut().chain(call.results.iter_mut()) {
-                let new = map.entry(*v).or_insert_with(|| {
-                    let v_new = Var::no_sub(*next);
+                let new = map.entry(v.clone()).or_insert_with(|| {
+                    let v_new = Var::new(*next);
                     *next += 1;
                     v_new
                 });
-                *v = *new;
+                *v = new.clone();
             }
         }
         Stmt::DynCall { args, results } => {
             for v in args.iter_mut().chain(results.iter_mut()) {
-                let new = map.entry(*v).or_insert_with(|| {
-                    let v_new = Var::no_sub(*next);
+                let new = map.entry(v.clone()).or_insert_with(|| {
+                    let v_new = Var::new(*next);
                     *next += 1;
                     v_new
                 });
-                *v = *new;
+                *v = new.clone();
             }
         }
         Stmt::Intrinsic(intr) => {
             for v in intr.args.iter_mut().chain(intr.results.iter_mut()) {
-                let new = map.entry(*v).or_insert_with(|| {
-                    let v_new = Var::no_sub(*next);
+                let new = map.entry(v.clone()).or_insert_with(|| {
+                    let v_new = Var::new(*next);
                     *next += 1;
                     v_new
                 });
-                *v = *new;
+                *v = new.clone();
             }
         }
         Stmt::AdvLoad(load) => {
             for v in load.outputs.iter_mut() {
-                let new = map.entry(*v).or_insert_with(|| {
-                    let v_new = Var::no_sub(*next);
+                let new = map.entry(v.clone()).or_insert_with(|| {
+                    let v_new = Var::new(*next);
                     *next += 1;
                     v_new
                 });
-                *v = *new;
+                *v = new.clone();
             }
         }
         Stmt::AdvStore(store) => {
             for v in store.values.iter_mut() {
-                let new = map.entry(*v).or_insert_with(|| {
-                    let v_new = Var::no_sub(*next);
+                let new = map.entry(v.clone()).or_insert_with(|| {
+                    let v_new = Var::new(*next);
                     *next += 1;
                     v_new
                 });
-                *v = *new;
+                *v = new.clone();
             }
         }
         Stmt::LocalLoad(load) => {
             for v in load.outputs.iter_mut() {
-                let new = map.entry(*v).or_insert_with(|| {
-                    let v_new = Var::no_sub(*next);
+                let new = map.entry(v.clone()).or_insert_with(|| {
+                    let v_new = Var::new(*next);
                     *next += 1;
                     v_new
                 });
-                *v = *new;
+                *v = new.clone();
             }
         }
         Stmt::LocalStore(store) => {
             for v in store.values.iter_mut() {
-                let new = map.entry(*v).or_insert_with(|| {
-                    let v_new = Var::no_sub(*next);
+                let new = map.entry(v.clone()).or_insert_with(|| {
+                    let v_new = Var::new(*next);
                     *next += 1;
                     v_new
                 });
-                *v = *new;
+                *v = new.clone();
             }
         }
-        Stmt::Instr(_) | Stmt::Unknown | Stmt::Nop => {}
+        Stmt::Inst(_) | Stmt::Nop => {}
     }
 }
 
-fn rename_expr(expr: &mut Expr, map: &mut HashMap<Var, Var>, next: &mut u32) {
+fn rename_expr(expr: &mut Expr, map: &mut HashMap<Var, Var>, next: &mut usize) {
     match expr {
         Expr::Var(v) => {
-            let new = map.entry(*v).or_insert_with(|| {
-                let v_new = Var::no_sub(*next);
+            let new = map.entry(v.clone()).or_insert_with(|| {
+                let v_new = Var::new(*next);
                 *next += 1;
                 v_new
             });
-            *v = *new;
+            *v = new.clone();
         }
-        Expr::BinOp(_, a, b) => {
+        Expr::Binary(_, a, b) => {
             rename_expr(a, map, next);
             rename_expr(b, map, next);
         }
@@ -262,17 +247,17 @@ fn build_carrier_classes(code: &[Stmt], carriers: &HashSet<(Var, Var)>) -> Vec<H
     let mut parent: HashMap<Var, Var> = HashMap::new();
 
     fn find(parent: &mut HashMap<Var, Var>, v: Var) -> Var {
-        let p = parent.get(&v).copied();
+        let p = parent.get(&v).cloned();
         if let Some(pv) = p {
             if pv != v {
                 let root = find(parent, pv);
-                parent.insert(v, root);
+                parent.insert(v.clone(), root.clone());
                 root
             } else {
                 v
             }
         } else {
-            parent.insert(v, v);
+            parent.insert(v.clone(), v.clone());
             v
         }
     }
@@ -290,23 +275,23 @@ fn build_carrier_classes(code: &[Stmt], carriers: &HashSet<(Var, Var)>) -> Vec<H
             match stmt {
                 Stmt::Phi { var, sources } => {
                     for s in sources {
-                        union(parent, *var, *s);
+                        union(parent, var.clone(), s.clone());
                     }
                 }
                 Stmt::Assign {
-                    dst,
-                    expr: crate::ssa::Expr::BinOp(_, a, _),
+                    dest: dst,
+                    expr: crate::ssa::Expr::Binary(_, a, _),
                 } => {
                     if let crate::ssa::Expr::Var(v) = &**a {
-                        union(parent, *dst, *v);
+                        union(parent, dst.clone(), v.clone());
                     }
                 }
                 // Loop-carried assignment pattern inserted by CFG pass.
                 Stmt::Assign {
-                    dst,
+                    dest: dst,
                     expr: Expr::Var(v),
                 } => {
-                    union(parent, *dst, *v);
+                    union(parent, dst.clone(), v.clone());
                 }
                 Stmt::If {
                     then_body,
@@ -316,18 +301,6 @@ fn build_carrier_classes(code: &[Stmt], carriers: &HashSet<(Var, Var)>) -> Vec<H
                     walk(then_body, parent);
                     walk(else_body, parent);
                 }
-                Stmt::Switch { cases, default, .. } => {
-                    for (_, body) in cases {
-                        walk(body, parent);
-                    }
-                    walk(default, parent);
-                }
-                Stmt::For {
-                    body, init, step, ..
-                } => {
-                    walk(&[*init.clone(), *step.clone()], parent);
-                    walk(body, parent);
-                }
                 Stmt::While { body, .. } => walk(body, parent),
                 _ => {}
             }
@@ -336,13 +309,13 @@ fn build_carrier_classes(code: &[Stmt], carriers: &HashSet<(Var, Var)>) -> Vec<H
 
     walk(code, &mut parent);
     for (a, b) in carriers {
-        union(&mut parent, *a, *b);
+        union(&mut parent, a.clone(), b.clone());
     }
 
     let mut classes: HashMap<Var, HashSet<Var>> = HashMap::new();
-    let keys: Vec<_> = parent.keys().copied().collect();
+    let keys: Vec<_> = parent.keys().cloned().collect();
     for v in keys {
-        let root = find(&mut parent, v);
+        let root = find(&mut parent, v.clone());
         classes.entry(root).or_default().insert(v);
     }
     classes.into_values().collect()
