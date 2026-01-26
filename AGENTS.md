@@ -20,6 +20,8 @@ variant (e.g. `ProcSignature::Unknown`) rather than producing incorrect output.
   (e.g. `From`, `TryFrom`, and `Display`) rather than custom methods or functions.
 - Maintain modularity and separation of concerns. Avoid large functions, types,
   and modules that do too many things.
+- Keep the main `lib.rs` and `main.rs` minimal. Implement functionality in their own
+  submodules.
 - Write unit tests for all new functionality. Use property-based testing with
   `proptest` where applicable. Take care to design tests that will detect any
   potential issues and fail if the implementation is incorrect.
