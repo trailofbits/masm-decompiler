@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 
-use crate::signature::InstructionEffect;
+use crate::signature::StackEffect;
 
 /// A procedures signature, as determined during signature inference.
 ///
@@ -71,7 +71,7 @@ impl ProcSignature {
 ///   2. pushes = number of outputs
 ///   3. required depth = number of inputs
 ///
-impl From<&ProcSignature> for InstructionEffect {
+impl From<&ProcSignature> for StackEffect {
     fn from(signature: &ProcSignature) -> Self {
         match *signature {
             ProcSignature::Known {
@@ -79,14 +79,14 @@ impl From<&ProcSignature> for InstructionEffect {
                 outputs,
                 net_effect,
             } => {
-                assert!(net_effect < 0 || net_effect < (outputs as isize));
-                InstructionEffect::Known {
+                assert!(net_effect <= (outputs as isize));
+                StackEffect::Known {
                     pops: ((outputs as isize) - net_effect) as usize,
                     pushes: outputs,
                     required_depth: inputs,
                 }
             }
-            ProcSignature::Unknown => InstructionEffect::Unknown,
+            ProcSignature::Unknown => StackEffect::Unknown,
         }
     }
 }

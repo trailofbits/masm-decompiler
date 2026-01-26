@@ -2,7 +2,7 @@ use miden_assembly_syntax::ast::{Block, Instruction, InvocationTarget, Op, Proce
 
 use crate::{callgraph::CallGraph, frontend::Workspace};
 
-use super::{ProcSignature, SignatureMap, domain::ProvenanceStack, effects::InstructionEffect};
+use super::{ProcSignature, SignatureMap, domain::ProvenanceStack, effects::StackEffect};
 
 pub fn infer_signatures(workspace: &Workspace, callgraph: &CallGraph) -> SignatureMap {
     let mut signatures = SignatureMap::default();
@@ -12,7 +12,7 @@ pub fn infer_signatures(workspace: &Workspace, callgraph: &CallGraph) -> Signatu
     for node in callgraph.iter() {
         if let Some(proc) = workspace.lookup_proc(&node.name) {
             let module_path = node.module_path.as_ref();
-            let analysis = Analysis::new(module_path, &signatures, workspace);
+            let analysis = Analysis::new(module_path, &signatures);
             let signature = analysis.visit_proc(proc);
             signatures.insert(node.name.clone(), signature);
         }
@@ -35,21 +35,15 @@ impl OpResult {
 
 struct Analysis<'a> {
     signatures: &'a SignatureMap,
-    workspace: &'a Workspace,
     /// Fully-qualified path to the analyzed module
     module_path: &'a str,
 }
 
 impl<'a> Analysis<'a> {
-    pub fn new(
-        module_path: &'a str,
-        signatures: &'a SignatureMap,
-        workspace: &'a Workspace,
-    ) -> Self {
+    pub fn new(module_path: &'a str, signatures: &'a SignatureMap) -> Self {
         Analysis {
             module_path,
             signatures,
-            workspace,
         }
     }
 
@@ -77,7 +71,7 @@ impl<'a> Analysis<'a> {
             Op::If {
                 then_blk, else_blk, ..
             } => self.visit_if(then_blk, else_blk, stack),
-            Op::Repeat { count, body, .. } => self.visit_repeat(*count, body, stack),
+            Op::Repeat { count, body, .. } => self.visit_repeat(*count as usize, body, stack),
             Op::While { body, .. } => self.visit_while(body, stack),
         }
     }
@@ -90,8 +84,8 @@ impl<'a> Analysis<'a> {
             Exec(target) => self.visit_call(target, stack),
             // TODO: Handle call and syscall
             Call(..) | SysCall(..) | DynCall | DynExec => return OpResult::Unknown,
-            _ => match InstructionEffect::from(inst) {
-                InstructionEffect::Known {
+            _ => match StackEffect::from(inst) {
+                StackEffect::Known {
                     pops,
                     pushes,
                     required_depth,
@@ -99,7 +93,7 @@ impl<'a> Analysis<'a> {
                     stack.apply(pops, pushes, required_depth);
                     OpResult::Known
                 }
-                InstructionEffect::Unknown => return OpResult::Unknown,
+                StackEffect::Unknown => return OpResult::Unknown,
             },
         }
     }
@@ -119,7 +113,7 @@ impl<'a> Analysis<'a> {
         // either callee signatures are known or inference failed. If inference
         // failed we cannot determine stack effects for the caller either and so
         // we bail here.
-        let InstructionEffect::Known {
+        let StackEffect::Known {
             pops,
             pushes,
             required_depth,
@@ -158,7 +152,7 @@ impl<'a> Analysis<'a> {
         OpResult::Known
     }
 
-    fn visit_repeat(&self, count: u32, body: &Block, stack: &mut ProvenanceStack) -> OpResult {
+    fn visit_repeat(&self, count: usize, body: &Block, stack: &mut ProvenanceStack) -> OpResult {
         for _ in 0..count {
             let body_result = self.visit_block(body, stack);
             if body_result.is_unknown() {
