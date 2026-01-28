@@ -60,6 +60,10 @@ fn assign_block(
                     offset_expr.clone()
                 };
 
+                // Only assign LoopVar-based subscripts for producing loops (delta > 0).
+                // For consuming loops (delta <= 0), variables represent accumulator states,
+                // not iteration-indexed values. Let the renaming pass assign simple numeric
+                // subscripts to consuming loop vars instead.
                 if delta > 0 {
                     for (offset, var) in per_iter_outputs.iter().take(delta).enumerate() {
                         let Some(expr) = add_const(loop_base.clone(), offset) else {
@@ -67,10 +71,12 @@ fn assign_block(
                         };
                         insert_subscript(subscripts, var.index, expr);
                     }
-                }
 
-                if !assign_block(body, &loop_base, subscripts) {
-                    return false;
+                    // Only recurse into the body for producing loops.
+                    // This assigns LoopVar subscripts to variables defined inside the loop.
+                    if !assign_block(body, &loop_base, subscripts) {
+                        return false;
+                    }
                 }
 
                 let total_effect = match repeat_effect(body_summary.effect, *loop_count) {
@@ -162,6 +168,14 @@ fn summarize_block(code: &[Stmt]) -> Option<BlockSummary> {
 fn summarize_stmt(stmt: &Stmt) -> Option<StmtSummary> {
     match stmt {
         Stmt::Assign { dest, expr } => {
+            // Simple var-to-var copies (carriers) don't affect stack - they just
+            // maintain state across iterations. Treat them as no-ops.
+            if matches!(expr, Expr::Var(_)) {
+                return Some(StmtSummary {
+                    effect: StackEffect::known(0, 0),
+                    outputs: Vec::new(),
+                });
+            }
             let pops = expr_pops(expr)?;
             let effect = StackEffect::known(pops, 1);
             Some(StmtSummary {
@@ -294,7 +308,9 @@ fn summarize_stmt(stmt: &Stmt) -> Option<StmtSummary> {
                 outputs: Vec::new(),
             })
         }
-        Stmt::Branch(_)
+        Stmt::IfBranch(_)
+        | Stmt::WhileBranch(_)
+        | Stmt::RepeatBranch(_)
         | Stmt::Return(_)
         | Stmt::Inst(_)
         | Stmt::Nop

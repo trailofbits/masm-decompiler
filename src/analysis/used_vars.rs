@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     cfg::{Cfg, StmtPos},
-    ssa::{Expr, Stmt, Var},
+    ssa::{Condition, Expr, Stmt, Var},
 };
 
 /// Mapping from variable definitions to their uses (and vice versa).
@@ -48,7 +48,6 @@ impl UsesVars for Stmt {
     fn uses_vars(&self) -> HashSet<Var> {
         match self {
             Stmt::Assign { expr, .. } => expr.uses_vars(),
-            Stmt::Branch(expr) => expr.uses_vars(),
             Stmt::MemLoad(load) => {
                 let mut vars = HashSet::new();
                 for v in load.address.iter().chain(load.outputs.iter()) {
@@ -102,6 +101,11 @@ impl UsesVars for Stmt {
                 vars
             }
             Stmt::Return(values) => values.iter().cloned().collect(),
+            Stmt::IfBranch(Condition::Stack(expr))
+            | Stmt::WhileBranch(Condition::Stack(expr)) => expr.uses_vars(),
+            Stmt::IfBranch(Condition::Count { .. })
+            | Stmt::WhileBranch(Condition::Count { .. })
+            | Stmt::RepeatBranch(_) => HashSet::new(),
             Stmt::Inst(_) | Stmt::Nop | Stmt::Break | Stmt::Continue => HashSet::new(),
         }
     }

@@ -182,4 +182,23 @@ impl SsaStack {
     pub fn iter(&self) -> impl Iterator<Item = &Var> {
         self.stack.iter()
     }
+
+    /// Return the top N values from the stack in top-to-bottom order. This is
+    /// called during structuring to get the outputs from the procedure. The
+    /// output count should never exceed the current stack size at this point,
+    /// so we return an error rather than padding with new inputs.
+    ///
+    /// Returns an error if `output_count` exceeds the stack size.
+    pub fn outputs(&self, output_count: usize) -> super::SsaResult<Vec<Var>> {
+        if output_count > self.stack.len() {
+            return Err(super::SsaError::StackUnderflow {
+                requested: output_count,
+                available: self.stack.len(),
+            });
+        }
+        let start = self.stack.len() - output_count;
+        let mut result: Vec<Var> = self.stack.iter().skip(start).cloned().collect();
+        result.reverse();
+        Ok(result)
+    }
 }

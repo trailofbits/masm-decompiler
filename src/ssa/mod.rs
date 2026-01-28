@@ -1,12 +1,58 @@
 //! SSA intermediate representation.
 
-use miden_assembly_syntax::ast::{ImmFelt, ImmU32, Immediate, Instruction};
+use miden_assembly_syntax::ast::{ImmFelt, ImmU32, Immediate, Instruction, InvocationTarget};
 use miden_assembly_syntax::parser::PushValue;
 
 pub mod lift;
 pub mod stack;
 
 pub use stack::SsaStack;
+pub use self::Condition::{Count, Stack};
+
+/// Errors produced during SSA lifting and analysis.
+#[derive(Debug)]
+pub enum SsaError {
+    /// Unbalanced if-statement encountered during lifting.
+    UnbalancedIf,
+    /// Non-neutral while-loop encountered during lifting.
+    NonNeutralWhile,
+    /// Unsupported instruction encountered during lifting.
+    UnknownInstruction(Instruction),
+    /// `exec` call to procedure with unknown stack effect.
+    UnknownStackEffect(InvocationTarget),
+    /// A CFG node contained an unknown statement.
+    UnknownStatement,
+    /// Worklist iteration limit was exceeded.
+    IterationLimitExceeded(usize),
+    /// Stack underflow: requested more outputs than available.
+    StackUnderflow {
+        /// Number of outputs requested.
+        requested: usize,
+        /// Number of values available on the stack.
+        available: usize,
+    },
+}
+
+/// Result type for SSA operations.
+pub type SsaResult<T> = Result<T, SsaError>;
+
+/// Branch condition for control flow statements.
+///
+/// This enum distinguishes between stack-based conditions (for if/while)
+/// and count-based conditions (for repeat loops), preserving loop metadata
+/// through the compilation pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Condition {
+    /// Condition read from the stack. Initially `Expr::Unknown`, updated during SSA lifting.
+    Stack(Expr),
+    /// Repeat loop with a known iteration count.
+    Count {
+        /// Number of iterations.
+        count: usize,
+        /// Loop counter variable (iteration index).
+        loop_var: Option<Var>,
+    },
+}
 
 /// Index expression used for SSA subscripts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -312,8 +358,12 @@ pub struct Intrinsic {
 pub enum Stmt {
     /// Assignment to a new SSA variable.
     Assign { dest: Var, expr: Expr },
-    /// Branch condition marker.
-    Branch(Expr),
+    /// If-statement branch condition marker.
+    IfBranch(Condition),
+    /// While-loop branch condition marker.
+    WhileBranch(Condition),
+    /// Repeat-loop branch condition marker.
+    RepeatBranch(Condition),
     /// Raw instruction placeholder.
     Inst(Instruction),
     /// No-op placeholder.

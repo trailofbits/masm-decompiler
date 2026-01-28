@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::{
     cfg::{Cfg, StmtPos},
-    ssa::{Expr, Stmt, Var},
+    ssa::{Condition, Expr, Stmt, Var},
 };
 
 use super::used_vars::{DefUseMap, UsesVars};
@@ -27,7 +27,12 @@ impl ExprProperties {
 
     fn can_propagate_over_stmt(self, stmt: &Stmt) -> bool {
         match stmt {
-            Stmt::Assign { expr, .. } | Stmt::Branch(expr) => self.can_propagate_over_expr(expr),
+            Stmt::Assign { expr, .. } => self.can_propagate_over_expr(expr),
+            Stmt::IfBranch(Condition::Stack(expr))
+            | Stmt::WhileBranch(Condition::Stack(expr)) => self.can_propagate_over_expr(expr),
+            Stmt::IfBranch(Condition::Count { .. })
+            | Stmt::WhileBranch(Condition::Count { .. })
+            | Stmt::RepeatBranch(_) => true,
             Stmt::Repeat { .. } => false,
             Stmt::If {
                 cond,
@@ -158,7 +163,8 @@ fn can_propagate(
         Stmt::Repeat { .. } => return false,
         Stmt::If { .. } | Stmt::While { .. } => return false,
         Stmt::Break | Stmt::Continue | Stmt::Return(_) => return false,
-        Stmt::Assign { .. } | Stmt::Branch(_) | Stmt::Nop => {}
+        Stmt::IfBranch(_) | Stmt::WhileBranch(_) | Stmt::RepeatBranch(_) => return false,
+        Stmt::Assign { .. } | Stmt::Nop => {}
     }
 
     // Limit expression blow-up.
@@ -235,7 +241,12 @@ fn defined_var(stmt: &Stmt) -> Option<Var> {
 
 fn replace_all(stmt: &mut Stmt, var: &Var, with: &Expr) {
     match stmt {
-        Stmt::Assign { expr, .. } | Stmt::Branch(expr) => replace_in_expr(expr, var, with),
+        Stmt::Assign { expr, .. } => replace_in_expr(expr, var, with),
+        Stmt::IfBranch(Condition::Stack(expr))
+        | Stmt::WhileBranch(Condition::Stack(expr)) => replace_in_expr(expr, var, with),
+        Stmt::IfBranch(Condition::Count { .. })
+        | Stmt::WhileBranch(Condition::Count { .. })
+        | Stmt::RepeatBranch(_) => {}
         Stmt::If {
             cond,
             then_body,
@@ -290,7 +301,12 @@ fn replace_in_expr(expr: &mut Expr, var: &Var, with: &Expr) {
 
 fn count_var_occ(stmt: &Stmt, var: &Var) -> usize {
     match stmt {
-        Stmt::Assign { expr, .. } | Stmt::Branch(expr) => count_var_occ_expr(expr, var),
+        Stmt::Assign { expr, .. } => count_var_occ_expr(expr, var),
+        Stmt::IfBranch(Condition::Stack(expr))
+        | Stmt::WhileBranch(Condition::Stack(expr)) => count_var_occ_expr(expr, var),
+        Stmt::IfBranch(Condition::Count { .. })
+        | Stmt::WhileBranch(Condition::Count { .. })
+        | Stmt::RepeatBranch(_) => 0,
         Stmt::If {
             cond,
             then_body,
@@ -356,7 +372,12 @@ trait Complexity {
 impl Complexity for Stmt {
     fn complexity(&self) -> usize {
         match self {
-            Stmt::Assign { expr, .. } | Stmt::Branch(expr) => expr.complexity(),
+            Stmt::Assign { expr, .. } => expr.complexity(),
+            Stmt::IfBranch(Condition::Stack(expr))
+            | Stmt::WhileBranch(Condition::Stack(expr)) => expr.complexity(),
+            Stmt::IfBranch(Condition::Count { .. })
+            | Stmt::WhileBranch(Condition::Count { .. })
+            | Stmt::RepeatBranch(_) => 1,
             Stmt::If {
                 cond,
                 then_body,

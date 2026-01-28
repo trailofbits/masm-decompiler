@@ -1,6 +1,6 @@
 use miden_assembly_syntax::ast::{Block, Instruction, Op, Procedure};
 
-use crate::ssa::{BinOp, Constant, Expr, Stmt, Var};
+use crate::ssa::{Condition, Expr, Stmt};
 
 use super::{BasicBlock, Cfg, Edge, NodeId};
 
@@ -28,11 +28,6 @@ impl Builder {
         Self {
             cfg: Cfg::default(),
         }
-    }
-
-    /// Create a new variable.
-    fn new_var(&mut self) -> Var {
-        self.cfg.arena.new_var()
     }
 
     /// Create a new basic block.
@@ -116,7 +111,7 @@ impl Builder {
         // phase, and is filled in with the correct value during SSA lifting.
         self.cfg.nodes[header_id]
             .code
-            .push(Stmt::Branch(Expr::Unknown));
+            .push(Stmt::IfBranch(Condition::Stack(Expr::Unknown)));
         self.add_edge(
             header_id,
             then_id,
@@ -180,7 +175,7 @@ impl Builder {
         // phase, and is filled in with the correct value during SSA lifting.
         self.cfg.nodes[header_id]
             .code
-            .push(Stmt::Branch(Expr::Unknown));
+            .push(Stmt::WhileBranch(Condition::Stack(Expr::Unknown)));
         self.add_edge(
             header_id,
             body_id,
@@ -215,21 +210,12 @@ impl Builder {
     }
 
     /// Repeat loops are lifted into a CFG structure with explicit loop header, body, and exit blocks.
+    /// Loop counter phi nodes and increment assignments are created during SSA lifting.
     fn build_repeat(&mut self, count: u32, body: &Block, preheader_id: NodeId) -> NodeId {
         let header_id = self.new_block();
         let body_id = self.new_block();
         let exit_id = self.new_block();
 
-        let phi_var = self.new_var();
-        let step_var = self.new_var();
-
-        // We need to introduce a loop counter variable here to distinguish
-        // repeat loops from while loops during SSA lifting.
-        let init_var = self.new_var();
-        self.cfg.nodes[preheader_id].code.push(Stmt::Assign {
-            dest: init_var.clone(),
-            expr: Expr::Constant(Constant::Felt(0)),
-        });
         self.add_edge(
             preheader_id,
             header_id,
@@ -239,18 +225,14 @@ impl Builder {
             },
         );
 
-        // Create loop header with phi and condition.
-        self.cfg.nodes[header_id].code.push(Stmt::Phi {
-            var: phi_var.clone(),
-            sources: vec![init_var, step_var.clone()],
-        });
+        // Create loop header with branch condition. The loop variable
+        // is allocated during SSA lifting.
         self.cfg.nodes[header_id]
             .code
-            .push(Stmt::Branch(Expr::Binary(
-                BinOp::Lt,
-                Box::new(Expr::Var(phi_var.clone())),
-                Box::new(Expr::Constant(Constant::Felt(count as u64))),
-            )));
+            .push(Stmt::RepeatBranch(Condition::Count {
+                count: count as usize,
+                loop_var: None,
+            }));
 
         self.add_edge(
             header_id,
@@ -271,16 +253,8 @@ impl Builder {
             },
         );
 
-        // Build loop body and increment loop counter.
+        // Build loop body. The loop counter increment is added during SSA lifting.
         let body_exit_id = self.build_block(body, body_id);
-        self.cfg.nodes[body_exit_id].code.push(Stmt::Assign {
-            dest: step_var,
-            expr: Expr::Binary(
-                BinOp::Add,
-                Box::new(Expr::Var(phi_var)),
-                Box::new(Expr::Constant(Constant::Felt(1))),
-            ),
-        });
         self.add_edge(
             body_exit_id,
             header_id,

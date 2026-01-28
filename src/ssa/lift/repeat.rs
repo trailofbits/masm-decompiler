@@ -2,13 +2,14 @@
 
 use crate::{
     signature::StackEffect,
-    ssa::{BinOp, Constant, Expr, Stmt, Var},
+    ssa::{BinOp, Condition, Constant, Expr, Stmt, Var},
 };
 
 #[derive(Debug, Clone)]
 pub(super) struct RepeatInfo {
     pub(super) count: usize,
-    pub(super) loop_var: Var,
+    /// Loop counter variable (iteration index). Allocated during SSA lifting.
+    pub(super) loop_var: Option<Var>,
 }
 
 #[derive(Debug, Clone)]
@@ -19,36 +20,16 @@ pub(super) struct RepeatBodySummary {
 
 /// Extract a repeat loop count if the block matches the expected pattern.
 pub(super) fn extract_repeat_info(code: &[Stmt]) -> Option<RepeatInfo> {
-    let (cond_var, count) = code.iter().find_map(|stmt| match stmt {
-        Stmt::Branch(expr) => match_repeat_branch(expr),
+    // Look for a RepeatBranch with a Count condition.
+    let count = code.iter().find_map(|stmt| match stmt {
+        Stmt::RepeatBranch(Condition::Count { count, .. }) => Some(*count),
         _ => None,
     })?;
-    let has_phi = code.iter().any(|stmt| match stmt {
-        Stmt::Phi { var, sources } => var == &cond_var && sources.len() == 2,
-        _ => false,
-    });
-    if has_phi {
-        Some(RepeatInfo {
-            count,
-            loop_var: cond_var,
-        })
-    } else {
-        None
-    }
-}
 
-/// Match the canonical repeat-loop branch condition, if present.
-fn match_repeat_branch(expr: &Expr) -> Option<(Var, usize)> {
-    match expr {
-        Expr::Binary(BinOp::Lt, lhs, rhs) => match (&**lhs, &**rhs) {
-            (Expr::Var(v), Expr::Constant(Constant::Felt(n))) => {
-                let count = usize::try_from(*n).ok()?;
-                Some((v.clone(), count))
-            }
-            _ => None,
-        },
-        _ => None,
-    }
+    Some(RepeatInfo {
+        count,
+        loop_var: None,
+    })
 }
 
 pub(super) fn summarize_repeat_body(
@@ -169,7 +150,9 @@ fn summarize_stmt(stmt: &Stmt, loop_var: &Var) -> Option<StmtSummary> {
             effect: StackEffect::known(0, 0),
             outputs: Vec::new(),
         }),
-        Stmt::Branch(_)
+        Stmt::IfBranch(_)
+        | Stmt::WhileBranch(_)
+        | Stmt::RepeatBranch(_)
         | Stmt::Return(_)
         | Stmt::Inst(_)
         | Stmt::Repeat { .. }

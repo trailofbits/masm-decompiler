@@ -5,35 +5,14 @@ mod inst;
 mod phi;
 mod repeat;
 
-use miden_assembly_syntax::ast::{Instruction, InvocationTarget};
-
 use crate::cfg::{Cfg, Edge, NodeId};
-use crate::signature::SignatureMap;
+use crate::signature::{ProcSignature, SignatureMap};
 
-use super::{Expr, SsaStack, Stmt, Var};
+use super::{Condition, Expr, SsaError, SsaResult, SsaStack, Stmt, Var};
 use context::{Frame, SsaContext, VarAlloc, alloc_scope, build_entry_frame, retain_live_exprs};
 use inst::lift_inst_to_stmt;
 use phi::{BlockPhiState, emit_phis, merge_into_block};
 use repeat::{RepeatBodySummary, RepeatInfo, extract_repeat_info, summarize_repeat_body};
-
-/// Errors produced during CFG-to-SSA lifting.
-#[derive(Debug)]
-pub enum SsaError {
-    /// Unbalanced if-statement encountered during lifting.
-    UnbalancedIf,
-    /// Non-neutral while-loop encountered during lifting.
-    NonNeutralWhile,
-    /// Unsupported instruction encountered during lifting.
-    UnknownInstruction(Instruction),
-    /// `exec` call to procedure with unknown stack effect.
-    UnknownStackEffect(InvocationTarget),
-    /// A CFG node contained an unknown statement.
-    UnknownStatement,
-    /// Worklist iteration limit was exceeded.
-    IterationLimitExceeded(usize),
-}
-
-pub type SsaResult<T> = Result<T, SsaError>;
 
 /// Lift a MASM CFG to SSA.
 ///
@@ -56,10 +35,21 @@ pub fn lift_cfg_to_ssa(
     sigs: &SignatureMap,
 ) -> SsaResult<Cfg> {
     let original_codes = collect_original_codes(&cfg);
-    let repeat_infos = compute_repeat_infos(&original_codes);
+    let mut repeat_infos = compute_repeat_infos(&original_codes);
     let mut repeat_summaries: Vec<Option<RepeatBodySummary>> = vec![None; cfg.nodes.len()];
 
     let mut ctx = SsaContext::new(std::mem::take(&mut cfg.arena));
+
+    // Allocate loop counter variables for all repeat headers.
+    allocate_repeat_loop_vars(&mut repeat_infos, &mut ctx);
+
+    // Look up the expected number of outputs from the procedure signature.
+    // If the signature is unknown, we cannot determine the correct outputs.
+    let output_count = match sigs.get(proc_path) {
+        Some(ProcSignature::Known { outputs, .. }) => Some(*outputs),
+        _ => None,
+    };
+
     let (mut in_state, mut base_stack_len, mut phi_state, mut def_cache, mut queue) =
         init_lift_state(&cfg, proc_path, sigs, &mut ctx);
 
@@ -79,13 +69,15 @@ pub fn lift_cfg_to_ssa(
             sigs,
             &mut in_state,
             &mut base_stack_len,
-            &repeat_infos,
+            &mut repeat_infos,
             &mut repeat_summaries,
             &mut def_cache,
             &mut ctx,
             &mut queue,
+            output_count,
         )?;
     }
+
     cfg.arena = ctx.into_arena();
     Ok(cfg)
 }
@@ -101,6 +93,29 @@ fn compute_repeat_infos(original_codes: &[Vec<Stmt>]) -> Vec<Option<RepeatInfo>>
         .iter()
         .map(|code| extract_repeat_info(code))
         .collect()
+}
+
+/// Allocate loop counter variables for all repeat headers.
+fn allocate_repeat_loop_vars(repeat_infos: &mut [Option<RepeatInfo>], ctx: &mut SsaContext) {
+    for info in repeat_infos.iter_mut().flatten() {
+        info.loop_var = Some(ctx.new_var());
+    }
+}
+
+/// Update the RepeatBranch condition with the allocated loop_var.
+fn update_repeat_branch_loop_var(
+    node: NodeId,
+    repeat_infos: &[Option<RepeatInfo>],
+    code: &mut [Stmt],
+) {
+    let Some(info) = repeat_infos.get(node).and_then(|r| r.as_ref()) else {
+        return;
+    };
+    for stmt in code.iter_mut() {
+        if let Stmt::RepeatBranch(Condition::Count { loop_var, .. }) = stmt {
+            *loop_var = info.loop_var.clone();
+        }
+    }
 }
 
 /// Initialize per-block state for SSA lifting.
@@ -139,11 +154,12 @@ fn process_node(
     sigs: &SignatureMap,
     in_state: &mut [Option<Frame>],
     base_stack_len: &mut [Option<usize>],
-    repeat_infos: &[Option<RepeatInfo>],
+    repeat_infos: &mut [Option<RepeatInfo>],
     repeat_summaries: &mut [Option<RepeatBodySummary>],
     def_cache: &mut Vec<Vec<Vec<Var>>>,
     ctx: &mut SsaContext,
     queue: &mut Vec<NodeId>,
+    output_count: Option<usize>,
 ) -> SsaResult<()> {
     let mut state = match &in_state[node] {
         Some(f) => f.clone(),
@@ -154,12 +170,17 @@ fn process_node(
         node,
         orig_code,
         &phi_state[node],
+        repeat_infos,
         module_path,
         sigs,
         &mut state,
         ctx,
         def_cache,
     )?;
+
+    // Update RepeatBranch condition with allocated loop_var.
+    update_repeat_branch_loop_var(node, repeat_infos, &mut new_code);
+
     let mut branch_alloc = alloc_scope(def_cache, node, orig_code.len());
     ensure_branch_stmt(
         &cfg.nodes[node].next,
@@ -170,6 +191,8 @@ fn process_node(
     )?;
     cfg.nodes[node].code = new_code;
     retain_live_exprs(&mut state);
+
+    // Add return statement for exit nodes (no successors).
     if cfg.nodes[node].next.is_empty() {
         let has_return = cfg.nodes[node]
             .code
@@ -177,9 +200,11 @@ fn process_node(
             .map(|stmt| matches!(stmt, Stmt::Return(_)))
             .unwrap_or(false);
         if !has_return {
-            let mut outputs: Vec<Var> = state.stack.iter().cloned().collect();
-            outputs.reverse();
-            if !outputs.is_empty() {
+            if let Some(n) = output_count {
+                let outputs = state
+                    .stack
+                    .outputs(n)
+                    .expect("stack must have enough values for procedure outputs");
                 cfg.nodes[node].code.push(Stmt::Return(outputs));
             }
         }
@@ -249,7 +274,10 @@ fn maybe_record_repeat_summary(
         if repeat_summaries.get(header).and_then(|s| s.as_ref()).is_some() {
             continue;
         }
-        let summary = summarize_repeat_body(&cfg.nodes[node].code, &info.loop_var)
+        let Some(loop_var) = &info.loop_var else {
+            continue;
+        };
+        let summary = summarize_repeat_body(&cfg.nodes[node].code, loop_var)
             .ok_or(SsaError::NonNeutralWhile)?;
         repeat_summaries[header] = Some(summary);
         queue.push(header);
@@ -262,14 +290,34 @@ fn compute_repeat_exit_frame(
     info: &RepeatInfo,
     summary: &RepeatBodySummary,
 ) -> SsaResult<Frame> {
+    use super::{IndexExpr, Subscript};
+
     let mut stack: Vec<Var> = entry.stack.iter().cloned().collect();
-    for _ in 0..info.count {
+    let delta = summary.outputs.len().saturating_sub(summary.pops);
+
+    for iter in 0..info.count {
         if summary.pops > stack.len() {
             return Err(SsaError::NonNeutralWhile);
         }
         let keep = stack.len().saturating_sub(summary.pops);
         stack.truncate(keep);
-        stack.extend(summary.outputs.iter().cloned());
+
+        // For producing loops (delta > 0), assign concrete subscripts to escaping outputs.
+        // Variables that escape the loop should have subscripts based on their iteration.
+        if delta > 0 {
+            for (offset, var) in summary.outputs.iter().take(delta).enumerate() {
+                let subscript_value = (iter * delta + offset) as i64;
+                let subscript = Subscript::Expr(IndexExpr::Const(subscript_value));
+                stack.push(var.with_subscript(subscript));
+            }
+            // Non-escaping outputs (consumed by next iteration) keep their original form.
+            for var in summary.outputs.iter().skip(delta) {
+                stack.push(var.clone());
+            }
+        } else {
+            // For neutral/consuming loops, outputs are consumed internally.
+            stack.extend(summary.outputs.iter().cloned());
+        }
     }
     let mut exprs = entry.exprs.clone();
     let live: std::collections::HashSet<Var> = stack.iter().cloned().collect();
@@ -290,6 +338,7 @@ fn lift_block_code(
     node: NodeId,
     orig_code: &[Stmt],
     phis: &BlockPhiState,
+    _repeat_infos: &[Option<RepeatInfo>],
     module_path: &str,
     sigs: &SignatureMap,
     state: &mut Frame,
@@ -298,6 +347,10 @@ fn lift_block_code(
 ) -> SsaResult<Vec<Stmt>> {
     let mut new_code = Vec::new();
     emit_phis(phis, &mut new_code);
+
+    // Note: Repeat loop counters don't need phi/init/step statements.
+    // The loop counter is implicit in the `for i in [0, N)` syntax.
+
     for (stmt_idx, stmt) in orig_code.iter().enumerate() {
         let mut alloc = alloc_scope(def_cache, node, stmt_idx);
         match stmt {
@@ -323,16 +376,28 @@ fn ensure_branch_stmt(
     if !has_conditional {
         return Ok(());
     }
+
+    // Find any branch statement and check if it needs its condition filled in.
     let mut branch_idx = None;
-    let mut branch_unknown = false;
+    let mut needs_stack_cond = false;
     for (idx, stmt) in code.iter().enumerate().rev() {
-        if let Stmt::Branch(expr) = stmt {
-            branch_idx = Some(idx);
-            branch_unknown = matches!(expr, Expr::Unknown);
-            break;
+        match stmt {
+            Stmt::IfBranch(Condition::Stack(expr)) | Stmt::WhileBranch(Condition::Stack(expr)) => {
+                branch_idx = Some(idx);
+                needs_stack_cond = matches!(expr, Expr::Unknown);
+                break;
+            }
+            Stmt::RepeatBranch(Condition::Count { .. }) => {
+                // RepeatBranch doesn't need stack condition - it uses Count.
+                branch_idx = Some(idx);
+                needs_stack_cond = false;
+                break;
+            }
+            _ => {}
         }
     }
-    if branch_idx.is_none() || branch_unknown {
+
+    if needs_stack_cond {
         let cond_var = state.pop_one(ctx, alloc, 1);
         let cond_expr = state
             .exprs
@@ -340,9 +405,16 @@ fn ensure_branch_stmt(
             .cloned()
             .unwrap_or(Expr::Var(cond_var));
         if let Some(idx) = branch_idx {
-            code[idx] = Stmt::Branch(cond_expr);
-        } else {
-            code.push(Stmt::Branch(cond_expr));
+            // Update the existing branch with the condition from the stack.
+            match &code[idx] {
+                Stmt::IfBranch(Condition::Stack(_)) => {
+                    code[idx] = Stmt::IfBranch(Condition::Stack(cond_expr));
+                }
+                Stmt::WhileBranch(Condition::Stack(_)) => {
+                    code[idx] = Stmt::WhileBranch(Condition::Stack(cond_expr));
+                }
+                _ => {}
+            }
         }
     }
     Ok(())

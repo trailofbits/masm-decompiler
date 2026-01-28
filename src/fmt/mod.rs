@@ -3,7 +3,7 @@
 use crate::{
     cfg::{Cfg, Edge},
     ssa::{
-        AdvLoad, AdvStore, BinOp, Call, Constant, Expr, IndexExpr, Intrinsic, LocalLoad,
+        AdvLoad, AdvStore, BinOp, Call, Condition, Constant, Expr, IndexExpr, Intrinsic, LocalLoad,
         LocalStore, MemLoad, MemStore, Stmt, Subscript, UnOp, Var,
     },
 };
@@ -18,7 +18,11 @@ pub struct CodeWriter {
     output: String,
     indent: usize,
     var_names: std::collections::HashMap<Var, String>,
+    /// Maps loop variable indices to their names (i, j, k, ...).
     loop_var_names: std::collections::HashMap<usize, String>,
+    /// Set of loop variable indices that are currently "active" (inside their loop).
+    /// Used to distinguish loop variables from regular variables with the same index.
+    active_loop_vars: std::collections::HashSet<usize>,
     loop_depth: usize,
 }
 
@@ -31,6 +35,41 @@ impl CodeWriter {
         Self {
             var_names,
             ..Self::default()
+        }
+    }
+
+    /// Pre-register all loop variables from the code.
+    ///
+    /// This should be called before formatting to ensure loop variable names
+    /// are available even when formatting references outside of loop bodies
+    /// (e.g., in return types with subscripts that reference loop variables).
+    pub fn register_loop_vars(&mut self, code: &[Stmt]) {
+        self.register_loop_vars_inner(code);
+    }
+
+    fn register_loop_vars_inner(&mut self, code: &[Stmt]) {
+        for stmt in code {
+            match stmt {
+                Stmt::Repeat { loop_var, body, .. } => {
+                    let name = loop_name_for_depth(self.loop_depth);
+                    self.loop_var_names.insert(loop_var.index, name);
+                    self.loop_depth += 1;
+                    self.register_loop_vars_inner(body);
+                    self.loop_depth -= 1;
+                }
+                Stmt::While { body, .. } => {
+                    self.register_loop_vars_inner(body);
+                }
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    self.register_loop_vars_inner(then_body);
+                    self.register_loop_vars_inner(else_body);
+                }
+                _ => {}
+            }
         }
     }
 
@@ -69,28 +108,51 @@ impl CodeWriter {
     }
 
     pub fn fmt_var(&self, v: &Var) -> String {
-        if let Some(name) = self.loop_var_names.get(&v.index) {
-            return name.clone();
+        // Only use loop variable names for active loop variables (those currently in scope).
+        // This prevents regular variables from being incorrectly named as loop variables
+        // when they happen to have the same index after renaming.
+        if self.active_loop_vars.contains(&v.index) {
+            if let Some(name) = self.loop_var_names.get(&v.index) {
+                return name.clone();
+            }
         }
         if let Some(name) = self.var_names.get(v) {
             return name.clone();
         }
-        let base = format!("v_{}", v.index);
+
+        // Format variable using only subscript when present.
+        // This produces clean output like "v_0", "v_i", "v_(2*i + 1)" instead of "v_1_(i)".
         match &v.subscript {
-            Subscript::None => base,
-            Subscript::Expr(expr) => format!("{base}_({})", self.fmt_index_expr(expr)),
+            Subscript::None => {
+                // Fallback: no subscript assigned (shouldn't happen after rename pass).
+                format!("v_{}", v.index)
+            }
+            Subscript::Expr(IndexExpr::Const(n)) => {
+                // Concrete subscript: v_0, v_1, etc.
+                format!("v_{}", n)
+            }
+            Subscript::Expr(IndexExpr::LoopVar(idx)) => {
+                // Single loop variable: v_i, v_j, etc.
+                let loop_name = self.loop_var_name(*idx);
+                format!("v_{}", loop_name)
+            }
+            Subscript::Expr(expr) => {
+                // Complex expression: v_(2*i + 1), etc.
+                format!("v_({})", self.fmt_index_expr(expr))
+            }
         }
     }
 
     fn enter_loop(&mut self, loop_var: &Var) {
         let name = loop_name_for_depth(self.loop_depth);
         self.loop_var_names.insert(loop_var.index, name);
+        self.active_loop_vars.insert(loop_var.index);
         self.loop_depth += 1;
     }
 
     fn exit_loop(&mut self, loop_var: &Var) {
         self.loop_depth = self.loop_depth.saturating_sub(1);
-        let _ = loop_var;
+        self.active_loop_vars.remove(&loop_var.index);
     }
 
     fn loop_var_name(&self, idx: usize) -> String {
@@ -278,7 +340,8 @@ impl CodeDisplay for Stmt {
                 body,
             } => {
                 f.enter_loop(loop_var);
-                f.write_line(&format!("repeat.{loop_count} {{"));
+                let var_name = f.fmt_var(loop_var);
+                f.write_line(&format!("for {var_name} in 0..{loop_count} {{"));
                 f.indent();
                 f.write_block(body);
                 f.dedent();
@@ -305,8 +368,14 @@ impl CodeDisplay for Stmt {
                     .join(", ");
                 f.write_line(&format!("phi {} = [{srcs}];", f.fmt_var(var)));
             }
-            Stmt::Branch(cond) => {
-                f.write_line(&format!("branch {};", fmt_expr(f, cond, 0)));
+            Stmt::IfBranch(cond) => {
+                f.write_line(&format!("if_branch {};", fmt_condition(f, cond)));
+            }
+            Stmt::WhileBranch(cond) => {
+                f.write_line(&format!("while_branch {};", fmt_condition(f, cond)));
+            }
+            Stmt::RepeatBranch(cond) => {
+                f.write_line(&format!("repeat_branch {};", fmt_condition(f, cond)));
             }
             Stmt::Break => {
                 f.write_line("break;");
@@ -338,6 +407,19 @@ pub fn cfg_to_dot(cfg: &Cfg) -> String {
     }
     out.push_str("}\n");
     out
+}
+
+fn fmt_condition(f: &CodeWriter, cond: &Condition) -> String {
+    match cond {
+        Condition::Stack(expr) => fmt_expr(f, expr, 0),
+        Condition::Count { count, loop_var } => {
+            let var_str = loop_var
+                .as_ref()
+                .map(|v| f.fmt_var(v))
+                .unwrap_or_else(|| "?".to_string());
+            format!("{var_str} in [0, {count})")
+        }
+    }
 }
 
 fn fmt_constant(c: &Constant) -> String {
