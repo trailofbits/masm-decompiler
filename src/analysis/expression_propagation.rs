@@ -28,8 +28,9 @@ impl ExprProperties {
     fn can_propagate_over_stmt(self, stmt: &Stmt) -> bool {
         match stmt {
             Stmt::Assign { expr, .. } => self.can_propagate_over_expr(expr),
-            Stmt::IfBranch(Condition::Stack(expr))
-            | Stmt::WhileBranch(Condition::Stack(expr)) => self.can_propagate_over_expr(expr),
+            Stmt::IfBranch(Condition::Stack(expr)) | Stmt::WhileBranch(Condition::Stack(expr)) => {
+                self.can_propagate_over_expr(expr)
+            }
             Stmt::IfBranch(Condition::Count { .. })
             | Stmt::WhileBranch(Condition::Count { .. })
             | Stmt::RepeatBranch(_) => true,
@@ -49,7 +50,7 @@ impl ExprProperties {
             }
             Stmt::Return(_) => true,
             Stmt::Phi { .. } | Stmt::Nop => true,
-            Stmt::Break | Stmt::Continue => false,
+            Stmt::Continue => false,
             Stmt::Inst(_)
             | Stmt::AdvLoad(_)
             | Stmt::AdvStore(_)
@@ -71,13 +72,13 @@ fn expr_contains_unknown(expr: &Expr) -> bool {
         Expr::Unknown => true,
         Expr::Binary(_, a, b) => expr_contains_unknown(a) || expr_contains_unknown(b),
         Expr::Unary(_, a) => expr_contains_unknown(a),
-        Expr::Var(_) | Expr::Constant(_) | Expr::True => false,
+        Expr::Var(_) | Expr::Constant(_) | Expr::True | Expr::False => false,
     }
 }
 
 fn expr_complexity(expr: &Expr) -> usize {
     match expr {
-        Expr::True | Expr::Var(_) | Expr::Constant(_) => 1,
+        Expr::True | Expr::False | Expr::Var(_) | Expr::Constant(_) => 1,
         Expr::Unary(_, a) => 1 + expr_complexity(a),
         Expr::Binary(_, a, b) => 1 + expr_complexity(a) + expr_complexity(b),
         Expr::Unknown => 100,
@@ -162,7 +163,7 @@ fn can_propagate(
         | Stmt::Inst(_) => return false,
         Stmt::Repeat { .. } => return false,
         Stmt::If { .. } | Stmt::While { .. } => return false,
-        Stmt::Break | Stmt::Continue | Stmt::Return(_) => return false,
+        Stmt::Continue | Stmt::Return(_) => return false,
         Stmt::IfBranch(_) | Stmt::WhileBranch(_) | Stmt::RepeatBranch(_) => return false,
         Stmt::Assign { .. } | Stmt::Nop => {}
     }
@@ -242,8 +243,9 @@ fn defined_var(stmt: &Stmt) -> Option<Var> {
 fn replace_all(stmt: &mut Stmt, var: &Var, with: &Expr) {
     match stmt {
         Stmt::Assign { expr, .. } => replace_in_expr(expr, var, with),
-        Stmt::IfBranch(Condition::Stack(expr))
-        | Stmt::WhileBranch(Condition::Stack(expr)) => replace_in_expr(expr, var, with),
+        Stmt::IfBranch(Condition::Stack(expr)) | Stmt::WhileBranch(Condition::Stack(expr)) => {
+            replace_in_expr(expr, var, with)
+        }
         Stmt::IfBranch(Condition::Count { .. })
         | Stmt::WhileBranch(Condition::Count { .. })
         | Stmt::RepeatBranch(_) => {}
@@ -270,8 +272,7 @@ fn replace_all(stmt: &mut Stmt, var: &Var, with: &Expr) {
         }
         Stmt::AdvLoad(_) | Stmt::AdvStore(_) | Stmt::LocalLoad(_) | Stmt::LocalStore(_) => {}
         Stmt::Return(_) | Stmt::Phi { .. } => {}
-        Stmt::Break
-        | Stmt::Continue
+        Stmt::Continue
         | Stmt::Inst(_)
         | Stmt::MemLoad(_)
         | Stmt::MemStore(_)
@@ -295,15 +296,16 @@ fn replace_in_expr(expr: &mut Expr, var: &Var, with: &Expr) {
             replace_in_expr(b, var, with);
         }
         Expr::Unary(_, a) => replace_in_expr(a, var, with),
-        Expr::True | Expr::Constant(_) | Expr::Unknown => {}
+        Expr::True | Expr::False | Expr::Constant(_) | Expr::Unknown => {}
     }
 }
 
 fn count_var_occ(stmt: &Stmt, var: &Var) -> usize {
     match stmt {
         Stmt::Assign { expr, .. } => count_var_occ_expr(expr, var),
-        Stmt::IfBranch(Condition::Stack(expr))
-        | Stmt::WhileBranch(Condition::Stack(expr)) => count_var_occ_expr(expr, var),
+        Stmt::IfBranch(Condition::Stack(expr)) | Stmt::WhileBranch(Condition::Stack(expr)) => {
+            count_var_occ_expr(expr, var)
+        }
         Stmt::IfBranch(Condition::Count { .. })
         | Stmt::WhileBranch(Condition::Count { .. })
         | Stmt::RepeatBranch(_) => 0,
@@ -345,7 +347,7 @@ fn count_var_occ(stmt: &Stmt, var: &Var) -> usize {
         Stmt::DynCall { args, .. } => args.iter().filter(|v| *v == var).count(),
         Stmt::Intrinsic(intr) => intr.args.iter().filter(|v| *v == var).count(),
         Stmt::Return(vals) => vals.iter().filter(|v| *v == var).count(),
-        Stmt::Break | Stmt::Continue => 0,
+        Stmt::Continue => 0,
         Stmt::Inst(_) | Stmt::Nop => 0,
     }
 }
@@ -361,7 +363,7 @@ fn count_var_occ_expr(expr: &Expr, var: &Var) -> usize {
         }
         Expr::Binary(_, a, b) => count_var_occ_expr(a, var) + count_var_occ_expr(b, var),
         Expr::Unary(_, a) => count_var_occ_expr(a, var),
-        Expr::Constant(_) | Expr::True | Expr::Unknown => 0,
+        Expr::Constant(_) | Expr::True | Expr::False | Expr::Unknown => 0,
     }
 }
 
@@ -373,8 +375,9 @@ impl Complexity for Stmt {
     fn complexity(&self) -> usize {
         match self {
             Stmt::Assign { expr, .. } => expr.complexity(),
-            Stmt::IfBranch(Condition::Stack(expr))
-            | Stmt::WhileBranch(Condition::Stack(expr)) => expr.complexity(),
+            Stmt::IfBranch(Condition::Stack(expr)) | Stmt::WhileBranch(Condition::Stack(expr)) => {
+                expr.complexity()
+            }
             Stmt::IfBranch(Condition::Count { .. })
             | Stmt::WhileBranch(Condition::Count { .. })
             | Stmt::RepeatBranch(_) => 1,
@@ -387,7 +390,7 @@ impl Complexity for Stmt {
             Stmt::Repeat { body, .. } => 1 + body.complexity(),
             Stmt::Phi { .. } | Stmt::Nop => 0,
             Stmt::Return(_) => 1,
-            Stmt::Break | Stmt::Continue => 0,
+            Stmt::Continue => 0,
             Stmt::Inst(_)
             | Stmt::AdvLoad(_)
             | Stmt::AdvStore(_)
@@ -413,7 +416,7 @@ impl Complexity for Vec<Stmt> {
 impl Complexity for Expr {
     fn complexity(&self) -> usize {
         match self {
-            Expr::True | Expr::Var(_) | Expr::Constant(_) => 1,
+            Expr::True | Expr::False | Expr::Var(_) | Expr::Constant(_) => 1,
             Expr::Unary(_, a) => 1 + a.complexity(),
             Expr::Binary(_, a, b) => 1 + a.complexity() + b.complexity(),
             Expr::Unknown => 100,

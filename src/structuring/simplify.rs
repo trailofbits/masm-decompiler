@@ -1,139 +1,583 @@
-use crate::ssa::Stmt;
+//! This module implements statement and expression simplification
+//! passes for structured code. These passes remove trivial statements
+//! such as self-assignments and empty branches, and perform constant
+//! folding on expressions.
+//!
+//! The main API is the `apply_simplification` function, which applies a series
+//! of simplification passes to a vector of statements. Each simplification
+//! returns a `SimplifyResult` that tracks whether any changes were made during
+//! simplification.
+use crate::ssa::{
+    AdvLoad, AdvStore, BinOp, Call, Expr, IndexExpr, LocalLoad, LocalStore, MemLoad, MemStore,
+    Stmt, Subscript, UnOp, Var,
+};
 
-/// Simplify structured statements: drop empty branches/loops and flatten trivially nested blocks.
-pub fn apply(code: &mut Vec<Stmt>) {
-    let mut i = 0;
-    while i < code.len() {
-        if let Stmt::Assign {
-            dest: dst,
-            expr: crate::ssa::Expr::Var(v),
-        } = &code[i]
-        {
-            if dst == v {
-                code.remove(i);
-                continue;
-            }
+const MAX_SIMPLIFY_PASSES: usize = 100;
+
+pub fn apply_simplification(code: &mut Vec<Stmt>) {
+    for _ in 0..MAX_SIMPLIFY_PASSES {
+        let result = code.clone().simplify();
+        if !result.changed {
+            break;
         }
-        if let Stmt::Phi { var, sources } = &code[i] {
-            if sources.iter().all(|s| *s == *var) {
-                code.remove(i);
-                continue;
-            }
-            if let Some(first) = sources.first() {
-                if sources.iter().all(|s| s == first) {
-                    code[i] = Stmt::Assign {
-                        dest: var.clone(),
-                        expr: crate::ssa::Expr::Var(first.clone()),
-                    };
-                    continue;
-                }
-            }
+        *code = result.value;
+    }
+}
+
+/// Result of a simplification pass, tracking whether changes were made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimplifyResult<T> {
+    /// The simplified value.
+    pub value: T,
+    /// Whether any simplification was applied.
+    pub changed: bool,
+}
+
+impl<T> SimplifyResult<T> {
+    /// Create a result indicating no change occurred.
+    pub fn unchanged(value: T) -> Self {
+        Self {
+            value,
+            changed: false,
         }
-        if matches!(code[i], Stmt::Nop) {
-            code.remove(i);
-            continue;
+    }
+
+    /// Create a result indicating a change occurred.
+    pub fn changed(value: T) -> Self {
+        Self {
+            value,
+            changed: true,
         }
-        match &mut code[i] {
+    }
+
+    /// Create a result with an explicit changed flag.
+    pub fn new(value: T, changed: bool) -> Self {
+        Self { value, changed }
+    }
+
+    /// Map the inner value while preserving the changed flag.
+    pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> SimplifyResult<U> {
+        SimplifyResult {
+            value: f(self.value),
+            changed: self.changed,
+        }
+    }
+}
+
+impl<T> std::ops::Deref for SimplifyResult<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+impl<T> std::ops::DerefMut for SimplifyResult<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
+    }
+}
+
+/// Trait for types that can be simplified.
+pub trait Simplify: Sized {
+    /// The output type after simplification.
+    type Output;
+
+    /// Simplify this value, returning the result and whether any changes were made.
+    fn simplify(self) -> SimplifyResult<Self::Output>;
+}
+
+impl Simplify for Vec<Stmt> {
+    type Output = Self;
+
+    fn simplify(self) -> SimplifyResult<Self::Output> {
+        let mut changed = false;
+        let mut result = Vec::new();
+        for item in self {
+            let simplified = item.simplify();
+            changed = changed || simplified.changed;
+            result.extend(simplified.value);
+        }
+        SimplifyResult::new(result, changed)
+    }
+}
+
+impl Simplify for Vec<Var> {
+    type Output = Self;
+
+    fn simplify(self) -> SimplifyResult<Self::Output> {
+        let mut changed = false;
+        let mut result = Vec::with_capacity(self.len());
+        for item in self {
+            let simplified = item.simplify();
+            changed = changed || simplified.changed;
+            result.push(simplified.value);
+        }
+        SimplifyResult::new(result, changed)
+    }
+}
+
+impl Simplify for Stmt {
+    type Output = Vec<Stmt>;
+
+    fn simplify(self) -> SimplifyResult<Self::Output> {
+        match self {
             Stmt::If {
                 cond,
                 then_body,
                 else_body,
             } => {
-                apply(then_body);
-                apply(else_body);
+                let cond_result = cond.simplify();
+                let then_result = then_body.simplify();
+                let else_result = else_body.simplify();
+                let mut changed = cond_result.changed || then_result.changed || else_result.changed;
+
+                let mut cond = cond_result.value;
+                let mut then_body = then_result.value;
+                let mut else_body = else_result.value;
+
+                // Remove empty if-statements.
                 if then_body.is_empty() && else_body.is_empty() {
-                    code.remove(i);
-                    continue;
+                    return SimplifyResult::changed(Vec::new());
                 }
-                if then_body.is_empty() && !else_body.is_empty() {
-                    // if (cond) {} else {E}  => if (!cond) {E}
-                    invert_cond(cond);
-                    std::mem::swap(then_body, else_body);
+                // Replace `if (cond) {} else { stmts }` with `if (!cond) { stmts}`.
+                if then_body.is_empty() {
+                    invert_cond(&mut cond);
+                    std::mem::swap(&mut then_body, &mut else_body);
+                    changed = true;
                 }
-                if is_trivially_false(cond) && else_body.is_empty() {
-                    code.remove(i);
-                    continue;
+                // Inline branches with constant true condition.
+                if cond.maybe_boolean() == Some(true) {
+                    return SimplifyResult::changed(then_body);
                 }
-                if is_trivially_true(cond) && else_body.is_empty() {
-                    let mut body = std::mem::take(then_body);
-                    code.splice(i..=i, body.drain(..));
-                    continue;
+                // Inline branches with constant false condition.
+                if cond.maybe_boolean() == Some(false) {
+                    return SimplifyResult::changed(else_body);
                 }
-                if then_body.len() == 1 {
-                    if let Stmt::If { .. } = then_body[0] {
-                        // leave nested ifs
+                SimplifyResult::new(
+                    vec![Stmt::If {
+                        cond,
+                        then_body,
+                        else_body,
+                    }],
+                    changed,
+                )
+            }
+            Stmt::Repeat {
+                loop_var,
+                loop_count,
+                body,
+            } => {
+                let loop_var_result = loop_var.simplify();
+                let body_result = body.simplify();
+                let changed = loop_var_result.changed || body_result.changed;
+
+                let loop_var = loop_var_result.value;
+                let body = body_result.value;
+
+                // Remove trivial loops.
+                if loop_count == 0 || body.is_empty() {
+                    return SimplifyResult::changed(Vec::new());
+                }
+                SimplifyResult::new(
+                    vec![Stmt::Repeat {
+                        loop_var,
+                        loop_count,
+                        body,
+                    }],
+                    changed,
+                )
+            }
+            // Remove self-assignments.
+            Stmt::Assign { dest, expr } => {
+                let dest_result = dest.simplify();
+                let expr_result = expr.simplify();
+                let changed = dest_result.changed || expr_result.changed;
+
+                let dest = dest_result.value;
+                let expr = expr_result.value;
+
+                if let Expr::Var(source) = &expr {
+                    if &dest == source {
+                        return SimplifyResult::changed(Vec::new());
                     }
                 }
+                SimplifyResult::new(vec![Stmt::Assign { dest, expr }], changed)
             }
-            Stmt::Repeat { body, .. } => {
-                apply(body);
-                if body.is_empty() {
-                    code.remove(i);
-                    continue;
+            // Simplify Phi nodes and remove trivial Phis.
+            Stmt::Phi { var, sources } => {
+                let var_result = var.simplify();
+                let sources_result = sources.simplify();
+                let changed = var_result.changed || sources_result.changed;
+
+                let var = var_result.value;
+                let sources = sources_result.value;
+
+                // Remove trivial Phis.
+                if sources.iter().all(|s| *s == var) {
+                    return SimplifyResult::changed(Vec::new());
                 }
-            }
-            Stmt::While { cond, body } => {
-                apply(body);
-                if let Some(Stmt::If {
-                    cond: guard,
-                    then_body,
-                    else_body,
-                }) = body.first()
-                {
-                    if else_body.is_empty()
-                        && then_body.len() == 1
-                        && matches!(then_body[0], Stmt::Break)
-                        && is_negation_of(cond, guard)
-                    {
-                        body.remove(0);
+                // Replace with assignment if all sources are identical.
+                if let Some(first) = sources.first() {
+                    if sources.iter().all(|s| s == first) {
+                        return SimplifyResult::changed(vec![Stmt::Assign {
+                            dest: var,
+                            expr: Expr::Var(first.clone()),
+                        }]);
                     }
                 }
+                SimplifyResult::new(vec![Stmt::Phi { var, sources }], changed)
             }
-            _ => {}
+            // Simplify load and store arguments.
+            Stmt::MemLoad(load) => load.simplify().map(|l| vec![Stmt::MemLoad(l)]),
+            Stmt::MemStore(store) => store.simplify().map(|s| vec![Stmt::MemStore(s)]),
+            Stmt::AdvLoad(load) => load.simplify().map(|l| vec![Stmt::AdvLoad(l)]),
+            Stmt::AdvStore(store) => store.simplify().map(|s| vec![Stmt::AdvStore(s)]),
+            Stmt::LocalLoad(load) => load.simplify().map(|l| vec![Stmt::LocalLoad(l)]),
+            Stmt::LocalStore(store) => store.simplify().map(|s| vec![Stmt::LocalStore(s)]),
+            // Calls.
+            Stmt::Call(call) => call.simplify().map(|c| vec![Stmt::Call(c)]),
+            Stmt::Exec(call) => call.simplify().map(|c| vec![Stmt::Exec(c)]),
+            Stmt::SysCall(call) => call.simplify().map(|c| vec![Stmt::SysCall(c)]),
+            Stmt::DynCall { args, results } => {
+                let args_result = args.simplify();
+                let results_result = results.simplify();
+                let changed = args_result.changed || results_result.changed;
+                SimplifyResult::new(
+                    vec![Stmt::DynCall {
+                        args: args_result.value,
+                        results: results_result.value,
+                    }],
+                    changed,
+                )
+            }
+            _ => SimplifyResult::unchanged(vec![self]),
         }
-        i += 1;
     }
 }
 
-fn is_trivially_true(expr: &crate::ssa::Expr) -> bool {
-    match expr {
-        crate::ssa::Expr::True => true,
-        crate::ssa::Expr::Constant(c) => const_truth(c) == Some(true),
-        crate::ssa::Expr::Binary(crate::ssa::BinOp::And, a, b) => {
-            is_trivially_true(a) && is_trivially_true(b)
-        }
-        crate::ssa::Expr::Binary(crate::ssa::BinOp::Or, a, b) => {
-            is_trivially_true(a) || is_trivially_true(b)
-        }
-        _ => false,
+impl Simplify for AdvLoad {
+    type Output = Self;
+
+    fn simplify(self) -> SimplifyResult<Self::Output> {
+        self.outputs.simplify().map(|outputs| AdvLoad { outputs })
     }
 }
 
-fn is_trivially_false(expr: &crate::ssa::Expr) -> bool {
-    match expr {
-        crate::ssa::Expr::Constant(c) => const_truth(c) == Some(false),
-        crate::ssa::Expr::Binary(crate::ssa::BinOp::And, a, b) => {
-            is_trivially_false(a) || is_trivially_false(b)
-        }
-        crate::ssa::Expr::Binary(crate::ssa::BinOp::Or, a, b) => {
-            is_trivially_false(a) && is_trivially_false(b)
-        }
-        _ => false,
+impl Simplify for AdvStore {
+    type Output = Self;
+
+    fn simplify(self) -> SimplifyResult<Self::Output> {
+        self.values.simplify().map(|values| AdvStore { values })
     }
 }
 
-fn invert_cond(cond: &mut crate::ssa::Expr) {
-    *cond = crate::ssa::Expr::Unary(crate::ssa::UnOp::Not, Box::new(cond.clone()));
+impl Simplify for LocalLoad {
+    type Output = Self;
+
+    fn simplify(self) -> SimplifyResult<Self::Output> {
+        self.outputs.simplify().map(|outputs| LocalLoad {
+            index: self.index,
+            outputs,
+        })
+    }
 }
 
-fn is_negation_of(loop_cond: &crate::ssa::Expr, guard: &crate::ssa::Expr) -> bool {
-    matches!(guard, crate::ssa::Expr::Unary(crate::ssa::UnOp::Not, inner) if **inner == *loop_cond)
+impl Simplify for LocalStore {
+    type Output = Self;
+
+    fn simplify(self) -> SimplifyResult<Self::Output> {
+        self.values.simplify().map(|values| LocalStore {
+            index: self.index,
+            values,
+        })
+    }
 }
 
-fn const_truth(c: &crate::ssa::Constant) -> Option<bool> {
-    match c {
-        crate::ssa::Constant::Felt(v) => Some(*v != 0),
-        crate::ssa::Constant::Word(w) => Some(w.iter().any(|x| *x != 0)),
-        crate::ssa::Constant::Defined(_) => None,
+impl Simplify for MemLoad {
+    type Output = Self;
+
+    fn simplify(self) -> SimplifyResult<Self::Output> {
+        let address_result = self.address.simplify();
+        let outputs_result = self.outputs.simplify();
+        SimplifyResult::new(
+            MemLoad {
+                address: address_result.value,
+                outputs: outputs_result.value,
+            },
+            address_result.changed || outputs_result.changed,
+        )
+    }
+}
+
+impl Simplify for MemStore {
+    type Output = Self;
+
+    fn simplify(self) -> SimplifyResult<Self::Output> {
+        let address_result = self.address.simplify();
+        let values_result = self.values.simplify();
+        SimplifyResult::new(
+            MemStore {
+                address: address_result.value,
+                values: values_result.value,
+            },
+            address_result.changed || values_result.changed,
+        )
+    }
+}
+
+impl Simplify for Call {
+    type Output = Self;
+
+    fn simplify(self) -> SimplifyResult<Self::Output> {
+        let args_result = self.args.simplify();
+        let results_result = self.results.simplify();
+        SimplifyResult::new(
+            Call {
+                target: self.target,
+                args: args_result.value,
+                results: results_result.value,
+            },
+            args_result.changed || results_result.changed,
+        )
+    }
+}
+
+impl Simplify for Expr {
+    type Output = Self;
+
+    fn simplify(self) -> SimplifyResult<Self::Output> {
+        use crate::ssa::Constant;
+
+        match self {
+            // Simplify variable subscripts.
+            Expr::Var(v) => v.simplify().map(Expr::Var),
+            // Fold constant expressions.
+            Expr::Unary(op, expr) => {
+                let expr_result = expr.simplify();
+                let expr = expr_result.value;
+                match (op, &expr) {
+                    (UnOp::Not, Expr::Constant(c)) => match c.maybe_boolean() {
+                        Some(true) => SimplifyResult::changed(Expr::False),
+                        Some(false) => SimplifyResult::changed(Expr::True),
+                        None => SimplifyResult::new(
+                            Expr::Unary(op, Box::new(expr)),
+                            expr_result.changed,
+                        ),
+                    },
+                    (UnOp::Neg, Expr::Constant(Constant::Felt(felt))) => {
+                        SimplifyResult::changed(Expr::Constant(Constant::Felt(felt.wrapping_neg())))
+                    }
+                    _ => SimplifyResult::new(Expr::Unary(op, Box::new(expr)), expr_result.changed),
+                }
+            }
+            // Simplify addition and multiplication of constants.
+            Expr::Binary(op, left, right) => {
+                let left_result = left.simplify();
+                let right_result = right.simplify();
+                let child_changed = left_result.changed || right_result.changed;
+                let left = left_result.value;
+                let right = right_result.value;
+
+                match (op, &left, &right) {
+                    // Constant folding for addition.
+                    (
+                        BinOp::Add,
+                        Expr::Constant(Constant::Felt(a)),
+                        Expr::Constant(Constant::Felt(b)),
+                    ) => SimplifyResult::changed(Expr::Constant(Constant::Felt(a + b))),
+                    // Constant folding for multiplication.
+                    (
+                        BinOp::Mul,
+                        Expr::Constant(Constant::Felt(a)),
+                        Expr::Constant(Constant::Felt(b)),
+                    ) => SimplifyResult::changed(Expr::Constant(Constant::Felt(a * b))),
+                    // 0 + x = x + 0 = x
+                    (BinOp::Add, Expr::Constant(c), r) if c.is_zero() => {
+                        SimplifyResult::changed(r.clone())
+                    }
+                    (BinOp::Add, l, Expr::Constant(c)) if c.is_zero() => {
+                        SimplifyResult::changed(l.clone())
+                    }
+                    // 1 * x = x * 1 = x
+                    (BinOp::Mul, Expr::Constant(c), r) if c.is_one() => {
+                        SimplifyResult::changed(r.clone())
+                    }
+                    (BinOp::Mul, l, Expr::Constant(c)) if c.is_one() => {
+                        SimplifyResult::changed(l.clone())
+                    }
+                    // 0 * x = x * 0 = 0
+                    (BinOp::Mul, Expr::Constant(c), _) if c.is_zero() && c.as_felt().is_some() => {
+                        SimplifyResult::changed(Expr::Constant(Constant::Felt(0)))
+                    }
+                    (BinOp::Mul, Expr::Constant(c), _) if c.is_zero() && c.as_word().is_some() => {
+                        SimplifyResult::changed(Expr::Constant(Constant::Word([0; 4])))
+                    }
+                    (BinOp::Mul, _, Expr::Constant(c)) if c.is_zero() && c.as_felt().is_some() => {
+                        SimplifyResult::changed(Expr::Constant(Constant::Felt(0)))
+                    }
+                    (BinOp::Mul, _, Expr::Constant(c)) if c.is_zero() && c.as_word().is_some() => {
+                        SimplifyResult::changed(Expr::Constant(Constant::Word([0; 4])))
+                    }
+                    _ => SimplifyResult::new(
+                        Expr::Binary(op, Box::new(left), Box::new(right)),
+                        child_changed,
+                    ),
+                }
+            }
+            _ => SimplifyResult::unchanged(self),
+        }
+    }
+}
+
+impl Simplify for Var {
+    type Output = Self;
+
+    fn simplify(self) -> SimplifyResult<Self::Output> {
+        if let Subscript::Expr(expr) = &self.subscript {
+            let simplified = expr.clone().simplify();
+            if simplified.changed {
+                SimplifyResult::changed(self.with_subscript(Subscript::Expr(simplified.value)))
+            } else {
+                SimplifyResult::unchanged(self)
+            }
+        } else {
+            SimplifyResult::unchanged(self)
+        }
+    }
+}
+
+impl Simplify for IndexExpr {
+    type Output = Self;
+
+    fn simplify(self) -> SimplifyResult<Self::Output> {
+        match self {
+            IndexExpr::Add(left, right) => {
+                let left_result = left.simplify();
+                let right_result = right.simplify();
+                let changed = left_result.changed || right_result.changed;
+                let left = left_result.value;
+                let right = right_result.value;
+
+                match (&left, &right) {
+                    (IndexExpr::Const(a), IndexExpr::Const(b)) => {
+                        SimplifyResult::changed(IndexExpr::Const(a + b))
+                    }
+                    (IndexExpr::Const(0), expr) => SimplifyResult::changed(expr.clone()),
+                    (expr, IndexExpr::Const(0)) => SimplifyResult::changed(expr.clone()),
+                    _ => SimplifyResult::new(
+                        IndexExpr::Add(Box::new(left), Box::new(right)),
+                        changed,
+                    ),
+                }
+            }
+            IndexExpr::Mul(left, right) => {
+                let left_result = left.simplify();
+                let right_result = right.simplify();
+                let changed = left_result.changed || right_result.changed;
+                let left = left_result.value;
+                let right = right_result.value;
+
+                match (&left, &right) {
+                    (IndexExpr::Const(a), IndexExpr::Const(b)) => {
+                        SimplifyResult::changed(IndexExpr::Const(a * b))
+                    }
+                    (IndexExpr::Const(1), expr) => SimplifyResult::changed(expr.clone()),
+                    (expr, IndexExpr::Const(1)) => SimplifyResult::changed(expr.clone()),
+                    (IndexExpr::Const(0), _) => SimplifyResult::changed(IndexExpr::Const(0)),
+                    (_, IndexExpr::Const(0)) => SimplifyResult::changed(IndexExpr::Const(0)),
+                    _ => SimplifyResult::new(
+                        IndexExpr::Mul(Box::new(left), Box::new(right)),
+                        changed,
+                    ),
+                }
+            }
+            _ => SimplifyResult::unchanged(self),
+        }
+    }
+}
+
+trait MaybeBoolean {
+    fn maybe_boolean(&self) -> Option<bool>;
+}
+
+impl MaybeBoolean for crate::ssa::Expr {
+    fn maybe_boolean(&self) -> Option<bool> {
+        match self {
+            Expr::True => Some(true),
+            Expr::False => Some(false),
+            Expr::Constant(c) => c.maybe_boolean(),
+            Expr::Unary(UnOp::Not, inner) => inner.maybe_boolean().map(|b| !b),
+            Expr::Binary(BinOp::And, a, b) => match (a.maybe_boolean(), b.maybe_boolean()) {
+                (Some(true), Some(true)) => Some(true),
+                (Some(false), _) | (_, Some(false)) => Some(false),
+                _ => None,
+            },
+            Expr::Binary(BinOp::Or, a, b) => match (a.maybe_boolean(), b.maybe_boolean()) {
+                (Some(false), Some(false)) => Some(false),
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+impl MaybeBoolean for crate::ssa::Constant {
+    fn maybe_boolean(&self) -> Option<bool> {
+        use crate::ssa::Constant;
+        match self {
+            Constant::Felt(felt) => Some(*felt != 0),
+            Constant::Word(word) => Some(word.iter().any(|w| *w != 0)),
+            Constant::Defined(_) => None,
+        }
+    }
+}
+
+fn invert_cond(cond: &mut Expr) {
+    match cond {
+        Expr::Unary(UnOp::Not, inner) => {
+            *cond = (*inner.as_ref()).clone();
+        }
+        _ => {
+            *cond = Expr::Unary(UnOp::Not, Box::new(cond.clone()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simplify_result_unchanged() {
+        let result = SimplifyResult::unchanged(42);
+        assert_eq!(result.value, 42);
+        assert!(!result.changed);
+    }
+
+    #[test]
+    fn simplify_result_changed() {
+        let result = SimplifyResult::changed(42);
+        assert_eq!(result.value, 42);
+        assert!(result.changed);
+    }
+
+    #[test]
+    fn simplify_result_map() {
+        let result = SimplifyResult::changed(21).map(|x| x * 2);
+        assert_eq!(result.value, 42);
+        assert!(result.changed);
+
+        let result = SimplifyResult::unchanged(21).map(|x| x * 2);
+        assert_eq!(result.value, 42);
+        assert!(!result.changed);
+    }
+
+    #[test]
+    fn simplify_result_deref() {
+        let result = SimplifyResult::unchanged(vec![1, 2, 3]);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], 1);
     }
 }

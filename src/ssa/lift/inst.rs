@@ -4,14 +4,19 @@ use miden_assembly_syntax::ast::{ImmFelt, ImmU32, Immediate, Instruction, Invoca
 
 use crate::signature::{SignatureMap, StackEffect};
 
+use super::context::{Frame, SsaContext, VarAlloc};
+use super::{SsaError, SsaResult};
 use crate::ssa::{
     AdvLoad, BinOp, Call, Constant, Expr, Intrinsic, LocalLoad, LocalStore, MemLoad, MemStore,
     Stmt, UnOp, Var,
 };
-use super::{SsaError, SsaResult};
-use super::context::{Frame, SsaContext, VarAlloc};
 
 /// Lift a single instruction into one or more SSA statements.
+/// 
+/// Individual handlers return Result<Option<Vec<Stmt>> where
+/// 
+/// 1. The result signals if the call succeeded or failed.
+/// 2. The option signals if the instruction was handled.
 pub(super) fn lift_inst_to_stmt(
     inst: &Instruction,
     module_path: &str,
@@ -47,7 +52,7 @@ pub(super) fn lift_inst_to_stmt(
     if let Some(stmts) = lift_push_inst(inst, state, ctx, alloc)? {
         return Ok(stmts);
     }
-    Err(SsaError::UnknownInstruction(inst.clone()))
+    Err(SsaError::UnsupportedInstruction(inst.clone()))
 }
 
 /// Lift call-like instructions (`exec`, `call`, `syscall`).
@@ -88,7 +93,7 @@ fn lift_call_inst(
             Stmt::SysCall,
         )?],
         Instruction::DynExec | Instruction::DynCall => {
-            return Err(SsaError::UnknownInstruction(inst.clone()))
+            return Err(SsaError::UnsupportedInstruction(inst.clone()));
         }
         _ => return Ok(None),
     };
@@ -164,12 +169,14 @@ fn lift_stack_inst(
         | Instruction::Dup14
         | Instruction::Dup15 => {
             let idx = dup_index(inst)
-                .ok_or_else(|| SsaError::UnknownInstruction(inst.clone()))? as usize;
+                .ok_or_else(|| SsaError::UnsupportedInstruction(inst.clone()))?
+                as usize;
             Ok(Some(lift_dup(inst, idx, state, ctx, alloc)?))
         }
         Instruction::DupW0 | Instruction::DupW1 | Instruction::DupW2 | Instruction::DupW3 => {
             let idx = dup_index(inst)
-                .ok_or_else(|| SsaError::UnknownInstruction(inst.clone()))? as usize;
+                .ok_or_else(|| SsaError::UnsupportedInstruction(inst.clone()))?
+                as usize;
             Ok(Some(lift_dupw(inst, idx, state, ctx, alloc)?))
         }
         Instruction::Swap1
@@ -188,13 +195,15 @@ fn lift_stack_inst(
         | Instruction::Swap14
         | Instruction::Swap15 => {
             let idx = swap_index(inst)
-                .ok_or_else(|| SsaError::UnknownInstruction(inst.clone()))? as usize;
+                .ok_or_else(|| SsaError::UnsupportedInstruction(inst.clone()))?
+                as usize;
             lift_swap(idx, state, ctx, alloc);
             Ok(Some(Vec::new()))
         }
         Instruction::SwapW1 | Instruction::SwapW2 | Instruction::SwapW3 => {
             let idx = swap_index(inst)
-                .ok_or_else(|| SsaError::UnknownInstruction(inst.clone()))? as usize;
+                .ok_or_else(|| SsaError::UnsupportedInstruction(inst.clone()))?
+                as usize;
             lift_swapw(idx, state, ctx, alloc);
             Ok(Some(Vec::new()))
         }
@@ -217,7 +226,8 @@ fn lift_stack_inst(
         | Instruction::MovUp14
         | Instruction::MovUp15 => {
             let depth = mov_index(inst)
-                .ok_or_else(|| SsaError::UnknownInstruction(inst.clone()))? as usize;
+                .ok_or_else(|| SsaError::UnsupportedInstruction(inst.clone()))?
+                as usize;
             lift_movup(depth, state, ctx, alloc);
             Ok(Some(Vec::new()))
         }
@@ -236,19 +246,22 @@ fn lift_stack_inst(
         | Instruction::MovDn14
         | Instruction::MovDn15 => {
             let depth = mov_index(inst)
-                .ok_or_else(|| SsaError::UnknownInstruction(inst.clone()))? as usize;
+                .ok_or_else(|| SsaError::UnsupportedInstruction(inst.clone()))?
+                as usize;
             lift_movdn(depth, state, ctx, alloc);
             Ok(Some(Vec::new()))
         }
         Instruction::MovUpW2 | Instruction::MovUpW3 => {
             let depth = mov_index(inst)
-                .ok_or_else(|| SsaError::UnknownInstruction(inst.clone()))? as usize;
+                .ok_or_else(|| SsaError::UnsupportedInstruction(inst.clone()))?
+                as usize;
             lift_movupw(depth, state, ctx, alloc);
             Ok(Some(Vec::new()))
         }
         Instruction::MovDnW2 | Instruction::MovDnW3 => {
             let depth = mov_index(inst)
-                .ok_or_else(|| SsaError::UnknownInstruction(inst.clone()))? as usize;
+                .ok_or_else(|| SsaError::UnsupportedInstruction(inst.clone()))?
+                as usize;
             lift_movdnw(depth, state, ctx, alloc);
             Ok(Some(Vec::new()))
         }
@@ -281,7 +294,7 @@ fn lift_mem_inst(
                 required_depth,
             } = lift_effect_for_inst(inst, module_path, sigs)?
             else {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             };
             let address = state.pop_many(ctx, alloc, pops, required_depth);
             let outputs = state.push_many(ctx, alloc, pushes);
@@ -294,7 +307,7 @@ fn lift_mem_inst(
                 required_depth,
             } = lift_effect_for_inst(inst, module_path, sigs)?
             else {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             };
             let _ = state.pop_many(ctx, alloc, pops, required_depth);
             let (address, assign) = assign_from_u32_immediate(imm, state, ctx, alloc);
@@ -314,13 +327,13 @@ fn lift_mem_inst(
                 required_depth,
             } = lift_effect_for_inst(inst, module_path, sigs)?
             else {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             };
             let popped = state.pop_many(ctx, alloc, pops, required_depth);
             let address = popped
                 .first()
                 .cloned()
-                .ok_or_else(|| SsaError::UnknownInstruction(inst.clone()))?;
+                .ok_or_else(|| SsaError::UnsupportedInstruction(inst.clone()))?;
             let outputs = state.push_many(ctx, alloc, pushes);
             Ok(Some(vec![Stmt::MemLoad(MemLoad {
                 address: vec![address],
@@ -334,7 +347,7 @@ fn lift_mem_inst(
                 required_depth,
             } = lift_effect_for_inst(inst, module_path, sigs)?
             else {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             };
             let _ = state.pop_many(ctx, alloc, pops, required_depth);
             let (address, assign) = assign_from_u32_immediate(imm, state, ctx, alloc);
@@ -354,11 +367,11 @@ fn lift_mem_inst(
                 ..
             } = lift_effect_for_inst(inst, module_path, sigs)?
             else {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             };
             let mut args = state.pop_many(ctx, alloc, pops, required_depth);
             if args.is_empty() {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             }
             let address = args.remove(0);
             Ok(Some(vec![Stmt::MemStore(MemStore {
@@ -373,7 +386,7 @@ fn lift_mem_inst(
                 ..
             } = lift_effect_for_inst(inst, module_path, sigs)?
             else {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             };
             let values = state.pop_many(ctx, alloc, pops, required_depth);
             let (address, assign) = assign_from_u32_immediate(imm, state, ctx, alloc);
@@ -389,13 +402,13 @@ fn lift_mem_inst(
             let StackEffect::Known { required_depth, .. } =
                 lift_effect_for_inst(inst, module_path, sigs)?
             else {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             };
             let address = state.pop_one(ctx, alloc, required_depth);
             let values = state
                 .stack
                 .peek_range_from_top(0, 4)
-                .ok_or_else(|| SsaError::UnknownInstruction(inst.clone()))?;
+                .ok_or_else(|| SsaError::UnsupportedInstruction(inst.clone()))?;
             Ok(Some(vec![Stmt::MemStore(MemStore {
                 address: vec![address],
                 values,
@@ -405,13 +418,13 @@ fn lift_mem_inst(
             let StackEffect::Known { required_depth, .. } =
                 lift_effect_for_inst(inst, module_path, sigs)?
             else {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             };
             state.ensure_depth(ctx, alloc, required_depth);
             let values = state
                 .stack
                 .peek_range_from_top(0, 4)
-                .ok_or_else(|| SsaError::UnknownInstruction(inst.clone()))?;
+                .ok_or_else(|| SsaError::UnsupportedInstruction(inst.clone()))?;
             let (address, assign) = assign_from_u32_immediate(imm, state, ctx, alloc);
             Ok(Some(vec![
                 assign,
@@ -442,7 +455,7 @@ fn lift_local_inst(
                 required_depth,
             } = lift_effect_for_inst(inst, module_path, sigs)?
             else {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             };
             let _ = state.pop_many(ctx, alloc, pops, required_depth);
             let outputs = state.push_many(ctx, alloc, pushes);
@@ -458,7 +471,7 @@ fn lift_local_inst(
                 ..
             } = lift_effect_for_inst(inst, module_path, sigs)?
             else {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             };
             let values = state.pop_many(ctx, alloc, pops, required_depth);
             Ok(Some(vec![Stmt::LocalStore(LocalStore {
@@ -470,13 +483,13 @@ fn lift_local_inst(
             let StackEffect::Known { required_depth, .. } =
                 lift_effect_for_inst(inst, module_path, sigs)?
             else {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             };
             state.ensure_depth(ctx, alloc, required_depth);
             let values = state
                 .stack
                 .peek_range_from_top(0, 4)
-                .ok_or_else(|| SsaError::UnknownInstruction(inst.clone()))?;
+                .ok_or_else(|| SsaError::UnsupportedInstruction(inst.clone()))?;
             Ok(Some(vec![Stmt::LocalStore(LocalStore {
                 index: idx.expect_value(),
                 values,
@@ -503,7 +516,7 @@ fn lift_adv_inst(
                 required_depth,
             } = lift_effect_for_inst(inst, module_path, sigs)?
             else {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             };
             let _ = state.pop_many(ctx, alloc, pops, required_depth);
             let outputs = state.push_many(ctx, alloc, pushes);
@@ -513,11 +526,11 @@ fn lift_adv_inst(
             let count = match imm {
                 Immediate::Value(span) => *span.inner() as usize,
                 Immediate::Constant(_) => {
-                    return Err(SsaError::UnknownInstruction(inst.clone()))
+                    return Err(SsaError::UnsupportedInstruction(inst.clone()));
                 }
             };
             if count == 0 || count > 16 {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             }
             let outputs = state.push_many(ctx, alloc, count);
             Ok(Some(vec![Stmt::Intrinsic(Intrinsic {
@@ -530,17 +543,17 @@ fn lift_adv_inst(
             let StackEffect::Known { required_depth, .. } =
                 lift_effect_for_inst(inst, module_path, sigs)?
             else {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             };
             if required_depth != 13 {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             }
             state.ensure_depth(ctx, alloc, required_depth);
             let addr_in = state
                 .stack
                 .peek_range_from_top(0, required_depth)
                 .and_then(|seg| seg.first().cloned())
-                .ok_or_else(|| SsaError::UnknownInstruction(inst.clone()))?;
+                .ok_or_else(|| SsaError::UnsupportedInstruction(inst.clone()))?;
             let addr_out = alloc.alloc(ctx);
             let mut word_d = Vec::with_capacity(4);
             let mut word_e = Vec::with_capacity(4);
@@ -602,16 +615,16 @@ fn lift_event_inst(
             let StackEffect::Known { required_depth, .. } =
                 lift_effect_for_inst(inst, module_path, sigs)?
             else {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             };
             if required_depth == 0 {
-                return Err(SsaError::UnknownInstruction(inst.clone()));
+                return Err(SsaError::UnsupportedInstruction(inst.clone()));
             }
             state.ensure_depth(ctx, alloc, required_depth);
             let arg = state
                 .stack
                 .peek_from_top(0)
-                .ok_or_else(|| SsaError::UnknownInstruction(inst.clone()))?;
+                .ok_or_else(|| SsaError::UnsupportedInstruction(inst.clone()))?;
             Ok(Some(vec![Stmt::Intrinsic(Intrinsic {
                 name: "emit".to_string(),
                 args: vec![arg],
@@ -728,7 +741,7 @@ fn lift_effect_for_inst(
             let effect = StackEffect::from(inst);
             match effect {
                 StackEffect::Known { .. } => Ok(effect),
-                StackEffect::Unknown => Err(SsaError::UnknownInstruction(inst.clone())),
+                StackEffect::Unknown => Err(SsaError::UnsupportedInstruction(inst.clone())),
             }
         }
     }
@@ -782,7 +795,7 @@ fn lift_intrinsic(
         required_depth,
     } = lift_effect_for_inst(inst, module_path, sigs)?
     else {
-        return Err(SsaError::UnknownInstruction(inst.clone()));
+        return Err(SsaError::UnsupportedInstruction(inst.clone()));
     };
     let args = state.pop_many(ctx, alloc, pops, required_depth);
     let results = state.push_many(ctx, alloc, pushes);
@@ -794,7 +807,12 @@ fn lift_intrinsic(
 }
 
 /// Lift a binary operation using two stack arguments.
-fn lift_binop(op: BinOp, state: &mut Frame, ctx: &mut SsaContext, alloc: &mut impl VarAlloc) -> Stmt {
+fn lift_binop(
+    op: BinOp,
+    state: &mut Frame,
+    ctx: &mut SsaContext,
+    alloc: &mut impl VarAlloc,
+) -> Stmt {
     let popped = state.pop_many(ctx, alloc, 2, 2);
     let b = popped[0].clone();
     let a = popped[1].clone();
@@ -870,7 +888,7 @@ fn lift_dup(
     let src = state
         .stack
         .peek_from_top(idx)
-        .ok_or_else(|| SsaError::UnknownInstruction(inst.clone()))?;
+        .ok_or_else(|| SsaError::UnsupportedInstruction(inst.clone()))?;
     let dst = state.push_many(ctx, alloc, 1).pop().unwrap();
     let expr = ctx.lookup_expr(state, src);
     state.exprs.insert(dst.clone(), expr.clone());
@@ -891,7 +909,7 @@ fn lift_dupw(
     let word = state
         .stack
         .peek_range_from_top(offset, 4)
-        .ok_or_else(|| SsaError::UnknownInstruction(inst.clone()))?;
+        .ok_or_else(|| SsaError::UnsupportedInstruction(inst.clone()))?;
     let mut stmts = Vec::with_capacity(4);
     for src in word {
         let dst = state.push_many(ctx, alloc, 1).pop().unwrap();

@@ -4,10 +4,22 @@ use crate::ssa::{Condition, Expr, Stmt};
 
 use super::{BasicBlock, Cfg, Edge, NodeId};
 
+/// Errors produced during CFG construction.
 #[derive(Debug)]
 pub enum CfgError {
+    /// The procedure body is empty.
     EmptyProcedure,
 }
+
+impl std::fmt::Display for CfgError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CfgError::EmptyProcedure => write!(f, "empty procedure body"),
+        }
+    }
+}
+
+impl std::error::Error for CfgError {}
 
 pub fn build_cfg_for_proc(proc: &Procedure) -> Result<Cfg, CfgError> {
     let mut builder = Builder::new();
@@ -209,8 +221,9 @@ impl Builder {
         exit_id
     }
 
-    /// Repeat loops are lifted into a CFG structure with explicit loop header, body, and exit blocks.
-    /// Loop counter phi nodes and increment assignments are created during SSA lifting.
+    /// Repeat loops are lifted into a CFG structure with explicit loop header,
+    /// body, and exit blocks.  Since the iteration count is fixed, the loop
+    /// counter is tracked explicitly, and only occurs in index expressions.
     fn build_repeat(&mut self, count: u32, body: &Block, preheader_id: NodeId) -> NodeId {
         let header_id = self.new_block();
         let body_id = self.new_block();
@@ -253,7 +266,7 @@ impl Builder {
             },
         );
 
-        // Build loop body. The loop counter increment is added during SSA lifting.
+        // Build loop body.
         let body_exit_id = self.build_block(body, body_id);
         self.add_edge(
             body_exit_id,

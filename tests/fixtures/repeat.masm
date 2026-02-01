@@ -1,0 +1,43 @@
+pub proc producing_repeat_0
+  push.1
+  repeat.4
+    dup.0
+    add
+  end
+end
+
+
+pub proc producing_repeat_1
+  repeat.4
+    push.0
+  end
+end
+
+pub proc consuming_repeat_0
+  repeat.4
+    add
+  end
+end
+
+
+pub proc consuming_repeat_1
+  push.1.2.3.4
+  repeat.4
+    add
+  end
+
+  push.5
+  sub
+end
+
+
+pub proc nested_repeat_0
+  repeat.2
+    repeat.3
+      push.1
+    end
+    repeat.2
+      add
+    end
+  end
+end

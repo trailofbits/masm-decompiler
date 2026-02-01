@@ -3,7 +3,7 @@
 //! These mirror the `rewasm` layout but are trimmed down until stack/SSA plumbing lands.
 
 use crate::ssa::{Stmt, VarArena};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 mod builder;
 pub use builder::{CfgError, build_cfg_for_proc};
@@ -67,10 +67,27 @@ pub struct BasicBlock {
     pub prev: Vec<Edge>,
 }
 
+/// Context information for a repeat loop, used for subscript computation.
+#[derive(Debug, Clone)]
+pub struct LoopContext {
+    /// Index of the loop counter variable.
+    pub loop_var_index: usize,
+    /// Stack depth at loop entry (before any iterations).
+    pub entry_depth: usize,
+    /// Net stack effect per iteration (positive = producing, negative = consuming).
+    pub effect_per_iter: isize,
+    /// Total number of iterations.
+    pub iter_count: usize,
+}
+
 #[derive(Debug, Default)]
 pub struct Cfg {
     pub nodes: Vec<BasicBlock>,
     pub arena: VarArena,
+    /// Maps variable index to its birth depth (stack depth when created).
+    pub var_depths: HashMap<usize, usize>,
+    /// Loop contexts for subscript computation, keyed by loop header node ID.
+    pub loop_contexts: HashMap<NodeId, LoopContext>,
 }
 
 impl Cfg {

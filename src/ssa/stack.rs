@@ -91,6 +91,22 @@ impl SsaStack {
         vars
     }
 
+    /// Push a single value to the back (top) of the stack.
+    pub fn push_back_one(&mut self, value: Var) {
+        self.stack.push_back(value);
+    }
+
+    /// Push a single value to the front (bottom) of the stack.
+    pub fn push_front_one(&mut self, value: Var) {
+        self.stack.push_front(value);
+        self.required_depth += 1;
+    }
+
+    /// Pop a single value from the back (top) of the stack.
+    pub fn pop_back_one(&mut self) -> Option<Var> {
+        self.stack.pop_back()
+    }
+
     /// Peek a value at a depth from the top of stack.
     pub fn peek_from_top(&self, depth: usize) -> Option<Var> {
         let idx = self.stack.len().checked_sub(depth + 1)?;

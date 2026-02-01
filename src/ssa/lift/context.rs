@@ -18,6 +18,7 @@ pub(super) struct Frame {
 
 impl Frame {
     /// Ensure the stack meets a required depth, allocating inputs as needed.
+    /// New variables are recorded with their birth depth (position from bottom).
     pub(super) fn ensure_depth(
         &mut self,
         ctx: &mut SsaContext,
@@ -25,14 +26,25 @@ impl Frame {
         required_depth: usize,
     ) {
         let exprs = &mut self.exprs;
-        self.stack.ensure_depth(required_depth, || {
+        // Variables added to the front get depths 0, 1, 2, ... as they're prepended.
+        // We need to track how many we're adding and assign depths accordingly.
+        let current_len = self.stack.len();
+        if required_depth <= current_len {
+            return;
+        }
+        let to_add = required_depth - current_len;
+        // Variables are prepended (pushed to front), so they get depths 0, 1, ..., to_add-1
+        // and existing variables shift up by to_add.
+        for depth in (0..to_add).rev() {
             let value = alloc.alloc(ctx);
+            ctx.record_depth(&value, depth);
             exprs.insert(value.clone(), Expr::Var(value.clone()));
-            value
-        });
+            self.stack.push_front_one(value);
+        }
     }
 
     /// Pop a fixed number of values, extending the stack if needed.
+    /// New variables created for underflow are recorded with their birth depth.
     pub(super) fn pop_many(
         &mut self,
         ctx: &mut SsaContext,
@@ -40,12 +52,16 @@ impl Frame {
         pops: usize,
         required_depth: usize,
     ) -> Vec<Var> {
-        let exprs = &mut self.exprs;
-        self.stack.pop_many(pops, required_depth, || {
-            let value = alloc.alloc(ctx);
-            exprs.insert(value.clone(), Expr::Var(value.clone()));
-            value
-        })
+        // First ensure we have enough depth
+        self.ensure_depth(ctx, alloc, required_depth.max(pops));
+        // Now pop from the stack
+        let mut out = Vec::with_capacity(pops);
+        for _ in 0..pops {
+            if let Some(value) = self.stack.pop_back_one() {
+                out.push(value);
+            }
+        }
+        out
     }
 
     /// Pop a single value from the stack.
@@ -60,17 +76,27 @@ impl Frame {
     }
 
     /// Push a fixed number of new SSA values onto the stack.
+    /// Each new variable is recorded with its birth depth.
     pub(super) fn push_many(
         &mut self,
         ctx: &mut SsaContext,
         alloc: &mut impl VarAlloc,
         pushes: usize,
     ) -> Vec<Var> {
-        self.stack.push_many(pushes, || alloc.alloc(ctx))
+        let mut vars = Vec::with_capacity(pushes);
+        for _ in 0..pushes {
+            let depth = self.stack.len();
+            let value = alloc.alloc(ctx);
+            ctx.record_depth(&value, depth);
+            self.stack.push_back_one(value.clone());
+            vars.push(value);
+        }
+        vars
     }
 }
 
 /// Build the entry frame using a known procedure signature, if any.
+/// Records birth depths for all procedure inputs (0, 1, 2, ... from bottom).
 pub(super) fn build_entry_frame(
     proc_path: &str,
     sigs: &SignatureMap,
@@ -79,8 +105,8 @@ pub(super) fn build_entry_frame(
     let mut inputs = Vec::new();
     let mut exprs = HashMap::new();
     if let Some(ProcSignature::Known { inputs: count, .. }) = sigs.get(proc_path) {
-        for _ in 0..*count {
-            let v = ctx.new_var();
+        for depth in 0..*count {
+            let v = ctx.new_var_at_depth(depth);
             exprs.insert(v.clone(), Expr::Var(v.clone()));
             inputs.push(v);
         }
@@ -101,22 +127,39 @@ pub(super) fn retain_live_exprs(state: &mut Frame) {
 pub(super) struct SsaContext {
     /// Arena used to allocate SSA variables.
     arena: VarArena,
+    /// Maps variable index to its birth depth (stack depth when created).
+    var_depths: HashMap<usize, usize>,
 }
 
 impl SsaContext {
     /// Create a new context from an existing variable arena.
     pub(super) fn new(arena: VarArena) -> Self {
-        Self { arena }
+        Self {
+            arena,
+            var_depths: HashMap::new(),
+        }
     }
 
-    /// Return the inner arena when lifting completes.
-    pub(super) fn into_arena(self) -> VarArena {
-        self.arena
+    /// Return both the arena and var_depths when lifting completes.
+    pub(super) fn into_parts(self) -> (VarArena, HashMap<usize, usize>) {
+        (self.arena, self.var_depths)
     }
 
     /// Allocate a fresh SSA variable.
     pub(super) fn new_var(&mut self) -> Var {
         self.arena.new_var()
+    }
+
+    /// Allocate a fresh SSA variable and record its birth depth.
+    pub(super) fn new_var_at_depth(&mut self, depth: usize) -> Var {
+        let var = self.arena.new_var();
+        self.var_depths.insert(var.index, depth);
+        var
+    }
+
+    /// Record the birth depth of an existing variable.
+    pub(super) fn record_depth(&mut self, var: &Var, depth: usize) {
+        self.var_depths.insert(var.index, depth);
     }
 
     /// Resolve an SSA variable to its bound expression if present.

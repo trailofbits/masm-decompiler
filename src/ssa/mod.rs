@@ -6,8 +6,8 @@ use miden_assembly_syntax::parser::PushValue;
 pub mod lift;
 pub mod stack;
 
-pub use stack::SsaStack;
 pub use self::Condition::{Count, Stack};
+pub use stack::SsaStack;
 
 /// Errors produced during SSA lifting and analysis.
 #[derive(Debug)]
@@ -17,7 +17,7 @@ pub enum SsaError {
     /// Non-neutral while-loop encountered during lifting.
     NonNeutralWhile,
     /// Unsupported instruction encountered during lifting.
-    UnknownInstruction(Instruction),
+    UnsupportedInstruction(Instruction),
     /// `exec` call to procedure with unknown stack effect.
     UnknownStackEffect(InvocationTarget),
     /// A CFG node contained an unknown statement.
@@ -32,6 +32,32 @@ pub enum SsaError {
         available: usize,
     },
 }
+
+impl std::fmt::Display for SsaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SsaError::UnbalancedIf => write!(f, "unbalanced if-statement"),
+            SsaError::NonNeutralWhile => write!(f, "non-neutral while-loop"),
+            SsaError::UnsupportedInstruction(inst) => write!(f, "unsupported instruction '{inst}'"),
+            SsaError::UnknownStackEffect(target) => {
+                write!(f, "unknown stack effect for call target '{target}'")
+            }
+            SsaError::UnknownStatement => write!(f, "unknown statement in CFG node"),
+            SsaError::IterationLimitExceeded(limit) => {
+                write!(f, "worklist iteration limit ({limit}) exceeded")
+            }
+            SsaError::StackUnderflow {
+                requested,
+                available,
+            } => write!(
+                f,
+                "stack underflow: requested {requested} values but only {available} available"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SsaError {}
 
 /// Result type for SSA operations.
 pub type SsaResult<T> = Result<T, SsaError>;
@@ -133,6 +159,8 @@ impl VarArena {
 pub enum Expr {
     /// Boolean true literal.
     True,
+    /// Boolean false literal.
+    False,
     /// Variable reference.
     Var(Var),
     /// Constant literal.
@@ -194,6 +222,40 @@ pub enum Constant {
     Word([u64; 4]),
     /// Named constant identifier.
     Defined(String),
+}
+
+impl Constant {
+    /// Check if this constant is a felt literal.
+    pub fn as_felt(&self) -> Option<u64> {
+        match self {
+            Constant::Felt(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    pub fn as_word(&self) -> Option<&[u64; 4]> {
+        match self {
+            Constant::Word(w) => Some(w),
+            _ => None,
+        }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        match self {
+            Constant::Felt(v) => *v == 0,
+            Constant::Word(w) => w.iter().all(|&x| x == 0),
+            Constant::Defined(_) => false,
+        }
+    }
+
+    pub fn is_one(&self) -> bool {
+        match self {
+            Constant::Felt(v) => *v == 1,
+            // TODO: Check word endianness.
+            Constant::Word(w) => w[0] == 1 && w[1] == 0 && w[2] == 0 && w[3] == 0,
+            Constant::Defined(_) => false,
+        }
+    }
 }
 
 impl From<miden_assembly_syntax::ast::ImmFelt> for Constant {
@@ -406,8 +468,6 @@ pub enum Stmt {
     },
     /// While loop with a condition expression.
     While { cond: Expr, body: Vec<Stmt> },
-    /// Break out of the nearest loop.
-    Break,
     /// Continue to the next iteration of the nearest loop.
     Continue,
     /// Return the given values (top of stack order).

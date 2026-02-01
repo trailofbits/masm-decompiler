@@ -1,5 +1,6 @@
 //! Phi-node construction and stack reconciliation for SSA lifting.
 
+use log::debug;
 use std::collections::{HashSet, VecDeque};
 
 use crate::cfg::NodeId;
@@ -60,13 +61,10 @@ pub(super) fn reconcile_stack_len(
     if !is_back_edge {
         return Err(SsaError::UnbalancedIf);
     }
-    if repeat_infos.get(block).and_then(|r| r.as_ref()).is_none() {
-        if std::env::var("DEBUG_SSA").is_ok() {
-            eprintln!(
-                "non-neutral while at block {}: existing_len {}, incoming_len {}",
-                block, existing_len, incoming_len
-            );
-        }
+    if repeat_infos.get(block).is_none() {
+        debug!("non-neutral while loop detected in block {}:", block);
+        debug!("    existing stack depth: {}", existing_len);
+        debug!("    incoming stack depth: {}", incoming_len);
         return Err(SsaError::NonNeutralWhile);
     }
     let target_len = base_stack_len
@@ -133,6 +131,14 @@ pub(super) fn merge_into_block(
                 phis.stack.truncate(target_len);
             }
 
+            // For repeat loops on back edges, skip phi creation entirely.
+            // Repeat loops have known iteration counts and we simulate all iterations
+            // in compute_repeat_exit_frame, so we don't need phis to merge states.
+            // The back edge state is just an intermediate step, not something that
+            // needs phi merging.
+            let is_repeat_back_edge =
+                is_back_edge && repeat_infos.get(block).and_then(|r| r.as_ref()).is_some();
+
             let mut new_stack: VecDeque<Var> = VecDeque::with_capacity(target_len);
             for i in 0..target_len {
                 let existing_var = existing_stack.get(i).unwrap();
@@ -144,7 +150,7 @@ pub(super) fn merge_into_block(
                     }
                 }
 
-                if existing_var != incoming_var {
+                if existing_var != incoming_var && !is_repeat_back_edge {
                     let phi_var = phi_slot.var.clone().unwrap_or_else(|| {
                         let v = ctx.new_var();
                         phi_slot.var = Some(v.clone());

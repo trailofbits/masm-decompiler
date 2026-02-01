@@ -78,7 +78,9 @@ pub fn lift_cfg_to_ssa(
         )?;
     }
 
-    cfg.arena = ctx.into_arena();
+    let (arena, var_depths) = ctx.into_parts();
+    cfg.arena = arena;
+    cfg.var_depths = var_depths;
     Ok(cfg)
 }
 
@@ -182,7 +184,7 @@ fn process_node(
     update_repeat_branch_loop_var(node, repeat_infos, &mut new_code);
 
     let mut branch_alloc = alloc_scope(def_cache, node, orig_code.len());
-    ensure_branch_stmt(
+    ensure_branch_cond(
         &cfg.nodes[node].next,
         &mut new_code,
         &mut state,
@@ -210,17 +212,30 @@ fn process_node(
         }
     }
 
-    maybe_record_repeat_summary(node, cfg, repeat_infos, repeat_summaries, queue)?;
+    maybe_record_repeat_summary(
+        node,
+        cfg,
+        repeat_infos,
+        repeat_summaries,
+        base_stack_len,
+        queue,
+    )?;
 
     // Propagate to successors
     for edge in cfg.nodes[node].next.clone() {
         let succ = edge.node();
         if let Some(info) = repeat_infos.get(node).and_then(|r| r.as_ref()) {
-            if matches!(edge, Edge::Conditional { true_branch: false, .. }) {
+            if matches!(
+                edge,
+                Edge::Conditional {
+                    true_branch: false,
+                    ..
+                }
+            ) {
                 let Some(summary) = repeat_summaries.get(node).and_then(|s| s.as_ref()) else {
                     continue;
                 };
-                let exit_frame = compute_repeat_exit_frame(&state, info, summary)?;
+                let exit_frame = compute_repeat_exit_frame(&state, info, summary, ctx)?;
                 let updated = merge_into_block(
                     succ,
                     node,
@@ -258,11 +273,14 @@ fn process_node(
 
 fn maybe_record_repeat_summary(
     node: NodeId,
-    cfg: &Cfg,
+    cfg: &mut Cfg,
     repeat_infos: &[Option<RepeatInfo>],
     repeat_summaries: &mut [Option<RepeatBodySummary>],
+    base_stack_len: &[Option<usize>],
     queue: &mut Vec<NodeId>,
 ) -> SsaResult<()> {
+    use crate::cfg::LoopContext;
+
     for edge in cfg.nodes[node].next.iter() {
         if !edge.back_edge() {
             continue;
@@ -271,7 +289,11 @@ fn maybe_record_repeat_summary(
         let Some(info) = repeat_infos.get(header).and_then(|r| r.as_ref()) else {
             continue;
         };
-        if repeat_summaries.get(header).and_then(|s| s.as_ref()).is_some() {
+        if repeat_summaries
+            .get(header)
+            .and_then(|s| s.as_ref())
+            .is_some()
+        {
             continue;
         }
         let Some(loop_var) = &info.loop_var else {
@@ -279,6 +301,20 @@ fn maybe_record_repeat_summary(
         };
         let summary = summarize_repeat_body(&cfg.nodes[node].code, loop_var)
             .ok_or(SsaError::NonNeutralWhile)?;
+
+        // Record the loop context for subscript computation.
+        let entry_depth = base_stack_len.get(header).and_then(|d| *d).unwrap_or(0);
+        let effect_per_iter = summary.outputs.len() as isize - summary.pops as isize;
+        cfg.loop_contexts.insert(
+            header,
+            LoopContext {
+                loop_var_index: loop_var.index,
+                entry_depth,
+                effect_per_iter,
+                iter_count: info.count,
+            },
+        );
+
         repeat_summaries[header] = Some(summary);
         queue.push(header);
     }
@@ -289,11 +325,13 @@ fn compute_repeat_exit_frame(
     entry: &Frame,
     info: &RepeatInfo,
     summary: &RepeatBodySummary,
+    ctx: &mut SsaContext,
 ) -> SsaResult<Frame> {
     use super::{IndexExpr, Subscript};
 
     let mut stack: Vec<Var> = entry.stack.iter().cloned().collect();
     let delta = summary.outputs.len().saturating_sub(summary.pops);
+    let is_consuming = summary.pops > summary.outputs.len();
 
     for iter in 0..info.count {
         if summary.pops > stack.len() {
@@ -319,11 +357,23 @@ fn compute_repeat_exit_frame(
             stack.extend(summary.outputs.iter().cloned());
         }
     }
+
+    // For consuming loops, update var_depths to reflect final stack positions.
+    // After all iterations, the final stack elements are at positions 0, 1, 2, ...
+    // regardless of where they were originally born.
+    if is_consuming {
+        for (pos, var) in stack.iter().enumerate() {
+            ctx.record_depth(var, pos);
+        }
+    }
+
     let mut exprs = entry.exprs.clone();
     let live: std::collections::HashSet<Var> = stack.iter().cloned().collect();
     exprs.retain(|k, _| live.contains(k));
     for var in &stack {
-        exprs.entry(var.clone()).or_insert_with(|| Expr::Var(var.clone()));
+        exprs
+            .entry(var.clone())
+            .or_insert_with(|| Expr::Var(var.clone()));
     }
     let required_depth = entry.stack.required_depth().max(stack.len());
     let stack = std::collections::VecDeque::from(stack);
@@ -349,7 +399,7 @@ fn lift_block_code(
     emit_phis(phis, &mut new_code);
 
     // Note: Repeat loop counters don't need phi/init/step statements.
-    // The loop counter is implicit in the `for i in [0, N)` syntax.
+    // The loop counter is implicit in the `for i in 0..N` syntax.
 
     for (stmt_idx, stmt) in orig_code.iter().enumerate() {
         let mut alloc = alloc_scope(def_cache, node, stmt_idx);
@@ -364,58 +414,43 @@ fn lift_block_code(
     Ok(new_code)
 }
 
-/// Ensure a branch statement exists when the CFG has conditional edges.
-fn ensure_branch_stmt(
+/// Fill in if- and while-statement branch conditions based on the actual stack
+/// content.
+fn ensure_branch_cond(
     edges: &[Edge],
     code: &mut Vec<Stmt>,
     state: &mut Frame,
     ctx: &mut SsaContext,
     alloc: &mut impl VarAlloc,
 ) -> SsaResult<()> {
-    let has_conditional = edges.iter().any(|e| matches!(e, Edge::Conditional { .. }));
-    if !has_conditional {
+    // Exit early if the block is empty or does not have multiple outgoing
+    // edges.
+    if code.len() == 0 || edges.len() <= 1 {
         return Ok(());
     }
 
-    // Find any branch statement and check if it needs its condition filled in.
-    let mut branch_idx = None;
-    let mut needs_stack_cond = false;
-    for (idx, stmt) in code.iter().enumerate().rev() {
-        match stmt {
-            Stmt::IfBranch(Condition::Stack(expr)) | Stmt::WhileBranch(Condition::Stack(expr)) => {
-                branch_idx = Some(idx);
-                needs_stack_cond = matches!(expr, Expr::Unknown);
-                break;
-            }
-            Stmt::RepeatBranch(Condition::Count { .. }) => {
-                // RepeatBranch doesn't need stack condition - it uses Count.
-                branch_idx = Some(idx);
-                needs_stack_cond = false;
-                break;
-            }
-            _ => {}
+    // Check if we need to update the branch condition based on the stack.
+    let idx = code.len() - 1;
+    match &code[idx] {
+        Stmt::IfBranch(Condition::Stack(expr)) if matches!(expr, Expr::Unknown) => {
+            let cond_var = state.pop_one(ctx, alloc, 1);
+            let cond_expr = state
+                .exprs
+                .get(&cond_var)
+                .cloned()
+                .unwrap_or(Expr::Var(cond_var));
+            code[idx] = Stmt::IfBranch(Condition::Stack(cond_expr));
         }
-    }
-
-    if needs_stack_cond {
-        let cond_var = state.pop_one(ctx, alloc, 1);
-        let cond_expr = state
-            .exprs
-            .get(&cond_var)
-            .cloned()
-            .unwrap_or(Expr::Var(cond_var));
-        if let Some(idx) = branch_idx {
-            // Update the existing branch with the condition from the stack.
-            match &code[idx] {
-                Stmt::IfBranch(Condition::Stack(_)) => {
-                    code[idx] = Stmt::IfBranch(Condition::Stack(cond_expr));
-                }
-                Stmt::WhileBranch(Condition::Stack(_)) => {
-                    code[idx] = Stmt::WhileBranch(Condition::Stack(cond_expr));
-                }
-                _ => {}
-            }
+        Stmt::WhileBranch(Condition::Stack(expr)) if matches!(expr, Expr::Unknown) => {
+            let cond_var = state.pop_one(ctx, alloc, 1);
+            let cond_expr = state
+                .exprs
+                .get(&cond_var)
+                .cloned()
+                .unwrap_or(Expr::Var(cond_var));
+            code[idx] = Stmt::WhileBranch(Condition::Stack(cond_expr));
         }
+        _ => {}
     }
     Ok(())
 }

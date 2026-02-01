@@ -32,10 +32,7 @@ pub(super) fn extract_repeat_info(code: &[Stmt]) -> Option<RepeatInfo> {
     })
 }
 
-pub(super) fn summarize_repeat_body(
-    code: &[Stmt],
-    loop_var: &Var,
-) -> Option<RepeatBodySummary> {
+pub(super) fn summarize_repeat_body(code: &[Stmt], loop_var: &Var) -> Option<RepeatBodySummary> {
     let mut outputs: Vec<Var> = Vec::new();
     let mut effect = StackEffect::known(0, 0);
     for stmt in code {
@@ -158,7 +155,6 @@ fn summarize_stmt(stmt: &Stmt, loop_var: &Var) -> Option<StmtSummary> {
         | Stmt::Repeat { .. }
         | Stmt::If { .. }
         | Stmt::While { .. }
-        | Stmt::Break
         | Stmt::Continue => None,
     }
 }
@@ -184,7 +180,7 @@ fn expr_pops(expr: &Expr) -> Option<usize> {
     match expr {
         Expr::Binary(_, _, _) => Some(2),
         Expr::Unary(_, _) => Some(1),
-        Expr::Var(_) | Expr::Constant(_) | Expr::True => Some(0),
+        Expr::Var(_) | Expr::Constant(_) | Expr::True | Expr::False => Some(0),
         Expr::Unknown => None,
     }
 }

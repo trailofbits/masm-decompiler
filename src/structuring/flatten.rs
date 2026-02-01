@@ -2,6 +2,56 @@
 //!
 //! This pass converts a CFG with branch markers (`IfBranch`, `WhileBranch`, `RepeatBranch`)
 //! and conditional edges into a flat sequence of structured statements (`If`, `While`, `Repeat`).
+//!
+//! ## Algorithm
+//!
+//! The pass processes CFG nodes in **post-order** (inner structures first, then outer).
+//! For each node containing a branch marker:
+//!
+//! 1. **`IfBranch`** → `Stmt::If`: Identifies then/else targets from conditional edges,
+//!    finds the join node where branches reconverge, collects code from each region,
+//!    and builds a structured `If` statement.
+//!
+//! 2. **`WhileBranch`** → `Stmt::While`: Identifies body and exit targets, collects
+//!    loop body code (following edges until a back-edge to the header), and builds
+//!    a `While` statement with a `Continue` at the end.
+//!
+//! 3. **`RepeatBranch`** → `Stmt::Repeat`: Similar to while, but uses the iteration
+//!    count from the condition and creates a `Repeat` statement with a loop variable.
+//!
+//! After all regions are collapsed, the CFG is linearized into a single statement sequence.
+//!
+//! ## Transformations
+//!
+//! **If-then-else region:**
+//! ```text
+//! [header: IfBranch(cond)] --true--> [then_block] ---> [join]
+//!                          --false-> [else_block] -/
+//! ```
+//! becomes:
+//! ```text
+//! if (cond) { then_code } else { else_code }
+//! ```
+//!
+//! **While loop:**
+//! ```text
+//! [header: WhileBranch(cond)] --true--> [body] --back-edge--> [header]
+//!                             --false-> [exit]
+//! ```
+//! becomes:
+//! ```text
+//! while (cond) { body_code; continue; }
+//! ```
+//!
+//! **Repeat loop:**
+//! ```text
+//! [header: RepeatBranch(N)] --true--> [body] --back-edge--> [header]
+//!                           --false-> [exit]
+//! ```
+//! becomes:
+//! ```text
+//! repeat(N) { body_code }
+//! ```
 
 use std::collections::HashSet;
 

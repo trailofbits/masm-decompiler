@@ -2,11 +2,55 @@
 
 use crate::{
     cfg::{Cfg, Edge},
+    decompile::{DecompiledHeader, DecompiledProc},
     ssa::{
         AdvLoad, AdvStore, BinOp, Call, Condition, Constant, Expr, IndexExpr, Intrinsic, LocalLoad,
         LocalStore, MemLoad, MemStore, Stmt, Subscript, UnOp, Var,
     },
 };
+use yansi::Paint;
+
+/// Syntax highlighting colors for decompiled output.
+mod colors {
+    use yansi::Color;
+
+    pub const KEYWORD: Color = Color::Blue;
+    pub const VARIABLE: Color = Color::Yellow;
+    pub const CONSTANT: Color = Color::Yellow;
+    pub const COMMENT: Color = Color::Green;
+    pub const TYPE: Color = Color::Red;
+    pub const FUNCTION: Color = Color::BrightBlue;
+}
+
+/// Format a keyword with syntax highlighting.
+pub fn keyword(s: &str) -> String {
+    s.fg(colors::KEYWORD).bold().to_string()
+}
+
+/// Format a variable name with syntax highlighting.
+pub fn variable(s: String) -> String {
+    s.fg(colors::VARIABLE).to_string()
+}
+
+/// Format a constant value with syntax highlighting.
+pub fn constant(s: String) -> String {
+    s.fg(colors::CONSTANT).to_string()
+}
+
+/// Format a comment with syntax highlighting.
+pub fn comment(s: &str) -> String {
+    s.fg(colors::COMMENT).italic().to_string()
+}
+
+/// Format a type name with syntax highlighting.
+pub fn type_name(s: &str) -> String {
+    s.fg(colors::TYPE).to_string()
+}
+
+/// Format a function/intrinsic name with syntax highlighting.
+pub fn function_name(s: &str) -> String {
+    s.fg(colors::FUNCTION).to_string()
+}
 
 /// Trait for rendering IR nodes with indentation-aware `CodeWriter`.
 pub trait CodeDisplay {
@@ -40,9 +84,7 @@ impl CodeWriter {
 
     /// Pre-register all loop variables from the code.
     ///
-    /// This should be called before formatting to ensure loop variable names
-    /// are available even when formatting references outside of loop bodies
-    /// (e.g., in return types with subscripts that reference loop variables).
+    /// TODO: Move this to structuring.
     pub fn register_loop_vars(&mut self, code: &[Stmt]) {
         self.register_loop_vars_inner(code);
     }
@@ -107,22 +149,23 @@ impl CodeWriter {
         self.output.push('\n');
     }
 
+    /// Format a variable with syntax highlighting.
     pub fn fmt_var(&self, v: &Var) -> String {
         // Only use loop variable names for active loop variables (those currently in scope).
         // This prevents regular variables from being incorrectly named as loop variables
         // when they happen to have the same index after renaming.
         if self.active_loop_vars.contains(&v.index) {
             if let Some(name) = self.loop_var_names.get(&v.index) {
-                return name.clone();
+                return variable(name.clone());
             }
         }
         if let Some(name) = self.var_names.get(v) {
-            return name.clone();
+            return variable(name.clone());
         }
 
         // Format variable using only subscript when present.
         // This produces clean output like "v_0", "v_i", "v_(2*i + 1)" instead of "v_1_(i)".
-        match &v.subscript {
+        let raw = match &v.subscript {
             Subscript::None => {
                 // Fallback: no subscript assigned (shouldn't happen after rename pass).
                 format!("v_{}", v.index)
@@ -140,7 +183,8 @@ impl CodeWriter {
                 // Complex expression: v_(2*i + 1), etc.
                 format!("v_({})", self.fmt_index_expr(expr))
             }
-        }
+        };
+        variable(raw)
     }
 
     fn enter_loop(&mut self, loop_var: &Var) {
@@ -171,9 +215,19 @@ impl CodeWriter {
                 match &**b {
                     IndexExpr::Const(c) if *c < 0 => format!("{lhs} - {}", -c),
                     IndexExpr::Mul(x, y) => match (&**x, &**y) {
+                        // -1 * rhs => show as "lhs - rhs" (omit the 1)
+                        (IndexExpr::Const(-1), rhs) => {
+                            format!("{lhs} - {}", self.fmt_index_expr(rhs))
+                        }
+                        // c * rhs where c < 0 => show as "lhs - |c| * rhs"
                         (IndexExpr::Const(c), rhs) if *c < 0 => {
                             format!("{lhs} - {} * {}", -c, self.fmt_index_expr(rhs))
                         }
+                        // lhs_term * -1 => show as "lhs - lhs_term" (omit the 1)
+                        (lhs_term, IndexExpr::Const(-1)) => {
+                            format!("{lhs} - {}", self.fmt_index_expr(lhs_term))
+                        }
+                        // lhs_term * c where c < 0 => show as "lhs - |c| * lhs_term"
                         (lhs_term, IndexExpr::Const(c)) if *c < 0 => {
                             format!("{lhs} - {} * {}", -c, self.fmt_index_expr(lhs_term))
                         }
@@ -183,9 +237,64 @@ impl CodeWriter {
                 }
             }
             IndexExpr::Mul(a, b) => {
-                format!("{} * {}", self.fmt_index_expr(a), self.fmt_index_expr(b))
+                // Omit coefficient of 1: "1 * x" => "x"
+                match (&**a, &**b) {
+                    (IndexExpr::Const(1), rhs) => self.fmt_index_expr(rhs),
+                    (lhs, IndexExpr::Const(1)) => self.fmt_index_expr(lhs),
+                    _ => format!("{} * {}", self.fmt_index_expr(a), self.fmt_index_expr(b)),
+                }
             }
         }
+    }
+}
+
+impl CodeDisplay for &DecompiledProc {
+    fn fmt_code(&self, f: &mut CodeWriter) {
+        f.register_loop_vars(self.stmts());
+
+        // Write procedure header
+        f.write(self.header());
+
+        // Write body
+        f.indent();
+        for stmt in self.stmts() {
+            f.write(stmt.clone());
+        }
+        f.dedent();
+        f.write_line("}");
+    }
+}
+
+impl CodeDisplay for DecompiledHeader {
+    fn fmt_code(&self, f: &mut CodeWriter) {
+        // Build argument list
+        let mut args = Vec::new();
+        for i in 0..self.inputs {
+            let v = Var::new(i);
+            args.push(f.fmt_var(&v));
+        }
+        let arg_list = args.join(", ");
+
+        // Build return type list
+        let ret_list = match self.outputs {
+            0 => String::new(),
+            1 => format!(" -> {}", type_name("Felt")),
+            n => {
+                let types = (0..n)
+                    .map(|_| type_name("Felt"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(" -> ({})", types)
+            }
+        };
+
+        f.write_line(&format!(
+            "{} {}({}){} {{",
+            keyword("proc"),
+            self.name,
+            arg_list,
+            ret_list
+        ));
     }
 }
 
@@ -202,9 +311,9 @@ impl CodeDisplay for Stmt {
                     .collect::<Vec<_>>()
                     .join(", ");
                 if vals.is_empty() {
-                    f.write_line("return;");
+                    f.write_line(&format!("{};", keyword("return")));
                 } else {
-                    f.write_line(&format!("return {vals};"));
+                    f.write_line(&format!("{} {vals};", keyword("return")));
                 }
             }
             Stmt::MemLoad(MemLoad { address, outputs }) => {
@@ -219,9 +328,9 @@ impl CodeDisplay for Stmt {
                     .collect::<Vec<_>>()
                     .join(", ");
                 if outs.is_empty() {
-                    f.write_line(&format!("mem_load({args});"));
+                    f.write_line(&format!("{}({args});", function_name("mem_load")));
                 } else {
-                    f.write_line(&format!("{outs} = mem_load({args});"));
+                    f.write_line(&format!("{outs} = {}({args});", function_name("mem_load")));
                 }
             }
             Stmt::MemStore(MemStore { address, values }) => {
@@ -231,7 +340,7 @@ impl CodeDisplay for Stmt {
                     .map(|v| f.fmt_var(v))
                     .collect::<Vec<_>>()
                     .join(", ");
-                f.write_line(&format!("mem_store({args});"));
+                f.write_line(&format!("{}({args});", function_name("mem_store")));
             }
             Stmt::AdvLoad(AdvLoad { outputs }) => {
                 let outs = outputs
@@ -240,9 +349,9 @@ impl CodeDisplay for Stmt {
                     .collect::<Vec<_>>()
                     .join(", ");
                 if outs.is_empty() {
-                    f.write_line("adv_load();");
+                    f.write_line(&format!("{}();", function_name("adv_load")));
                 } else {
-                    f.write_line(&format!("{outs} = adv_load();"));
+                    f.write_line(&format!("{outs} = {}();", function_name("adv_load")));
                 }
             }
             Stmt::AdvStore(AdvStore { values }) => {
@@ -251,7 +360,7 @@ impl CodeDisplay for Stmt {
                     .map(|v| f.fmt_var(v))
                     .collect::<Vec<_>>()
                     .join(", ");
-                f.write_line(&format!("adv_store({args});"));
+                f.write_line(&format!("{}({args});", function_name("adv_store")));
             }
             Stmt::LocalLoad(LocalLoad { index, outputs }) => {
                 let outs = outputs
@@ -260,9 +369,12 @@ impl CodeDisplay for Stmt {
                     .collect::<Vec<_>>()
                     .join(", ");
                 if outs.is_empty() {
-                    f.write_line(&format!("loc_load.{index}();"));
+                    f.write_line(&format!("{}.{index}();", function_name("loc_load")));
                 } else {
-                    f.write_line(&format!("{outs} = loc_load.{index}();"));
+                    f.write_line(&format!(
+                        "{outs} = {}.{index}();",
+                        function_name("loc_load")
+                    ));
                 }
             }
             Stmt::LocalStore(LocalStore { index, values }) => {
@@ -271,7 +383,7 @@ impl CodeDisplay for Stmt {
                     .map(|v| f.fmt_var(v))
                     .collect::<Vec<_>>()
                     .join(", ");
-                f.write_line(&format!("loc_store.{index}({args});"));
+                f.write_line(&format!("{}.{index}({args});", function_name("loc_store")));
             }
             Stmt::Call(call) => write_call_like("call", call, f),
             Stmt::Exec(call) => write_call_like("exec", call, f),
@@ -288,9 +400,9 @@ impl CodeDisplay for Stmt {
                     .collect::<Vec<_>>()
                     .join(", ");
                 if outs.is_empty() {
-                    f.write_line(&format!("dyncall({args});"));
+                    f.write_line(&format!("{}({args});", function_name("dyncall")));
                 } else {
-                    f.write_line(&format!("{outs} = dyncall({args});"));
+                    f.write_line(&format!("{outs} = {}({args});", function_name("dyncall")));
                 }
             }
             Stmt::Intrinsic(Intrinsic {
@@ -309,9 +421,9 @@ impl CodeDisplay for Stmt {
                     .collect::<Vec<_>>()
                     .join(", ");
                 if outs.is_empty() {
-                    f.write_line(&format!("{name}({args});"));
+                    f.write_line(&format!("{}({args});", function_name(name)));
                 } else {
-                    f.write_line(&format!("{outs} = {name}({args});"));
+                    f.write_line(&format!("{outs} = {}({args});", function_name(name)));
                 }
             }
             Stmt::Inst(inst) => {
@@ -322,12 +434,12 @@ impl CodeDisplay for Stmt {
                 then_body,
                 else_body,
             } => {
-                f.write_line(&format!("if ({}) {{", fmt_expr(f, cond, 0)));
+                f.write_line(&format!("{} ({}) {{", keyword("if"), fmt_expr(f, cond, 0)));
                 f.indent();
                 f.write_block(then_body);
                 f.dedent();
                 if !else_body.is_empty() {
-                    f.write_line("} else {");
+                    f.write_line(&format!("}} {} {{", keyword("else")));
                     f.indent();
                     f.write_block(else_body);
                     f.dedent();
@@ -341,7 +453,13 @@ impl CodeDisplay for Stmt {
             } => {
                 f.enter_loop(loop_var);
                 let var_name = f.fmt_var(loop_var);
-                f.write_line(&format!("for {var_name} in 0..{loop_count} {{"));
+                f.write_line(&format!(
+                    "{} {var_name} {} {}..{} {{",
+                    keyword("for"),
+                    keyword("in"),
+                    constant("0".to_string()),
+                    constant(loop_count.to_string())
+                ));
                 f.indent();
                 f.write_block(body);
                 f.dedent();
@@ -350,9 +468,9 @@ impl CodeDisplay for Stmt {
             }
             Stmt::While { cond, body } => {
                 let head = if matches!(cond, Expr::True) {
-                    "loop".to_string()
+                    keyword("loop")
                 } else {
-                    format!("while ({})", fmt_expr(f, cond, 0))
+                    format!("{} ({})", keyword("while"), fmt_expr(f, cond, 0))
                 };
                 f.write_line(&format!("{head} {{"));
                 f.indent();
@@ -366,22 +484,35 @@ impl CodeDisplay for Stmt {
                     .map(|v| f.fmt_var(v))
                     .collect::<Vec<_>>()
                     .join(", ");
-                f.write_line(&format!("phi {} = [{srcs}];", f.fmt_var(var)));
+                f.write_line(&format!(
+                    "{} {} = [{srcs}];",
+                    keyword("phi"),
+                    f.fmt_var(var)
+                ));
             }
             Stmt::IfBranch(cond) => {
-                f.write_line(&format!("if_branch {};", fmt_condition(f, cond)));
+                f.write_line(&format!(
+                    "{} {};",
+                    keyword("if_branch"),
+                    fmt_condition(f, cond)
+                ));
             }
             Stmt::WhileBranch(cond) => {
-                f.write_line(&format!("while_branch {};", fmt_condition(f, cond)));
+                f.write_line(&format!(
+                    "{} {};",
+                    keyword("while_branch"),
+                    fmt_condition(f, cond)
+                ));
             }
             Stmt::RepeatBranch(cond) => {
-                f.write_line(&format!("repeat_branch {};", fmt_condition(f, cond)));
-            }
-            Stmt::Break => {
-                f.write_line("break;");
+                f.write_line(&format!(
+                    "{} {};",
+                    keyword("repeat_branch"),
+                    fmt_condition(f, cond)
+                ));
             }
             Stmt::Continue => {
-                f.write_line("continue;");
+                f.write_line(&format!("{};", keyword("continue")));
             }
             Stmt::Nop => {}
         }
@@ -423,16 +554,18 @@ fn fmt_condition(f: &CodeWriter, cond: &Condition) -> String {
 }
 
 fn fmt_constant(c: &Constant) -> String {
-    match c {
+    let raw = match c {
         Constant::Felt(v) => v.to_string(),
         Constant::Word(w) => format!("[{}, {}, {}, {}]", w[0], w[1], w[2], w[3]),
         Constant::Defined(name) => name.clone(),
-    }
+    };
+    constant(raw)
 }
 
 fn fmt_expr(f: &CodeWriter, expr: &Expr, parent_prec: u8) -> String {
     match expr {
-        Expr::True => "true".to_string(),
+        Expr::True => keyword("true"),
+        Expr::False => keyword("false"),
         Expr::Unknown => "<?>".to_string(),
         Expr::Var(v) => f.fmt_var(v),
         Expr::Constant(c) => fmt_constant(c),
@@ -504,7 +637,7 @@ fn write_call_like(kind: &str, call: &Call, f: &mut CodeWriter) {
         .map(|v| f.fmt_var(v))
         .collect::<Vec<_>>()
         .join(", ");
-    let head = format!("{kind} {}", call.target);
+    let head = format!("{} {}", keyword(kind), function_name(&call.target));
     if outs.is_empty() {
         f.write_line(&format!("{head}({args});"));
     } else {

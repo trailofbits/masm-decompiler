@@ -101,12 +101,13 @@ impl UsesVars for Stmt {
                 vars
             }
             Stmt::Return(values) => values.iter().cloned().collect(),
-            Stmt::IfBranch(Condition::Stack(expr))
-            | Stmt::WhileBranch(Condition::Stack(expr)) => expr.uses_vars(),
+            Stmt::IfBranch(Condition::Stack(expr)) | Stmt::WhileBranch(Condition::Stack(expr)) => {
+                expr.uses_vars()
+            }
             Stmt::IfBranch(Condition::Count { .. })
             | Stmt::WhileBranch(Condition::Count { .. })
             | Stmt::RepeatBranch(_) => HashSet::new(),
-            Stmt::Inst(_) | Stmt::Nop | Stmt::Break | Stmt::Continue => HashSet::new(),
+            Stmt::Inst(_) | Stmt::Nop | Stmt::Continue => HashSet::new(),
         }
     }
 }
@@ -114,11 +115,74 @@ impl UsesVars for Stmt {
 /// Return the variable defined by a statement, if any.
 impl DefinesVars for Stmt {
     fn defines_vars(&self) -> HashSet<Var> {
+        let mut defs = HashSet::new();
         match self {
-            Stmt::Assign { dest, .. } => vec![dest.clone()].into_iter().collect(),
-            Stmt::Phi { var, .. } => vec![var.clone()].into_iter().collect(),
-            _ => HashSet::new(),
+            Stmt::Assign { dest: dst, .. } => {
+                defs.insert(dst.clone());
+            }
+            Stmt::Phi { var, .. } => {
+                defs.insert(var.clone());
+            }
+            Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+                defs.extend(call.results.iter().cloned());
+            }
+            Stmt::DynCall { results, .. } => {
+                defs.extend(results.iter().cloned());
+            }
+            Stmt::Intrinsic(intr) => {
+                defs.extend(intr.results.iter().cloned());
+            }
+            Stmt::MemLoad(load) => {
+                defs.extend(load.outputs.iter().cloned());
+            }
+            Stmt::AdvLoad(load) => {
+                defs.extend(load.outputs.iter().cloned());
+            }
+            Stmt::LocalLoad(load) => {
+                defs.extend(load.outputs.iter().cloned());
+            }
+            Stmt::MemStore(_) | Stmt::AdvStore(_) | Stmt::LocalStore(_) => {
+                // No definitions.
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                defs.extend(then_body.defines_vars());
+                defs.extend(else_body.defines_vars());
+            }
+            Stmt::While { body, .. } | Stmt::Repeat { body, .. } => {
+                defs.extend(body.defines_vars());
+            }
+            Stmt::IfBranch(_) | Stmt::WhileBranch(_) | Stmt::RepeatBranch(_) => {
+                // No definitions.
+            }
+            Stmt::Return(_) | Stmt::Inst(_) | Stmt::Nop | Stmt::Continue => {
+                // No definitions.
+            }
         }
+        defs
+    }
+}
+
+impl DefinesVars for Vec<Stmt> {
+    fn defines_vars(&self) -> HashSet<Var> {
+        let mut defs = HashSet::new();
+        for stmt in self {
+            defs.extend(stmt.defines_vars());
+        }
+        defs
+    }
+}
+
+impl UsesVars for Vec<Stmt> {
+    fn uses_vars(&self) -> HashSet<Var> {
+        let mut uses = HashSet::new();
+        for stmt in self {
+            uses.extend(stmt.uses_vars());
+        }
+        uses
     }
 }
 
@@ -137,7 +201,7 @@ impl UsesVars for Expr {
             Expr::Unary(_, a) => {
                 result.extend(a.uses_vars());
             }
-            Expr::Constant(_) | Expr::True | Expr::Unknown => {}
+            Expr::Constant(_) | Expr::True | Expr::False | Expr::Unknown => {}
         }
         result
     }

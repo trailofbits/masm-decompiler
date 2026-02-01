@@ -119,7 +119,7 @@ fn is_dead(
 
 fn can_remove_expr(expr: &Expr) -> bool {
     match expr {
-        Expr::True | Expr::Var(_) | Expr::Constant(_) => true,
+        Expr::True | Expr::False | Expr::Var(_) | Expr::Constant(_) => true,
         Expr::Unary(_, a) => can_remove_expr(a),
         Expr::Binary(_, a, b) => can_remove_expr(a) && can_remove_expr(b),
         Expr::Unknown => false,
