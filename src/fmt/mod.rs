@@ -4,7 +4,7 @@ use crate::{
     decompile::{DecompiledHeader, DecompiledProc},
     ir::{
         AdvLoad, AdvStore, BinOp, Call, Constant, Expr, IndexExpr, Intrinsic, LocalLoad,
-        LocalStore, LoopVar, MemLoad, MemStore, Stmt, Subscript, UnOp, Var,
+        LocalStore, LoopVar, MemLoad, MemStore, Stmt, UnOp, Var,
     },
 };
 use yansi::Paint;
@@ -217,9 +217,8 @@ impl CodeWriter {
     /// Format a variable with syntax highlighting.
     ///
     /// Variables are formatted based on their subscripts:
-    /// - `Subscript::None`: Fall back to `v_{stack_depth}`
-    /// - `Subscript::Expr(Const(n))`: Format as `v_n`
-    /// - `Subscript::Expr(LoopVar(idx))`: Format as `v_i`, `v_j`, etc.
+    /// - `IndexExpr::Const(n)`: Format as `v_n`
+    /// - `IndexExpr::LoopVar(idx)`: Format as `v_i`, `v_j`, etc.
     /// - Complex expressions: Format as `v_(expr)`
     ///
     /// Note: We do NOT identify loop counters by stack_depth matching, as that
@@ -231,22 +230,18 @@ impl CodeWriter {
             return variable(name.clone());
         }
 
-        // Format variable using only subscript when present.
+        // Format variable based on subscript.
         let raw = match &v.subscript {
-            Subscript::None => {
-                // Fallback: no subscript assigned.
-                format!("v_{}", v.stack_depth)
-            }
-            Subscript::Expr(IndexExpr::Const(n)) => {
+            IndexExpr::Const(n) => {
                 // Concrete subscript: v_0, v_1, etc.
                 format!("v_{}", n)
             }
-            Subscript::Expr(IndexExpr::LoopVar(idx)) => {
+            IndexExpr::LoopVar(idx) => {
                 // Single loop variable: v_i, v_j, etc.
                 let loop_name = self.loop_var_name(*idx);
                 format!("v_{}", loop_name)
             }
-            Subscript::Expr(expr) => {
+            expr => {
                 // Complex expression: v_(2*i + 1), etc.
                 format!("v_({})", self.fmt_index_expr(expr))
             }

@@ -7,10 +7,9 @@
 mod inst;
 mod stack;
 
-use log::debug;
 use miden_assembly_syntax::ast::{Block, Instruction, Op, Procedure};
 
-use crate::ir::{Expr, IndexExpr, LoopVar, Stmt, Subscript, Var};
+use crate::ir::{Expr, IndexExpr, LoopVar, Stmt, Var};
 use crate::signature::{ProcSignature, SignatureMap};
 
 pub use stack::SymbolicStack;
@@ -101,7 +100,6 @@ pub fn lift_proc(
         stack.ensure_depth(*inputs);
     }
 
-    debug!("lifting procedure `{}`", proc_path);
     let mut stmts = lift_block(proc.body(), &mut stack, &mut loop_ctx, module_path, sigs)?;
 
     // Add return statement with outputs.
@@ -339,14 +337,9 @@ fn transform_var_producing(var: Var, entry_depth: usize, loop_var_id: usize) -> 
     // Only transform variables at or after entry_depth (produced values)
     if var.stack_depth >= entry_depth {
         let loop_var = IndexExpr::LoopVar(loop_var_id);
-        let new_subscript = match &var.subscript {
-            Subscript::None => loop_var,
-            Subscript::Expr(existing) => {
-                // Add outer loop's contribution to inner loop's subscript
-                add_index_exprs(loop_var, existing.clone())
-            }
-        };
-        var.with_subscript(Subscript::Expr(new_subscript))
+        // Add loop variable to the existing subscript
+        let new_subscript = add_index_exprs(loop_var, var.subscript.clone());
+        var.with_subscript(new_subscript)
     } else {
         var
     }
@@ -432,17 +425,9 @@ fn transform_var_consuming(var: Var, _entry_depth: usize, loop_var_id: usize) ->
         Box::new(IndexExpr::LoopVar(loop_var_id)),
     );
 
-    let new_subscript = match &var.subscript {
-        Subscript::None => {
-            // Base case: subscript = stack_depth - loop_var
-            add_index_exprs(IndexExpr::Const(var.stack_depth as i64), neg_loop_var)
-        }
-        Subscript::Expr(existing) => {
-            // Nested case: subscript = existing - loop_var
-            add_index_exprs(existing.clone(), neg_loop_var)
-        }
-    };
-    var.with_subscript(Subscript::Expr(new_subscript))
+    // Subtract loop variable from the existing subscript
+    let new_subscript = add_index_exprs(var.subscript.clone(), neg_loop_var);
+    var.with_subscript(new_subscript)
 }
 
 fn transform_expr_consuming(expr: Expr, entry_depth: usize, loop_var_id: usize) -> Expr {

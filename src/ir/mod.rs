@@ -10,7 +10,8 @@ use miden_assembly_syntax::parser::PushValue;
 /// Index expression used for variable subscripts.
 ///
 /// Subscripts track array-like access patterns in loops, allowing the
-/// decompiler to represent values produced across iterations.
+/// decompiler to represent values produced across iterations. For variables
+/// outside loops, the subscript is a constant equal to the stack depth.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum IndexExpr {
     /// Constant index value.
@@ -23,38 +24,31 @@ pub enum IndexExpr {
     Mul(Box<IndexExpr>, Box<IndexExpr>),
 }
 
-/// Optional subscript attached to a variable.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Subscript {
-    /// No subscript.
-    None,
-    /// Subscript defined by an index expression.
-    Expr(IndexExpr),
-}
-
 /// Variable representing a stack value.
 ///
 /// Variables are identified by their birth depth (stack position when created)
-/// and an optional subscript for loop iteration indexing.
+/// and a subscript for indexing. For variables outside loops, the subscript
+/// is a constant equal to the stack depth. For variables inside non-neutral
+/// loops, the subscript is an expression involving loop counters.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Var {
     /// Stack depth when this variable was created (birth depth).
     pub stack_depth: usize,
-    /// Optional subscript for loop indexing.
-    pub subscript: Subscript,
+    /// Subscript expression for variable indexing.
+    pub subscript: IndexExpr,
 }
 
 impl Var {
-    /// Create a new variable with no subscript.
-    pub const fn new(stack_depth: usize) -> Self {
+    /// Create a new variable with a constant subscript equal to the stack depth.
+    pub fn new(stack_depth: usize) -> Self {
         Self {
             stack_depth,
-            subscript: Subscript::None,
+            subscript: IndexExpr::Const(stack_depth as i64),
         }
     }
 
     /// Return a copy of this variable with a new subscript.
-    pub fn with_subscript(&self, subscript: Subscript) -> Self {
+    pub fn with_subscript(&self, subscript: IndexExpr) -> Self {
         Self {
             stack_depth: self.stack_depth,
             subscript,

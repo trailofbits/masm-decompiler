@@ -10,8 +10,9 @@ use crate::{
     fmt::CodeWriter,
     frontend::Workspace,
     ir::{Stmt, Var},
-    lifting::{self, LiftingError},
+    lift::{self, LiftingError},
     signature::{ProcSignature, SignatureMap, infer_signatures},
+    simplify,
 };
 
 /// Configuration for the decompilation pipeline.
@@ -86,7 +87,7 @@ pub enum DecompilationError {
     /// Module not found in the workspace.
     ModuleNotFound(String),
     /// Error during lifting.
-    Lift(LiftingError),
+    Lifting(LiftingError),
 }
 
 impl std::fmt::Display for DecompilationError {
@@ -98,7 +99,7 @@ impl std::fmt::Display for DecompilationError {
             DecompilationError::ModuleNotFound(name) => {
                 write!(f, "module `{name}` not found")
             }
-            DecompilationError::Lift(e) => write!(f, "{e}"),
+            DecompilationError::Lifting(e) => write!(f, "{e}"),
         }
     }
 }
@@ -107,7 +108,7 @@ impl std::error::Error for DecompilationError {}
 
 impl From<LiftingError> for DecompilationError {
     fn from(e: LiftingError) -> Self {
-        DecompilationError::Lift(e)
+        DecompilationError::Lifting(e)
     }
 }
 
@@ -305,7 +306,20 @@ impl<'a> Decompiler<'a> {
 
         // Lift directly from AST to structured IR
         debug!("lifting procedure `{}`", fq_name);
-        let stmts = lifting::lift_proc(proc, fq_name, &module_path, &self.signatures)?;
+        let mut stmts = lift::lift_proc(proc, fq_name, &module_path, &self.signatures)?;
+
+        if self.config.expression_propagation {
+            debug!("propagating expressions in `{}`", fq_name);
+            simplify::propagate_expressions(&mut stmts);
+        }
+        if self.config.dead_code_elimination {
+            debug!("applying dead-code elimination on `{}`", fq_name);
+            simplify::eliminate_dead_code(&mut stmts);
+        }
+        if self.config.simplification {
+            debug!("simplifying statements in `{}`", fq_name);
+            simplify::simplify_statements(&mut stmts);
+        }
 
         let signature = self.signatures.get(fq_name).cloned();
         let body = DecompiledBody::new(stmts);
