@@ -215,13 +215,18 @@ impl CodeWriter {
     }
 
     /// Format a variable with syntax highlighting.
+    ///
+    /// Variables are formatted based on their subscripts:
+    /// - `Subscript::None`: Fall back to `v_{stack_depth}`
+    /// - `Subscript::Expr(Const(n))`: Format as `v_n`
+    /// - `Subscript::Expr(LoopVar(idx))`: Format as `v_i`, `v_j`, etc.
+    /// - Complex expressions: Format as `v_(expr)`
+    ///
+    /// Note: We do NOT identify loop counters by stack_depth matching, as that
+    /// would incorrectly treat regular variables at the loop entry depth as
+    /// loop counters. Loop-dependent variables should have explicit LoopVar
+    /// subscripts.
     pub fn fmt_var(&self, v: &Var) -> String {
-        // Only use loop variable names for active loop variables (those currently in scope).
-        if self.active_loop_vars.contains(&v.stack_depth) {
-            if let Some(name) = self.loop_var_names.get(&v.stack_depth) {
-                return variable(name.clone());
-            }
-        }
         if let Some(name) = self.var_names.get(v) {
             return variable(name.clone());
         }
@@ -259,6 +264,20 @@ impl CodeWriter {
     fn exit_loop(&mut self, loop_var: &Var) {
         self.loop_depth = self.loop_depth.saturating_sub(1);
         self.active_loop_vars.remove(&loop_var.stack_depth);
+    }
+
+    /// Format the loop counter variable for use in the `for` header.
+    ///
+    /// This always uses the loop counter name (i, j, k, ...), regardless of
+    /// the variable's subscript. This is separate from `fmt_var` to ensure
+    /// that only the loop header uses the counter name, not other variables
+    /// that happen to be at the same stack depth.
+    fn fmt_loop_counter(&self, loop_var: &Var) -> String {
+        if let Some(name) = self.loop_var_names.get(&loop_var.stack_depth) {
+            return variable(name.clone());
+        }
+        // Fallback (shouldn't happen if enter_loop was called)
+        variable(format!("i{}", self.loop_depth))
     }
 
     fn loop_var_name(&self, idx: usize) -> String {
@@ -506,9 +525,9 @@ impl CodeDisplay for Stmt {
                 body,
             } => {
                 f.enter_loop(loop_var);
-                let var_name = f.fmt_var(loop_var);
+                let counter_name = f.fmt_loop_counter(loop_var);
                 f.write_line(&format!(
-                    "{} {var_name} {} {}..{} {{",
+                    "{} {counter_name} {} {}..{} {{",
                     keyword("for"),
                     keyword("in"),
                     constant("0".to_string()),

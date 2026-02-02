@@ -9,7 +9,7 @@ use crate::ir::{
 use crate::signature::{SignatureMap, StackEffect};
 
 use super::stack::SymbolicStack;
-use super::{LiftError, LiftResult, LoopContext};
+use super::{LiftingError, LiftingResult, LoopContext};
 
 /// Lift a single instruction into one or more IR statements.
 pub(super) fn lift_inst(
@@ -18,7 +18,7 @@ pub(super) fn lift_inst(
     _loop_ctx: &mut LoopContext,
     module_path: &str,
     sigs: &SignatureMap,
-) -> LiftResult<Vec<Stmt>> {
+) -> LiftingResult<Vec<Stmt>> {
     // Try each instruction category in turn.
     if let Some(stmts) = lift_call_inst(inst, module_path, sigs, stack)? {
         return Ok(stmts);
@@ -44,7 +44,7 @@ pub(super) fn lift_inst(
     if let Some(stmts) = lift_push_inst(inst, stack)? {
         return Ok(stmts);
     }
-    Err(LiftError::UnsupportedInstruction(inst.clone()))
+    Err(LiftingError::UnsupportedInstruction(inst.clone()))
 }
 
 /// Lift call-like instructions (`exec`, `call`, `syscall`).
@@ -53,7 +53,7 @@ fn lift_call_inst(
     module_path: &str,
     sigs: &SignatureMap,
     stack: &mut SymbolicStack,
-) -> LiftResult<Option<Vec<Stmt>>> {
+) -> LiftingResult<Option<Vec<Stmt>>> {
     let stmts = match inst {
         Instruction::Exec(t) => {
             vec![lift_call_like(t, module_path, sigs, stack, Stmt::Exec)?]
@@ -65,7 +65,7 @@ fn lift_call_inst(
             vec![lift_call_like(t, module_path, sigs, stack, Stmt::SysCall)?]
         }
         Instruction::DynExec | Instruction::DynCall => {
-            return Err(LiftError::UnsupportedInstruction(inst.clone()));
+            return Err(LiftingError::UnsupportedInstruction(inst.clone()));
         }
         _ => return Ok(None),
     };
@@ -73,7 +73,10 @@ fn lift_call_inst(
 }
 
 /// Lift arithmetic and comparison instructions.
-fn lift_arith_inst(inst: &Instruction, stack: &mut SymbolicStack) -> LiftResult<Option<Vec<Stmt>>> {
+fn lift_arith_inst(
+    inst: &Instruction,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Option<Vec<Stmt>>> {
     let stmt = match inst {
         Instruction::Add => lift_binop(BinOp::Add, stack),
         Instruction::AddImm(imm) => lift_binop_imm(BinOp::Add, imm, stack),
@@ -103,7 +106,10 @@ fn lift_arith_inst(inst: &Instruction, stack: &mut SymbolicStack) -> LiftResult<
 }
 
 /// Lift stack manipulation instructions.
-fn lift_stack_inst(inst: &Instruction, stack: &mut SymbolicStack) -> LiftResult<Option<Vec<Stmt>>> {
+fn lift_stack_inst(
+    inst: &Instruction,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Option<Vec<Stmt>>> {
     match inst {
         Instruction::Drop => {
             stack.pop();
@@ -319,11 +325,12 @@ fn lift_mem_inst(
     module_path: &str,
     sigs: &SignatureMap,
     stack: &mut SymbolicStack,
-) -> LiftResult<Option<Vec<Stmt>>> {
+) -> LiftingResult<Option<Vec<Stmt>>> {
     match inst {
         Instruction::MemLoad => {
             let effect = effect_for_inst(inst, module_path, sigs)?;
-            let (popped, pushed) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+            let (popped, pushed) =
+                stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
             Ok(Some(vec![Stmt::MemLoad(MemLoad {
                 address: popped,
                 outputs: pushed,
@@ -345,7 +352,7 @@ fn lift_mem_inst(
             let effect = effect_for_inst(inst, module_path, sigs)?;
             let (mut popped, _) = stack.apply(effect.pops(), 0, effect.required_depth());
             if popped.is_empty() {
-                return Err(LiftError::UnsupportedInstruction(inst.clone()));
+                return Err(LiftingError::UnsupportedInstruction(inst.clone()));
             }
             let address = popped.remove(0);
             Ok(Some(vec![Stmt::MemStore(MemStore {
@@ -375,7 +382,7 @@ fn lift_local_inst(
     module_path: &str,
     sigs: &SignatureMap,
     stack: &mut SymbolicStack,
-) -> LiftResult<Option<Vec<Stmt>>> {
+) -> LiftingResult<Option<Vec<Stmt>>> {
     match inst {
         Instruction::LocLoad(idx) => {
             let effect = effect_for_inst(inst, module_path, sigs)?;
@@ -403,7 +410,7 @@ fn lift_adv_inst(
     module_path: &str,
     sigs: &SignatureMap,
     stack: &mut SymbolicStack,
-) -> LiftResult<Option<Vec<Stmt>>> {
+) -> LiftingResult<Option<Vec<Stmt>>> {
     match inst {
         Instruction::AdvLoadW => {
             let effect = effect_for_inst(inst, module_path, sigs)?;
@@ -414,11 +421,11 @@ fn lift_adv_inst(
             let count = match imm {
                 Immediate::Value(span) => *span.inner() as usize,
                 Immediate::Constant(_) => {
-                    return Err(LiftError::UnsupportedInstruction(inst.clone()));
+                    return Err(LiftingError::UnsupportedInstruction(inst.clone()));
                 }
             };
             if count == 0 || count > 16 {
-                return Err(LiftError::UnsupportedInstruction(inst.clone()));
+                return Err(LiftingError::UnsupportedInstruction(inst.clone()));
             }
             let (_, pushed) = stack.apply(0, count, 0);
             Ok(Some(vec![Stmt::Intrinsic(Intrinsic {
@@ -437,7 +444,7 @@ fn lift_intrinsic_inst(
     module_path: &str,
     sigs: &SignatureMap,
     stack: &mut SymbolicStack,
-) -> LiftResult<Option<Vec<Stmt>>> {
+) -> LiftingResult<Option<Vec<Stmt>>> {
     let name = match inst {
         Instruction::Assert => "assert".to_string(),
         Instruction::AssertWithError(err) => format!("assert.{err}"),
@@ -468,7 +475,10 @@ fn lift_intrinsic_inst(
 }
 
 /// Lift push immediates into assignments.
-fn lift_push_inst(inst: &Instruction, stack: &mut SymbolicStack) -> LiftResult<Option<Vec<Stmt>>> {
+fn lift_push_inst(
+    inst: &Instruction,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Option<Vec<Stmt>>> {
     match inst {
         Instruction::Push(imm) => {
             let depth = stack.len();
@@ -487,7 +497,7 @@ fn effect_for_inst(
     inst: &Instruction,
     module_path: &str,
     sigs: &SignatureMap,
-) -> LiftResult<StackEffect> {
+) -> LiftingResult<StackEffect> {
     match inst {
         Instruction::Exec(t) | Instruction::Call(t) | Instruction::SysCall(t) => {
             call_effect(t, module_path, sigs)
@@ -496,7 +506,7 @@ fn effect_for_inst(
             let effect = StackEffect::from(inst);
             match effect {
                 StackEffect::Known { .. } => Ok(effect),
-                StackEffect::Unknown => Err(LiftError::UnsupportedInstruction(inst.clone())),
+                StackEffect::Unknown => Err(LiftingError::UnsupportedInstruction(inst.clone())),
             }
         }
     }
@@ -508,14 +518,14 @@ fn lift_call_like<F>(
     sigs: &SignatureMap,
     stack: &mut SymbolicStack,
     ctor: F,
-) -> LiftResult<Stmt>
+) -> LiftingResult<Stmt>
 where
     F: Fn(Call) -> Stmt,
 {
     let effect = call_effect(target, module_path, sigs)?;
     let (args, results) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
     let name = call_name(target, module_path)
-        .ok_or_else(|| LiftError::UnknownCallTarget(format!("{target}")))?;
+        .ok_or_else(|| LiftingError::UnknownCallTarget(format!("{target}")))?;
     Ok(ctor(Call {
         target: name,
         args,
@@ -591,7 +601,7 @@ fn lift_padw(stack: &mut SymbolicStack) -> Vec<Stmt> {
     stmts
 }
 
-fn lift_dup(idx: usize, stack: &mut SymbolicStack) -> LiftResult<Option<Vec<Stmt>>> {
+fn lift_dup(idx: usize, stack: &mut SymbolicStack) -> LiftingResult<Option<Vec<Stmt>>> {
     let required_depth = idx + 1;
     stack.ensure_depth(required_depth);
     let src = stack.peek(idx).cloned().unwrap();
@@ -604,7 +614,7 @@ fn lift_dup(idx: usize, stack: &mut SymbolicStack) -> LiftResult<Option<Vec<Stmt
     }]))
 }
 
-fn lift_dupw(idx: usize, stack: &mut SymbolicStack) -> LiftResult<Option<Vec<Stmt>>> {
+fn lift_dupw(idx: usize, stack: &mut SymbolicStack) -> LiftingResult<Option<Vec<Stmt>>> {
     let required_depth = (idx + 1) * 4;
     stack.ensure_depth(required_depth);
     let offset = idx * 4;
@@ -640,16 +650,16 @@ fn call_effect(
     target: &InvocationTarget,
     module_path: &str,
     sigs: &SignatureMap,
-) -> LiftResult<StackEffect> {
+) -> LiftingResult<StackEffect> {
     let callee = call_name(target, module_path)
-        .ok_or_else(|| LiftError::UnknownCallTarget(format!("{target}")))?;
+        .ok_or_else(|| LiftingError::UnknownCallTarget(format!("{target}")))?;
     let signature = sigs
         .get(&callee)
-        .ok_or_else(|| LiftError::UnknownCallTarget(callee.clone()))?;
+        .ok_or_else(|| LiftingError::UnknownCallTarget(callee.clone()))?;
     let effect: StackEffect = signature.into();
     match effect {
         StackEffect::Known { .. } => Ok(effect),
-        StackEffect::Unknown => Err(LiftError::UnknownCallTarget(callee)),
+        StackEffect::Unknown => Err(LiftingError::UnknownCallTarget(callee)),
     }
 }
 

@@ -10,14 +10,14 @@ mod stack;
 use log::debug;
 use miden_assembly_syntax::ast::{Block, Instruction, Op, Procedure};
 
-use crate::ir::{Expr, Stmt, Var};
+use crate::ir::{Expr, IndexExpr, Stmt, Subscript, Var};
 use crate::signature::{ProcSignature, SignatureMap};
 
 pub use stack::SymbolicStack;
 
 /// Errors that can occur during lifting.
 #[derive(Debug)]
-pub enum LiftError {
+pub enum LiftingError {
     /// Unsupported instruction encountered.
     UnsupportedInstruction(Instruction),
     /// Call to procedure with unknown signature.
@@ -28,37 +28,53 @@ pub enum LiftError {
     NonNeutralWhile,
 }
 
-impl std::fmt::Display for LiftError {
+impl std::fmt::Display for LiftingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LiftError::UnsupportedInstruction(inst) => {
-                write!(f, "unsupported instruction: {inst}")
+            LiftingError::UnsupportedInstruction(inst) => {
+                write!(f, "unsupported instruction `{inst}` found")
             }
-            LiftError::UnknownCallTarget(target) => {
-                write!(f, "unknown call target: {target}")
+            LiftingError::UnknownCallTarget(target) => {
+                write!(f, "unknown call target `{target}` found")
             }
-            LiftError::UnbalancedIf => write!(f, "unbalanced if-statement"),
-            LiftError::NonNeutralWhile => write!(f, "non-neutral while loop"),
+            LiftingError::UnbalancedIf => write!(f, "unbalanced if-statement"),
+            LiftingError::NonNeutralWhile => write!(f, "non-neutral while loop"),
         }
     }
 }
 
-impl std::error::Error for LiftError {}
+impl std::error::Error for LiftingError {}
 
 /// Result type for lifting operations.
-pub type LiftResult<T> = Result<T, LiftError>;
+pub type LiftingResult<T> = Result<T, LiftingError>;
 
 /// Context for tracking loop nesting during lifting.
 #[derive(Debug, Clone, Default)]
 pub struct LoopContext {
     /// Stack of (loop_var, entry_depth) for each enclosing loop.
     loops: Vec<(Var, usize)>,
+    /// Counter for generating unique loop variable IDs.
+    next_loop_id: usize,
 }
 
 impl LoopContext {
     /// Create a new empty loop context.
     pub fn new() -> Self {
-        Self { loops: Vec::new() }
+        Self {
+            loops: Vec::new(),
+            next_loop_id: 0,
+        }
+    }
+
+    /// Allocate a unique loop variable ID.
+    ///
+    /// Each loop in the procedure gets a unique ID, which is used to
+    /// distinguish loop variables in nested loops that might otherwise
+    /// have the same entry depth.
+    pub fn alloc_loop_id(&mut self) -> usize {
+        let id = self.next_loop_id;
+        self.next_loop_id += 1;
+        id
     }
 
     /// Enter a new loop with the given loop variable and entry stack depth.
@@ -92,7 +108,7 @@ pub fn lift_proc(
     proc_path: &str,
     module_path: &str,
     sigs: &SignatureMap,
-) -> LiftResult<Vec<Stmt>> {
+) -> LiftingResult<Vec<Stmt>> {
     let mut stack = SymbolicStack::new();
     let mut loop_ctx = LoopContext::new();
 
@@ -120,7 +136,7 @@ fn lift_block(
     loop_ctx: &mut LoopContext,
     module_path: &str,
     sigs: &SignatureMap,
-) -> LiftResult<Vec<Stmt>> {
+) -> LiftingResult<Vec<Stmt>> {
     let mut stmts = Vec::new();
     for op in block.iter() {
         let op_stmts = lift_op(op, stack, loop_ctx, module_path, sigs)?;
@@ -136,7 +152,7 @@ fn lift_op(
     loop_ctx: &mut LoopContext,
     module_path: &str,
     sigs: &SignatureMap,
-) -> LiftResult<Vec<Stmt>> {
+) -> LiftingResult<Vec<Stmt>> {
     match op {
         Op::Inst(inst) => inst::lift_inst(inst.inner(), stack, loop_ctx, module_path, sigs),
         Op::If {
@@ -159,7 +175,7 @@ fn lift_if(
     loop_ctx: &mut LoopContext,
     module_path: &str,
     sigs: &SignatureMap,
-) -> LiftResult<Vec<Stmt>> {
+) -> LiftingResult<Vec<Stmt>> {
     // Pop condition from stack.
     let cond_var = stack.pop();
     let cond = Expr::Var(cond_var);
@@ -173,7 +189,7 @@ fn lift_if(
 
     // Verify balanced stack effects.
     if then_stack.len() != else_stack.len() {
-        return Err(LiftError::UnbalancedIf);
+        return Err(LiftingError::UnbalancedIf);
     }
 
     // Use then-branch stack as the result.
@@ -199,11 +215,14 @@ fn lift_repeat(
     loop_ctx: &mut LoopContext,
     module_path: &str,
     sigs: &SignatureMap,
-) -> LiftResult<Vec<Stmt>> {
+) -> LiftingResult<Vec<Stmt>> {
     let entry_depth = stack.len();
 
-    // Allocate loop variable at current depth.
-    let loop_var = Var::new(entry_depth);
+    // Allocate a unique ID for this loop variable.
+    // We use a unique ID (not entry_depth) to distinguish nested loops
+    // that might have the same entry depth.
+    let loop_id = loop_ctx.alloc_loop_id();
+    let loop_var = Var::new(loop_id);
 
     // Enter loop context.
     loop_ctx.enter(loop_var.clone(), entry_depth);
@@ -218,6 +237,19 @@ fn lift_repeat(
 
     // Compute net effect per iteration.
     let delta = exit_depth as isize - entry_depth as isize;
+
+    // Transform subscripts based on loop type.
+    // Use loop_id (not entry_depth) as the identifier for IndexExpr::LoopVar.
+    let body_stmts = if delta > 0 {
+        // Producing loop: subscripts for new values = LoopVar
+        transform_producing_subscripts(body_stmts, entry_depth, loop_id)
+    } else if delta < 0 {
+        // Consuming loop: subscripts = (stack_depth - LoopVar)
+        transform_consuming_subscripts(body_stmts, entry_depth, loop_id)
+    } else {
+        // Neutral loop: no transformation needed, subscripts are constant
+        body_stmts
+    };
 
     // Simulate remaining iterations for stack depth tracking.
     if delta > 0 {
@@ -249,6 +281,202 @@ fn lift_repeat(
     }])
 }
 
+/// Add two index expressions, simplifying trivial cases.
+///
+/// This is used to combine subscript contributions from nested loops.
+fn add_index_exprs(a: IndexExpr, b: IndexExpr) -> IndexExpr {
+    match (&a, &b) {
+        // Identity: 0 + x = x, x + 0 = x
+        (IndexExpr::Const(0), _) => b,
+        (_, IndexExpr::Const(0)) => a,
+        // Constant folding
+        (IndexExpr::Const(x), IndexExpr::Const(y)) => IndexExpr::Const(x + y),
+        // General case
+        _ => IndexExpr::Add(Box::new(a), Box::new(b)),
+    }
+}
+
+/// Transform subscripts for a producing loop.
+///
+/// In a producing loop, variables created at or after entry_depth have
+/// iteration-dependent subscripts. The loop variable is added to any
+/// existing subscript to account for nested loop effects.
+fn transform_producing_subscripts(
+    stmts: Vec<Stmt>,
+    entry_depth: usize,
+    loop_var_id: usize,
+) -> Vec<Stmt> {
+    stmts
+        .into_iter()
+        .map(|stmt| transform_stmt_producing(stmt, entry_depth, loop_var_id))
+        .collect()
+}
+
+fn transform_stmt_producing(stmt: Stmt, entry_depth: usize, loop_var_id: usize) -> Stmt {
+    match stmt {
+        Stmt::Assign { dest, expr } => {
+            let dest = transform_var_producing(dest, entry_depth, loop_var_id);
+            let expr = transform_expr_producing(expr, entry_depth, loop_var_id);
+            Stmt::Assign { dest, expr }
+        }
+        Stmt::Repeat {
+            loop_var,
+            loop_count,
+            body,
+        } => Stmt::Repeat {
+            loop_var,
+            loop_count,
+            body: transform_producing_subscripts(body, entry_depth, loop_var_id),
+        },
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => Stmt::If {
+            cond: transform_expr_producing(cond, entry_depth, loop_var_id),
+            then_body: transform_producing_subscripts(then_body, entry_depth, loop_var_id),
+            else_body: transform_producing_subscripts(else_body, entry_depth, loop_var_id),
+        },
+        Stmt::While { cond, body } => Stmt::While {
+            cond: transform_expr_producing(cond, entry_depth, loop_var_id),
+            body: transform_producing_subscripts(body, entry_depth, loop_var_id),
+        },
+        Stmt::Return(vars) => Stmt::Return(
+            vars.into_iter()
+                .map(|v| transform_var_producing(v, entry_depth, loop_var_id))
+                .collect(),
+        ),
+        // Other statement types pass through unchanged for now
+        other => other,
+    }
+}
+
+fn transform_var_producing(var: Var, entry_depth: usize, loop_var_id: usize) -> Var {
+    // Only transform variables at or after entry_depth (produced values)
+    if var.stack_depth >= entry_depth {
+        let loop_var = IndexExpr::LoopVar(loop_var_id);
+        let new_subscript = match &var.subscript {
+            Subscript::None => loop_var,
+            Subscript::Expr(existing) => {
+                // Add outer loop's contribution to inner loop's subscript
+                add_index_exprs(loop_var, existing.clone())
+            }
+        };
+        var.with_subscript(Subscript::Expr(new_subscript))
+    } else {
+        var
+    }
+}
+
+fn transform_expr_producing(expr: Expr, entry_depth: usize, loop_var_id: usize) -> Expr {
+    match expr {
+        Expr::Var(v) => Expr::Var(transform_var_producing(v, entry_depth, loop_var_id)),
+        Expr::Binary(op, lhs, rhs) => Expr::Binary(
+            op,
+            Box::new(transform_expr_producing(*lhs, entry_depth, loop_var_id)),
+            Box::new(transform_expr_producing(*rhs, entry_depth, loop_var_id)),
+        ),
+        Expr::Unary(op, inner) => Expr::Unary(
+            op,
+            Box::new(transform_expr_producing(*inner, entry_depth, loop_var_id)),
+        ),
+        other => other,
+    }
+}
+
+/// Transform subscripts for a consuming loop.
+///
+/// In a consuming loop, all variables have iteration-dependent subscripts.
+/// The loop variable is subtracted from any existing subscript to account
+/// for the decreasing indices as values are consumed. For nested loops,
+/// this composes with existing subscripts.
+fn transform_consuming_subscripts(
+    stmts: Vec<Stmt>,
+    entry_depth: usize,
+    loop_var_id: usize,
+) -> Vec<Stmt> {
+    stmts
+        .into_iter()
+        .map(|stmt| transform_stmt_consuming(stmt, entry_depth, loop_var_id))
+        .collect()
+}
+
+fn transform_stmt_consuming(stmt: Stmt, entry_depth: usize, loop_var_id: usize) -> Stmt {
+    match stmt {
+        Stmt::Assign { dest, expr } => {
+            let dest = transform_var_consuming(dest, entry_depth, loop_var_id);
+            let expr = transform_expr_consuming(expr, entry_depth, loop_var_id);
+            Stmt::Assign { dest, expr }
+        }
+        Stmt::Repeat {
+            loop_var,
+            loop_count,
+            body,
+        } => Stmt::Repeat {
+            loop_var,
+            loop_count,
+            body: transform_consuming_subscripts(body, entry_depth, loop_var_id),
+        },
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => Stmt::If {
+            cond: transform_expr_consuming(cond, entry_depth, loop_var_id),
+            then_body: transform_consuming_subscripts(then_body, entry_depth, loop_var_id),
+            else_body: transform_consuming_subscripts(else_body, entry_depth, loop_var_id),
+        },
+        Stmt::While { cond, body } => Stmt::While {
+            cond: transform_expr_consuming(cond, entry_depth, loop_var_id),
+            body: transform_consuming_subscripts(body, entry_depth, loop_var_id),
+        },
+        Stmt::Return(vars) => Stmt::Return(
+            vars.into_iter()
+                .map(|v| transform_var_consuming(v, entry_depth, loop_var_id))
+                .collect(),
+        ),
+        // Other statement types pass through unchanged for now
+        other => other,
+    }
+}
+
+fn transform_var_consuming(var: Var, _entry_depth: usize, loop_var_id: usize) -> Var {
+    // For consuming loops, subtract loop_var from the subscript.
+    // This represents the decreasing indices as values are consumed.
+    let neg_loop_var = IndexExpr::Mul(
+        Box::new(IndexExpr::Const(-1)),
+        Box::new(IndexExpr::LoopVar(loop_var_id)),
+    );
+
+    let new_subscript = match &var.subscript {
+        Subscript::None => {
+            // Base case: subscript = stack_depth - loop_var
+            add_index_exprs(IndexExpr::Const(var.stack_depth as i64), neg_loop_var)
+        }
+        Subscript::Expr(existing) => {
+            // Nested case: subscript = existing - loop_var
+            add_index_exprs(existing.clone(), neg_loop_var)
+        }
+    };
+    var.with_subscript(Subscript::Expr(new_subscript))
+}
+
+fn transform_expr_consuming(expr: Expr, entry_depth: usize, loop_var_id: usize) -> Expr {
+    match expr {
+        Expr::Var(v) => Expr::Var(transform_var_consuming(v, entry_depth, loop_var_id)),
+        Expr::Binary(op, lhs, rhs) => Expr::Binary(
+            op,
+            Box::new(transform_expr_consuming(*lhs, entry_depth, loop_var_id)),
+            Box::new(transform_expr_consuming(*rhs, entry_depth, loop_var_id)),
+        ),
+        Expr::Unary(op, inner) => Expr::Unary(
+            op,
+            Box::new(transform_expr_consuming(*inner, entry_depth, loop_var_id)),
+        ),
+        other => other,
+    }
+}
+
 /// Lift a while loop construct.
 ///
 /// We only support stack-neutral while loops.
@@ -258,29 +486,29 @@ fn lift_while(
     loop_ctx: &mut LoopContext,
     module_path: &str,
     sigs: &SignatureMap,
-) -> LiftResult<Vec<Stmt>> {
+) -> LiftingResult<Vec<Stmt>> {
     // Pop initial condition.
     let cond_var = stack.pop();
     let cond = Expr::Var(cond_var);
 
     let entry_depth = stack.len();
 
-    // Process body once (loop context not entered for while - no loop var).
+    // Process the loop body once. (Since we only support stack-neutral while
+    // loops, we do not need to track the loop variable).
     let mut body_stack = stack.clone();
     let body_stmts = lift_block(body, &mut body_stack, loop_ctx, module_path, sigs)?;
 
     // The body should end with pushing a condition value.
+    if body_stack.is_empty() {
+        return Err(LiftingError::NonNeutralWhile);
+    }
     // Pop the continuation condition.
-    if !body_stack.is_empty() {
-        body_stack.pop();
-    }
+    body_stack.pop();
 
-    // Verify stack-neutral.
+    // Verify that the loop body is stack-neutral.
     if body_stack.len() != entry_depth {
-        return Err(LiftError::NonNeutralWhile);
+        return Err(LiftingError::NonNeutralWhile);
     }
-
-    // Stack is unchanged after while loop (neutral).
     Ok(vec![Stmt::While {
         cond,
         body: body_stmts,

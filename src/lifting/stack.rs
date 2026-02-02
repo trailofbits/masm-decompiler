@@ -82,14 +82,16 @@ impl SymbolicStack {
     /// Ensure the stack has at least the given depth by pushing input variables.
     ///
     /// Returns the variables that were created to satisfy the depth requirement.
+    /// Variables are numbered from bottom to top: v_0 is the first input (deepest),
+    /// v_n is the last input (at the top).
     pub fn ensure_depth(&mut self, required_depth: usize) -> Vec<Var> {
         let mut inputs = Vec::new();
         while self.stack.len() < required_depth {
-            // Input variables are pushed at the front (bottom of stack).
-            // Their stack_depth is 0, 1, 2, ... from bottom.
+            // Input variables are numbered by their stack depth from the bottom.
+            // v_0 is at the bottom (first input), v_n is at the top (last input).
             let depth = self.stack.len();
             let var = Var::new(depth);
-            self.stack.push_front(var.clone());
+            self.stack.push_back(var.clone());
             inputs.push(var);
         }
         inputs

@@ -10,7 +10,7 @@ use crate::{
     fmt::CodeWriter,
     frontend::Workspace,
     ir::{Stmt, Var},
-    lifting::{self, LiftError},
+    lifting::{self, LiftingError},
     signature::{ProcSignature, SignatureMap, infer_signatures},
 };
 
@@ -86,17 +86,17 @@ pub enum DecompilationError {
     /// Module not found in the workspace.
     ModuleNotFound(String),
     /// Error during lifting.
-    Lift(LiftError),
+    Lift(LiftingError),
 }
 
 impl std::fmt::Display for DecompilationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DecompilationError::ProcedureNotFound(name) => {
-                write!(f, "procedure {name} not found")
+                write!(f, "procedure `{name}` not found")
             }
             DecompilationError::ModuleNotFound(name) => {
-                write!(f, "module {name} not found")
+                write!(f, "module `{name}` not found")
             }
             DecompilationError::Lift(e) => write!(f, "{e}"),
         }
@@ -105,8 +105,8 @@ impl std::fmt::Display for DecompilationError {
 
 impl std::error::Error for DecompilationError {}
 
-impl From<LiftError> for DecompilationError {
-    fn from(e: LiftError) -> Self {
+impl From<LiftingError> for DecompilationError {
+    fn from(e: LiftingError) -> Self {
         DecompilationError::Lift(e)
     }
 }
