@@ -15,7 +15,7 @@ use miden_assembly_syntax::parser::PushValue;
 pub enum IndexExpr {
     /// Constant index value.
     Const(i64),
-    /// Loop counter reference (by stack depth of the loop variable).
+    /// Loop counter reference by nesting depth (0 = outermost loop).
     LoopVar(usize),
     /// Sum of two index expressions.
     Add(Box<IndexExpr>, Box<IndexExpr>),
@@ -59,6 +59,24 @@ impl Var {
             stack_depth: self.stack_depth,
             subscript,
         }
+    }
+}
+
+/// Loop variable representing the iteration counter of a repeat loop.
+///
+/// Loop variables are distinct from stack variables ([`Var`]). They represent
+/// iteration counters and only appear in loop headers and subscript expressions
+/// ([`IndexExpr::LoopVar`]), never as operands in regular expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LoopVar {
+    /// Nesting depth of this loop (0 for outermost, 1 for next level, etc.).
+    pub loop_depth: usize,
+}
+
+impl LoopVar {
+    /// Create a new loop variable at the given nesting depth.
+    pub const fn new(loop_depth: usize) -> Self {
+        Self { loop_depth }
     }
 }
 
@@ -331,7 +349,7 @@ pub enum Stmt {
     /// Repeat loop with a known iteration count.
     Repeat {
         /// Loop counter variable.
-        loop_var: Var,
+        loop_var: LoopVar,
         /// Number of iterations.
         loop_count: usize,
         /// Loop body statements.

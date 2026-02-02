@@ -4,7 +4,7 @@ use crate::{
     decompile::{DecompiledHeader, DecompiledProc},
     ir::{
         AdvLoad, AdvStore, BinOp, Call, Constant, Expr, IndexExpr, Intrinsic, LocalLoad,
-        LocalStore, MemLoad, MemStore, Stmt, Subscript, UnOp, Var,
+        LocalStore, LoopVar, MemLoad, MemStore, Stmt, Subscript, UnOp, Var,
     },
 };
 use yansi::Paint;
@@ -158,7 +158,7 @@ impl CodeWriter {
             match stmt {
                 Stmt::Repeat { loop_var, body, .. } => {
                     let name = loop_name_for_depth(self.loop_depth);
-                    self.loop_var_names.insert(loop_var.stack_depth, name);
+                    self.loop_var_names.insert(loop_var.loop_depth, name);
                     self.loop_depth += 1;
                     self.register_loop_vars_inner(body);
                     self.loop_depth -= 1;
@@ -254,16 +254,16 @@ impl CodeWriter {
         variable(raw)
     }
 
-    fn enter_loop(&mut self, loop_var: &Var) {
+    fn enter_loop(&mut self, loop_var: &LoopVar) {
         let name = loop_name_for_depth(self.loop_depth);
-        self.loop_var_names.insert(loop_var.stack_depth, name);
-        self.active_loop_vars.insert(loop_var.stack_depth);
+        self.loop_var_names.insert(loop_var.loop_depth, name);
+        self.active_loop_vars.insert(loop_var.loop_depth);
         self.loop_depth += 1;
     }
 
-    fn exit_loop(&mut self, loop_var: &Var) {
+    fn exit_loop(&mut self, loop_var: &LoopVar) {
         self.loop_depth = self.loop_depth.saturating_sub(1);
-        self.active_loop_vars.remove(&loop_var.stack_depth);
+        self.active_loop_vars.remove(&loop_var.loop_depth);
     }
 
     /// Format the loop counter variable for use in the `for` header.
@@ -272,8 +272,8 @@ impl CodeWriter {
     /// the variable's subscript. This is separate from `fmt_var` to ensure
     /// that only the loop header uses the counter name, not other variables
     /// that happen to be at the same stack depth.
-    fn fmt_loop_counter(&self, loop_var: &Var) -> String {
-        if let Some(name) = self.loop_var_names.get(&loop_var.stack_depth) {
+    fn fmt_loop_counter(&self, loop_var: &LoopVar) -> String {
+        if let Some(name) = self.loop_var_names.get(&loop_var.loop_depth) {
             return variable(name.clone());
         }
         // Fallback (shouldn't happen if enter_loop was called)

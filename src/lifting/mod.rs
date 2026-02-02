@@ -10,7 +10,7 @@ mod stack;
 use log::debug;
 use miden_assembly_syntax::ast::{Block, Instruction, Op, Procedure};
 
-use crate::ir::{Expr, IndexExpr, Stmt, Subscript, Var};
+use crate::ir::{Expr, IndexExpr, LoopVar, Stmt, Subscript, Var};
 use crate::signature::{ProcSignature, SignatureMap};
 
 pub use stack::SymbolicStack;
@@ -52,33 +52,17 @@ pub type LiftingResult<T> = Result<T, LiftingError>;
 #[derive(Debug, Clone, Default)]
 pub struct LoopContext {
     /// Stack of (loop_var, entry_depth) for each enclosing loop.
-    loops: Vec<(Var, usize)>,
-    /// Counter for generating unique loop variable IDs.
-    next_loop_id: usize,
+    loops: Vec<(LoopVar, usize)>,
 }
 
 impl LoopContext {
     /// Create a new empty loop context.
     pub fn new() -> Self {
-        Self {
-            loops: Vec::new(),
-            next_loop_id: 0,
-        }
-    }
-
-    /// Allocate a unique loop variable ID.
-    ///
-    /// Each loop in the procedure gets a unique ID, which is used to
-    /// distinguish loop variables in nested loops that might otherwise
-    /// have the same entry depth.
-    pub fn alloc_loop_id(&mut self) -> usize {
-        let id = self.next_loop_id;
-        self.next_loop_id += 1;
-        id
+        Self { loops: Vec::new() }
     }
 
     /// Enter a new loop with the given loop variable and entry stack depth.
-    pub fn enter(&mut self, loop_var: Var, entry_depth: usize) {
+    pub fn enter(&mut self, loop_var: LoopVar, entry_depth: usize) {
         self.loops.push((loop_var, entry_depth));
     }
 
@@ -87,13 +71,13 @@ impl LoopContext {
         self.loops.pop();
     }
 
-    /// Get the current loop depth (number of enclosing loops).
+    /// Get the current loop nesting depth (number of enclosing loops).
     pub fn depth(&self) -> usize {
         self.loops.len()
     }
 
     /// Get the innermost loop info, if any.
-    pub fn innermost(&self) -> Option<&(Var, usize)> {
+    pub fn innermost(&self) -> Option<&(LoopVar, usize)> {
         self.loops.last()
     }
 }
@@ -218,14 +202,13 @@ fn lift_repeat(
 ) -> LiftingResult<Vec<Stmt>> {
     let entry_depth = stack.len();
 
-    // Allocate a unique ID for this loop variable.
-    // We use a unique ID (not entry_depth) to distinguish nested loops
-    // that might have the same entry depth.
-    let loop_id = loop_ctx.alloc_loop_id();
-    let loop_var = Var::new(loop_id);
+    // Create loop variable using current nesting depth.
+    // The depth uniquely identifies this loop within its scope and maps
+    // directly to loop counter names (0 → i, 1 → j, etc.).
+    let loop_var = LoopVar::new(loop_ctx.depth());
 
     // Enter loop context.
-    loop_ctx.enter(loop_var.clone(), entry_depth);
+    loop_ctx.enter(loop_var, entry_depth);
 
     // Process body once to get template and determine stack effect.
     let body_stmts = lift_block(body, stack, loop_ctx, module_path, sigs)?;
@@ -239,13 +222,14 @@ fn lift_repeat(
     let delta = exit_depth as isize - entry_depth as isize;
 
     // Transform subscripts based on loop type.
-    // Use loop_id (not entry_depth) as the identifier for IndexExpr::LoopVar.
+    // Use loop_depth as the identifier for IndexExpr::LoopVar.
+    let loop_depth = loop_var.loop_depth;
     let body_stmts = if delta > 0 {
         // Producing loop: subscripts for new values = LoopVar
-        transform_producing_subscripts(body_stmts, entry_depth, loop_id)
+        transform_producing_subscripts(body_stmts, entry_depth, loop_depth)
     } else if delta < 0 {
         // Consuming loop: subscripts = (stack_depth - LoopVar)
-        transform_consuming_subscripts(body_stmts, entry_depth, loop_id)
+        transform_consuming_subscripts(body_stmts, entry_depth, loop_depth)
     } else {
         // Neutral loop: no transformation needed, subscripts are constant
         body_stmts
