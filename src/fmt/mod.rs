@@ -1,10 +1,9 @@
-//! Pretty-printing helpers that emit a readable structured view of SSA statements and DOT CFGs.
+//! Pretty-printing helpers that emit a readable structured view of IR statements.
 
 use crate::{
-    cfg::{Cfg, Edge},
     decompile::{DecompiledHeader, DecompiledProc},
-    ssa::{
-        AdvLoad, AdvStore, BinOp, Call, Condition, Constant, Expr, IndexExpr, Intrinsic, LocalLoad,
+    ir::{
+        AdvLoad, AdvStore, BinOp, Call, Constant, Expr, IndexExpr, Intrinsic, LocalLoad,
         LocalStore, MemLoad, MemStore, Stmt, Subscript, UnOp, Var,
     },
 };
@@ -105,10 +104,9 @@ pub struct CodeWriter {
     output: String,
     indent: usize,
     var_names: std::collections::HashMap<Var, String>,
-    /// Maps loop variable indices to their names (i, j, k, ...).
+    /// Maps loop variable stack_depth to their names (i, j, k, ...).
     loop_var_names: std::collections::HashMap<usize, String>,
-    /// Set of loop variable indices that are currently "active" (inside their loop).
-    /// Used to distinguish loop variables from regular variables with the same index.
+    /// Set of loop variable stack_depths that are currently "active" (inside their loop).
     active_loop_vars: std::collections::HashSet<usize>,
     loop_depth: usize,
 }
@@ -151,8 +149,6 @@ impl CodeWriter {
     }
 
     /// Pre-register all loop variables from the code.
-    ///
-    /// TODO: Move this to structuring.
     pub fn register_loop_vars(&mut self, code: &[Stmt]) {
         self.register_loop_vars_inner(code);
     }
@@ -162,7 +158,7 @@ impl CodeWriter {
             match stmt {
                 Stmt::Repeat { loop_var, body, .. } => {
                     let name = loop_name_for_depth(self.loop_depth);
-                    self.loop_var_names.insert(loop_var.index, name);
+                    self.loop_var_names.insert(loop_var.stack_depth, name);
                     self.loop_depth += 1;
                     self.register_loop_vars_inner(body);
                     self.loop_depth -= 1;
@@ -221,10 +217,8 @@ impl CodeWriter {
     /// Format a variable with syntax highlighting.
     pub fn fmt_var(&self, v: &Var) -> String {
         // Only use loop variable names for active loop variables (those currently in scope).
-        // This prevents regular variables from being incorrectly named as loop variables
-        // when they happen to have the same index after renaming.
-        if self.active_loop_vars.contains(&v.index) {
-            if let Some(name) = self.loop_var_names.get(&v.index) {
+        if self.active_loop_vars.contains(&v.stack_depth) {
+            if let Some(name) = self.loop_var_names.get(&v.stack_depth) {
                 return variable(name.clone());
             }
         }
@@ -233,11 +227,10 @@ impl CodeWriter {
         }
 
         // Format variable using only subscript when present.
-        // This produces clean output like "v_0", "v_i", "v_(2*i + 1)" instead of "v_1_(i)".
         let raw = match &v.subscript {
             Subscript::None => {
-                // Fallback: no subscript assigned (shouldn't happen after rename pass).
-                format!("v_{}", v.index)
+                // Fallback: no subscript assigned.
+                format!("v_{}", v.stack_depth)
             }
             Subscript::Expr(IndexExpr::Const(n)) => {
                 // Concrete subscript: v_0, v_1, etc.
@@ -258,14 +251,14 @@ impl CodeWriter {
 
     fn enter_loop(&mut self, loop_var: &Var) {
         let name = loop_name_for_depth(self.loop_depth);
-        self.loop_var_names.insert(loop_var.index, name);
-        self.active_loop_vars.insert(loop_var.index);
+        self.loop_var_names.insert(loop_var.stack_depth, name);
+        self.active_loop_vars.insert(loop_var.stack_depth);
         self.loop_depth += 1;
     }
 
     fn exit_loop(&mut self, loop_var: &Var) {
         self.loop_depth = self.loop_depth.saturating_sub(1);
-        self.active_loop_vars.remove(&loop_var.index);
+        self.active_loop_vars.remove(&loop_var.stack_depth);
     }
 
     fn loop_var_name(&self, idx: usize) -> String {
@@ -284,19 +277,15 @@ impl CodeWriter {
                 match &**b {
                     IndexExpr::Const(c) if *c < 0 => format!("{lhs} - {}", -c),
                     IndexExpr::Mul(x, y) => match (&**x, &**y) {
-                        // -1 * rhs => show as "lhs - rhs" (omit the 1)
                         (IndexExpr::Const(-1), rhs) => {
                             format!("{lhs} - {}", self.fmt_index_expr(rhs))
                         }
-                        // c * rhs where c < 0 => show as "lhs - |c| * rhs"
                         (IndexExpr::Const(c), rhs) if *c < 0 => {
                             format!("{lhs} - {} * {}", -c, self.fmt_index_expr(rhs))
                         }
-                        // lhs_term * -1 => show as "lhs - lhs_term" (omit the 1)
                         (lhs_term, IndexExpr::Const(-1)) => {
                             format!("{lhs} - {}", self.fmt_index_expr(lhs_term))
                         }
-                        // lhs_term * c where c < 0 => show as "lhs - |c| * lhs_term"
                         (lhs_term, IndexExpr::Const(c)) if *c < 0 => {
                             format!("{lhs} - {} * {}", -c, self.fmt_index_expr(lhs_term))
                         }
@@ -306,7 +295,6 @@ impl CodeWriter {
                 }
             }
             IndexExpr::Mul(a, b) => {
-                // Omit coefficient of 1: "1 * x" => "x"
                 match (&**a, &**b) {
                     (IndexExpr::Const(1), rhs) => self.fmt_index_expr(rhs),
                     (lhs, IndexExpr::Const(1)) => self.fmt_index_expr(lhs),
@@ -495,9 +483,6 @@ impl CodeDisplay for Stmt {
                     f.write_line(&format!("{outs} = {}({args});", function_name(name)));
                 }
             }
-            Stmt::Inst(inst) => {
-                f.write_line(&format!("{inst:?};"));
-            }
             Stmt::If {
                 cond,
                 then_body,
@@ -547,74 +532,6 @@ impl CodeDisplay for Stmt {
                 f.dedent();
                 f.write_line("}");
             }
-            Stmt::Phi { var, sources } => {
-                let srcs = sources
-                    .iter()
-                    .map(|v| f.fmt_var(v))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                f.write_line(&format!(
-                    "{} {} = [{srcs}];",
-                    keyword("phi"),
-                    f.fmt_var(var)
-                ));
-            }
-            Stmt::IfBranch(cond) => {
-                f.write_line(&format!(
-                    "{} {};",
-                    keyword("if_branch"),
-                    fmt_condition(f, cond)
-                ));
-            }
-            Stmt::WhileBranch(cond) => {
-                f.write_line(&format!(
-                    "{} {};",
-                    keyword("while_branch"),
-                    fmt_condition(f, cond)
-                ));
-            }
-            Stmt::RepeatBranch(cond) => {
-                f.write_line(&format!(
-                    "{} {};",
-                    keyword("repeat_branch"),
-                    fmt_condition(f, cond)
-                ));
-            }
-            Stmt::Nop => {}
-        }
-    }
-}
-
-/// Emit a simple DOT representation of the CFG.
-pub fn cfg_to_dot(cfg: &Cfg) -> String {
-    let mut out = String::from("digraph cfg {\n");
-    for (idx, node) in cfg.nodes.iter().enumerate() {
-        out.push_str(&format!("  n{idx} [label=\"{}\"];\n", idx));
-        for edge in &node.next {
-            let (target, label) = match edge {
-                Edge::Unconditional { node, .. } => (*node, "".to_string()),
-                Edge::Conditional {
-                    node,
-                    true_branch: expect_true,
-                    ..
-                } => (*node, if *expect_true { "T" } else { "F" }.to_string()),
-            };
-            out.push_str(&format!("  n{idx} -> n{target} [label=\"{}\"];\n", label));
-        }
-    }
-    out.push_str("}\n");
-    out
-}
-
-fn fmt_condition(f: &CodeWriter, cond: &Condition) -> String {
-    match cond {
-        Condition::Stack(expr) => fmt_expr(f, expr, 0),
-        Condition::Count { count, loop_var } => {
-            let var_str = loop_var
-                .as_ref()
-                .map(|v| f.fmt_var(v))
-                .unwrap_or_else(|| "?".to_string());
-            format!("{var_str} in [0, {count})")
         }
     }
 }
@@ -632,7 +549,6 @@ fn fmt_expr(f: &CodeWriter, expr: &Expr, parent_prec: u8) -> String {
     match expr {
         Expr::True => keyword("true"),
         Expr::False => keyword("false"),
-        Expr::Unknown => "<?>".to_string(),
         Expr::Var(v) => f.fmt_var(v),
         Expr::Constant(c) => fmt_constant(c),
         Expr::Unary(op, inner) => {

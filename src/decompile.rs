@@ -1,42 +1,17 @@
 //! High-level decompilation API.
 //!
 //! This module provides a structured API for decompiling MASM procedures and modules.
-//!
-//! # Example
-//!
-//! ```ignore
-//! use masm_decompiler::decompile::{Decompiler, DecompileConfig};
-//! use masm_decompiler::frontend::{Workspace, LibraryRoot};
-//!
-//! // Load workspace
-//! let mut workspace = Workspace::new(vec![LibraryRoot::new("", ".")]);
-//! workspace.load_entry("example.masm")?;
-//! workspace.load_dependencies();
-//!
-//! // Create decompiler with default config
-//! let decompiler = Decompiler::new(&workspace);
-//!
-//! // Decompile a single procedure
-//! let result = decompiler.decompile_proc("module::proc_name")?;
-//!
-//! // Or with custom config
-//! let decompiler = Decompiler::new(&workspace)
-//!     .with_config(DecompileConfig::no_optimizations());
-//! let result = decompiler.decompile_proc("module::proc_name")?;
-//! ```
 
 use log::debug;
 use std::collections::HashMap;
 
 use crate::{
-    analysis::{build_def_use_map, eliminate_dead_code},
     callgraph::CallGraph,
-    cfg::{CfgError, build_cfg_for_proc},
     fmt::CodeWriter,
     frontend::Workspace,
+    ir::{Stmt, Var},
+    lifting::{self, LiftError},
     signature::{ProcSignature, SignatureMap, infer_signatures},
-    ssa::{SsaError, Stmt, Var, lift::lift_cfg_to_ssa},
-    structuring::{DecompiledBody, structure},
 };
 
 /// Configuration for the decompilation pipeline.
@@ -110,10 +85,8 @@ pub enum DecompilationError {
     ProcedureNotFound(String),
     /// Module not found in the workspace.
     ModuleNotFound(String),
-    /// Error building the control-flow graph.
-    Cfg(CfgError),
-    /// Error during SSA lifting.
-    Ssa(SsaError),
+    /// Error during lifting.
+    Lift(LiftError),
 }
 
 impl std::fmt::Display for DecompilationError {
@@ -125,23 +98,16 @@ impl std::fmt::Display for DecompilationError {
             DecompilationError::ModuleNotFound(name) => {
                 write!(f, "module {name} not found")
             }
-            DecompilationError::Cfg(e) => write!(f, "{e}"),
-            DecompilationError::Ssa(e) => write!(f, "{e}"),
+            DecompilationError::Lift(e) => write!(f, "{e}"),
         }
     }
 }
 
 impl std::error::Error for DecompilationError {}
 
-impl From<CfgError> for DecompilationError {
-    fn from(e: CfgError) -> Self {
-        DecompilationError::Cfg(e)
-    }
-}
-
-impl From<SsaError> for DecompilationError {
-    fn from(e: SsaError) -> Self {
-        DecompilationError::Ssa(e)
+impl From<LiftError> for DecompilationError {
+    fn from(e: LiftError) -> Self {
+        DecompilationError::Lift(e)
     }
 }
 
@@ -149,9 +115,6 @@ impl From<SsaError> for DecompilationError {
 pub type DecompilationResult<T> = Result<T, DecompilationError>;
 
 /// Header information for a decompiled procedure.
-///
-/// Contains the procedure name and signature information needed to render
-/// the procedure header (e.g., `proc foo(v_0, v_1) -> Felt {`).
 #[derive(Debug, Clone)]
 pub struct DecompiledHeader {
     /// Procedure name (without module path).
@@ -160,6 +123,30 @@ pub struct DecompiledHeader {
     pub inputs: usize,
     /// Number of output values.
     pub outputs: usize,
+}
+
+/// A structured procedure body.
+#[derive(Debug, Clone)]
+pub struct DecompiledBody {
+    /// The statements in the procedure body.
+    pub stmts: Vec<Stmt>,
+}
+
+impl DecompiledBody {
+    /// Create a new structured body from a sequence of statements.
+    pub fn new(stmts: Vec<Stmt>) -> Self {
+        Self { stmts }
+    }
+
+    /// Returns a reference to the statements.
+    pub fn stmts(&self) -> &[Stmt] {
+        &self.stmts
+    }
+
+    /// Returns a mutable reference to the statements.
+    pub fn stmts_mut(&mut self) -> &mut Vec<Stmt> {
+        &mut self.stmts
+    }
 }
 
 /// Result of decompiling a single procedure.
@@ -209,7 +196,6 @@ impl DecompiledProc {
 
     /// Returns the procedure header containing name and signature info.
     pub fn header(&self) -> DecompiledHeader {
-        // Extract procedure name (without module path)
         let name = self
             .name
             .rsplit_once("::")
@@ -257,21 +243,6 @@ impl DecompiledModule {
 }
 
 /// High-level decompiler interface.
-///
-/// The `Decompiler` encapsulates the workspace, call graph, inferred signatures,
-/// and configuration, providing methods to decompile individual procedures or
-/// entire modules.
-///
-/// # Example
-///
-/// ```ignore
-/// // With default config (all optimizations enabled)
-/// let decompiler = Decompiler::new(&workspace);
-///
-/// // With custom config
-/// let decompiler = Decompiler::new(&workspace)
-///     .with_config(DecompileConfig::no_optimizations());
-/// ```
 pub struct Decompiler<'a> {
     workspace: &'a Workspace,
     callgraph: CallGraph,
@@ -281,9 +252,6 @@ pub struct Decompiler<'a> {
 
 impl<'a> Decompiler<'a> {
     /// Create a new decompiler for the given workspace.
-    ///
-    /// This builds the call graph and infers signatures for all procedures.
-    /// Uses the default configuration with all optimizations enabled.
     pub fn new(workspace: &'a Workspace) -> Self {
         let callgraph = CallGraph::from(workspace);
         let signatures = infer_signatures(workspace, &callgraph);
@@ -296,13 +264,6 @@ impl<'a> Decompiler<'a> {
     }
 
     /// Set the decompilation configuration.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let decompiler = Decompiler::new(&workspace)
-    ///     .with_config(DecompileConfig::no_optimizations());
-    /// ```
     pub fn with_config(mut self, config: DecompilationConfig) -> Self {
         self.config = config;
         self
@@ -329,15 +290,6 @@ impl<'a> Decompiler<'a> {
     }
 
     /// Decompile a single procedure by fully-qualified name.
-    ///
-    /// # Arguments
-    ///
-    /// * `fq_name` - Fully-qualified procedure name (e.g., "module::proc_name")
-    ///
-    /// # Returns
-    ///
-    /// The decompiled procedure, or an error if the procedure is not found
-    /// or decompilation fails.
     pub fn decompile_proc(&self, fq_name: &str) -> DecompilationResult<DecompiledProc> {
         // Find the procedure in the workspace
         let proc = self
@@ -351,28 +303,12 @@ impl<'a> Decompiler<'a> {
             .map(|(m, _)| m.to_string())
             .unwrap_or_default();
 
-        // Build CFG
-        debug!("building CFG for `{}`", fq_name);
-        let cfg = build_cfg_for_proc(proc)?;
+        // Lift directly from AST to structured IR
+        debug!("lifting procedure `{}`", fq_name);
+        let stmts = lifting::lift_proc(proc, fq_name, &module_path, &self.signatures)?;
 
-        // Lift to SSA
-        debug!("lifting `{}` CFG to SSA", fq_name);
-        let mut ssa = lift_cfg_to_ssa(cfg, &module_path, fq_name, &self.signatures)?;
-
-        // Apply optimization passes based on config
-        debug!("building def-use map for `{}`", fq_name);
-        let mut def_use = build_def_use_map(&ssa);
-
-        if self.config.dead_code_elimination {
-            debug!("running DCE phase on `{}`", fq_name);
-            eliminate_dead_code(&mut ssa, &mut def_use);
-        }
-
-        // Structure the code, and optionally apply simplification and expression propagation.
-        // Expression propagation now runs after structuring to correctly handle loop boundaries.
-        debug!("running structuring phase on `{}`", fq_name);
-        let body = structure(ssa, &self.config);
         let signature = self.signatures.get(fq_name).cloned();
+        let body = DecompiledBody::new(stmts);
 
         Ok(DecompiledProc {
             name: fq_name.to_string(),
@@ -383,16 +319,7 @@ impl<'a> Decompiler<'a> {
     }
 
     /// Decompile all procedures in a module.
-    ///
-    /// # Arguments
-    ///
-    /// * `module_path` - Module path (e.g., "std::math")
-    ///
-    /// # Returns
-    ///
-    /// The decompiled module with all its procedures.
     pub fn decompile_module(&self, module_path: &str) -> DecompilationResult<DecompiledModule> {
-        // Find the module
         let module = self
             .workspace
             .modules()
@@ -414,10 +341,6 @@ impl<'a> Decompiler<'a> {
     }
 
     /// Decompile all procedures in the workspace.
-    ///
-    /// # Returns
-    ///
-    /// A map from module paths to decompiled modules.
     pub fn decompile_all(&self) -> DecompilationResult<HashMap<String, DecompiledModule>> {
         let mut result = HashMap::new();
 
