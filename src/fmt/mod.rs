@@ -18,8 +18,50 @@ mod colors {
     pub const VARIABLE: Color = Color::Yellow;
     pub const CONSTANT: Color = Color::Yellow;
     pub const COMMENT: Color = Color::Green;
-    pub const TYPE: Color = Color::Red;
+    pub const TYPE: Color = Color::Blue;
     pub const FUNCTION: Color = Color::BrightBlue;
+}
+
+/// Configuration for code output formatting.
+#[derive(Debug, Clone)]
+pub struct FormattingConfig {
+    /// Enable ANSI color codes in output.
+    ///
+    /// Default: `true`
+    pub color: bool,
+
+    /// Number of spaces per indentation level.
+    ///
+    /// Default: `2`
+    pub indent_size: usize,
+}
+
+impl Default for FormattingConfig {
+    fn default() -> Self {
+        Self {
+            color: true,
+            indent_size: 2,
+        }
+    }
+}
+
+impl FormattingConfig {
+    /// Create a new config with default settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set whether color output is enabled.
+    pub fn with_color(mut self, enabled: bool) -> Self {
+        self.color = enabled;
+        self
+    }
+
+    /// Set the indentation size in spaces.
+    pub fn with_indent_size(mut self, size: usize) -> Self {
+        self.indent_size = size;
+        self
+    }
 }
 
 /// Format a keyword with syntax highlighting.
@@ -57,8 +99,9 @@ pub trait CodeDisplay {
     fn fmt_code(&self, f: &mut CodeWriter);
 }
 
-#[derive(Default)]
+/// Pretty-printer for decompiled code with configurable formatting.
 pub struct CodeWriter {
+    config: FormattingConfig,
     output: String,
     indent: usize,
     var_names: std::collections::HashMap<Var, String>,
@@ -70,11 +113,36 @@ pub struct CodeWriter {
     loop_depth: usize,
 }
 
+impl Default for CodeWriter {
+    fn default() -> Self {
+        Self::with_config(FormattingConfig::default())
+    }
+}
+
 impl CodeWriter {
+    /// Create a new code writer with default configuration.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Create a new code writer with custom configuration.
+    pub fn with_config(config: FormattingConfig) -> Self {
+        // Disable yansi coloring globally if color is disabled
+        if !config.color {
+            yansi::disable();
+        }
+        Self {
+            config,
+            output: String::new(),
+            indent: 0,
+            var_names: std::collections::HashMap::new(),
+            loop_var_names: std::collections::HashMap::new(),
+            active_loop_vars: std::collections::HashSet::new(),
+            loop_depth: 0,
+        }
+    }
+
+    /// Create a new code writer with pre-defined variable names.
     pub fn with_var_names(var_names: std::collections::HashMap<Var, String>) -> Self {
         Self {
             var_names,
@@ -142,8 +210,9 @@ impl CodeWriter {
     }
 
     pub fn write_line(&mut self, line: &str) {
+        let spaces = " ".repeat(self.config.indent_size);
         for _ in 0..self.indent {
-            self.output.push_str("  ");
+            self.output.push_str(&spaces);
         }
         self.output.push_str(line);
         self.output.push('\n');
@@ -510,9 +579,6 @@ impl CodeDisplay for Stmt {
                     keyword("repeat_branch"),
                     fmt_condition(f, cond)
                 ));
-            }
-            Stmt::Continue => {
-                f.write_line(&format!("{};", keyword("continue")));
             }
             Stmt::Nop => {}
         }

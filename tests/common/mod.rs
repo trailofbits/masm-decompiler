@@ -66,7 +66,7 @@ pub fn run_structure_debug(ws: &Workspace, proc_name: &str, _module: &str) -> Ve
     // For debug purposes, we need access to the raw CFG
     // Use the low-level API to print debug info
     use masm_decompiler::{
-        analysis::{build_def_use_map, eliminate_dead_code, propagate_expressions},
+        analysis::{build_def_use_map, eliminate_dead_code},
         callgraph::CallGraph,
         cfg::build_cfg_for_proc,
         signature::infer_signatures,
@@ -82,13 +82,8 @@ pub fn run_structure_debug(ws: &Workspace, proc_name: &str, _module: &str) -> Ve
     let mut ssa =
         lift_cfg_to_ssa(cfg, module_path, proc_name, &sigs).expect("ssa lift should succeed");
 
-    eprintln!("var_depths: {:?}", ssa.var_depths);
-    eprintln!("loop_contexts: {:?}", ssa.loop_contexts);
-
-    let mut def_use = build_def_use_map(&ssa);
-    propagate_expressions(&mut ssa, &mut def_use);
-    eliminate_dead_code(&mut ssa, &mut def_use);
-    structure(ssa, true).stmts
+    let config = DecompilationConfig::default();
+    structure(ssa, &config).stmts
 }
 
 // Legacy aliases for backward compatibility

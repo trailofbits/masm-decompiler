@@ -567,20 +567,19 @@ fn lift_adv_inst(
             results.push(addr_out.clone());
             results.extend(word_d.iter().cloned());
             results.extend(word_e.iter().cloned());
+            // Create explicit assignment for addr_out = addr_in + 2
             let addr_expr = Expr::Binary(
                 BinOp::Add,
-                Box::new(ctx.lookup_expr(state, addr_in.clone())),
+                Box::new(Expr::Var(addr_in.clone())),
                 Box::new(Expr::Constant(Constant::Felt(2))),
             );
-            state.exprs.insert(addr_out.clone(), addr_expr);
-            let exprs = &mut state.exprs;
+            let addr_assign = Stmt::Assign {
+                dest: addr_out.clone(),
+                expr: addr_expr,
+            };
             let _ = state.stack.permute_top(
                 required_depth,
-                || {
-                    let v = alloc.alloc(ctx);
-                    exprs.insert(v.clone(), Expr::Var(v.clone()));
-                    v
-                },
+                || alloc.alloc(ctx),
                 |seg| {
                     seg[0] = addr_out.clone();
                     for i in 0..4 {
@@ -591,11 +590,14 @@ fn lift_adv_inst(
                     }
                 },
             );
-            Ok(Some(vec![Stmt::Intrinsic(Intrinsic {
-                name: "adv_pipe".to_string(),
-                args: vec![addr_in],
-                results,
-            })]))
+            Ok(Some(vec![
+                Stmt::Intrinsic(Intrinsic {
+                    name: "adv_pipe".to_string(),
+                    args: vec![addr_in],
+                    results,
+                }),
+                addr_assign,
+            ]))
         }
         _ => Ok(None),
     }
@@ -720,7 +722,6 @@ fn lift_push_inst(
         Instruction::Push(imm) => {
             let dst = state.push_many(ctx, alloc, 1).pop().unwrap();
             let expr: Expr = imm.into();
-            state.exprs.insert(dst.clone(), expr.clone());
             Ok(Some(vec![Stmt::Assign { dest: dst, expr }]))
         }
         _ => Ok(None),
@@ -817,12 +818,7 @@ fn lift_binop(
     let b = popped[0].clone();
     let a = popped[1].clone();
     let res = state.push_many(ctx, alloc, 1).pop().unwrap();
-    let expr = Expr::Binary(
-        op,
-        Box::new(ctx.lookup_expr(state, a)),
-        Box::new(ctx.lookup_expr(state, b)),
-    );
-    state.exprs.insert(res.clone(), expr.clone());
+    let expr = Expr::Binary(op, Box::new(Expr::Var(a)), Box::new(Expr::Var(b)));
     Stmt::Assign { dest: res, expr }
 }
 
@@ -830,8 +826,7 @@ fn lift_binop(
 fn lift_unop(op: UnOp, state: &mut Frame, ctx: &mut SsaContext, alloc: &mut impl VarAlloc) -> Stmt {
     let a = state.pop_one(ctx, alloc, 1);
     let res = state.push_many(ctx, alloc, 1).pop().unwrap();
-    let expr = Expr::Unary(op, Box::new(ctx.lookup_expr(state, a)));
-    state.exprs.insert(res.clone(), expr.clone());
+    let expr = Expr::Unary(op, Box::new(Expr::Var(a)));
     Stmt::Assign { dest: res, expr }
 }
 
@@ -840,10 +835,9 @@ fn lift_incr(state: &mut Frame, ctx: &mut SsaContext, alloc: &mut impl VarAlloc)
     let res = state.push_many(ctx, alloc, 1).pop().unwrap();
     let expr = Expr::Binary(
         BinOp::Add,
-        Box::new(ctx.lookup_expr(state, a)),
+        Box::new(Expr::Var(a)),
         Box::new(Expr::Constant(Constant::Felt(1))),
     );
-    state.exprs.insert(res.clone(), expr.clone());
     Stmt::Assign { dest: res, expr }
 }
 
@@ -858,8 +852,7 @@ fn lift_binop_imm(
     let a = state.pop_one(ctx, alloc, 1);
     let res = state.push_many(ctx, alloc, 1).pop().unwrap();
     let rhs: Expr = imm.into();
-    let expr = Expr::Binary(op, Box::new(ctx.lookup_expr(state, a)), Box::new(rhs));
-    state.exprs.insert(res.clone(), expr.clone());
+    let expr = Expr::Binary(op, Box::new(Expr::Var(a)), Box::new(rhs));
     Stmt::Assign { dest: res, expr }
 }
 
@@ -869,7 +862,6 @@ fn lift_padw(state: &mut Frame, ctx: &mut SsaContext, alloc: &mut impl VarAlloc)
     let mut stmts = Vec::with_capacity(pushed.len());
     for dst in pushed {
         let expr = Expr::Constant(Constant::Felt(0));
-        state.exprs.insert(dst.clone(), expr.clone());
         stmts.push(Stmt::Assign { dest: dst, expr });
     }
     stmts
@@ -890,8 +882,7 @@ fn lift_dup(
         .peek_from_top(idx)
         .ok_or_else(|| SsaError::UnsupportedInstruction(inst.clone()))?;
     let dst = state.push_many(ctx, alloc, 1).pop().unwrap();
-    let expr = ctx.lookup_expr(state, src);
-    state.exprs.insert(dst.clone(), expr.clone());
+    let expr = Expr::Var(src);
     Ok(vec![Stmt::Assign { dest: dst, expr }])
 }
 
@@ -913,8 +904,7 @@ fn lift_dupw(
     let mut stmts = Vec::with_capacity(4);
     for src in word {
         let dst = state.push_many(ctx, alloc, 1).pop().unwrap();
-        let expr = ctx.lookup_expr(state, src);
-        state.exprs.insert(dst.clone(), expr.clone());
+        let expr = Expr::Var(src);
         stmts.push(Stmt::Assign { dest: dst, expr });
     }
     Ok(stmts)
@@ -923,14 +913,9 @@ fn lift_dupw(
 /// Swap the stack top with a value at the given depth.
 fn lift_swap(idx: usize, state: &mut Frame, ctx: &mut SsaContext, alloc: &mut impl VarAlloc) {
     let count = idx + 1;
-    let exprs = &mut state.exprs;
     let _ = state.stack.permute_top(
         count,
-        || {
-            let v = alloc.alloc(ctx);
-            exprs.insert(v.clone(), Expr::Var(v.clone()));
-            v
-        },
+        || alloc.alloc(ctx),
         |seg| {
             let top_idx = seg.len() - 1;
             let tgt_idx = seg.len() - 1 - idx;
@@ -942,14 +927,9 @@ fn lift_swap(idx: usize, state: &mut Frame, ctx: &mut SsaContext, alloc: &mut im
 /// Swap the stack top word with a word at the given depth.
 fn lift_swapw(idx: usize, state: &mut Frame, ctx: &mut SsaContext, alloc: &mut impl VarAlloc) {
     let count = (idx + 1) * 4;
-    let exprs = &mut state.exprs;
     let _ = state.stack.permute_top(
         count,
-        || {
-            let v = alloc.alloc(ctx);
-            exprs.insert(v.clone(), Expr::Var(v.clone()));
-            v
-        },
+        || alloc.alloc(ctx),
         |seg| {
             let len = seg.len();
             let top_start = len - 4;
@@ -962,14 +942,9 @@ fn lift_swapw(idx: usize, state: &mut Frame, ctx: &mut SsaContext, alloc: &mut i
 
 /// Swap the top double-word segments in place.
 fn lift_swapdw(state: &mut Frame, ctx: &mut SsaContext, alloc: &mut impl VarAlloc) {
-    let exprs = &mut state.exprs;
     let _ = state.stack.permute_top(
         16,
-        || {
-            let v = alloc.alloc(ctx);
-            exprs.insert(v.clone(), Expr::Var(v.clone()));
-            v
-        },
+        || alloc.alloc(ctx),
         |seg| {
             for i in 0..4 {
                 seg.swap(i, 8 + i);
@@ -982,14 +957,9 @@ fn lift_swapdw(state: &mut Frame, ctx: &mut SsaContext, alloc: &mut impl VarAllo
 /// Move a value up from the given depth to the top.
 fn lift_movup(depth: usize, state: &mut Frame, ctx: &mut SsaContext, alloc: &mut impl VarAlloc) {
     let count = depth + 1;
-    let exprs = &mut state.exprs;
     let _ = state.stack.permute_top(
         count,
-        || {
-            let v = alloc.alloc(ctx);
-            exprs.insert(v.clone(), Expr::Var(v.clone()));
-            v
-        },
+        || alloc.alloc(ctx),
         |seg| {
             let idx = seg.len() - 1 - depth;
             let v = seg.remove(idx);
@@ -1001,14 +971,9 @@ fn lift_movup(depth: usize, state: &mut Frame, ctx: &mut SsaContext, alloc: &mut
 /// Move the top value down to the given depth.
 fn lift_movdn(depth: usize, state: &mut Frame, ctx: &mut SsaContext, alloc: &mut impl VarAlloc) {
     let count = depth + 1;
-    let exprs = &mut state.exprs;
     let _ = state.stack.permute_top(
         count,
-        || {
-            let v = alloc.alloc(ctx);
-            exprs.insert(v.clone(), Expr::Var(v.clone()));
-            v
-        },
+        || alloc.alloc(ctx),
         |seg| {
             if let Some(top) = seg.pop() {
                 seg.insert(0, top);
@@ -1020,14 +985,9 @@ fn lift_movdn(depth: usize, state: &mut Frame, ctx: &mut SsaContext, alloc: &mut
 /// Move a word up from the given word depth to the top.
 fn lift_movupw(depth: usize, state: &mut Frame, ctx: &mut SsaContext, alloc: &mut impl VarAlloc) {
     let count = (depth + 1) * 4;
-    let exprs = &mut state.exprs;
     let _ = state.stack.permute_top(
         count,
-        || {
-            let v = alloc.alloc(ctx);
-            exprs.insert(v.clone(), Expr::Var(v.clone()));
-            v
-        },
+        || alloc.alloc(ctx),
         |seg| {
             let word: Vec<Var> = seg.drain(0..4).collect();
             seg.extend(word);
@@ -1038,14 +998,9 @@ fn lift_movupw(depth: usize, state: &mut Frame, ctx: &mut SsaContext, alloc: &mu
 /// Move the top word down to the given word depth.
 fn lift_movdnw(depth: usize, state: &mut Frame, ctx: &mut SsaContext, alloc: &mut impl VarAlloc) {
     let count = (depth + 1) * 4;
-    let exprs = &mut state.exprs;
     let _ = state.stack.permute_top(
         count,
-        || {
-            let v = alloc.alloc(ctx);
-            exprs.insert(v.clone(), Expr::Var(v.clone()));
-            v
-        },
+        || alloc.alloc(ctx),
         |seg| {
             let len = seg.len();
             let word: Vec<Var> = seg.drain(len - 4..).collect();
@@ -1056,30 +1011,12 @@ fn lift_movdnw(depth: usize, state: &mut Frame, ctx: &mut SsaContext, alloc: &mu
 
 /// Reverse the top word in place.
 fn lift_reversew(state: &mut Frame, ctx: &mut SsaContext, alloc: &mut impl VarAlloc) {
-    let exprs = &mut state.exprs;
-    let _ = state.stack.permute_top(
-        4,
-        || {
-            let v = alloc.alloc(ctx);
-            exprs.insert(v.clone(), Expr::Var(v.clone()));
-            v
-        },
-        |seg| seg.reverse(),
-    );
+    let _ = state.stack.permute_top(4, || alloc.alloc(ctx), |seg| seg.reverse());
 }
 
 /// Reverse the top double-word in place.
 fn lift_reversedw(state: &mut Frame, ctx: &mut SsaContext, alloc: &mut impl VarAlloc) {
-    let exprs = &mut state.exprs;
-    let _ = state.stack.permute_top(
-        8,
-        || {
-            let v = alloc.alloc(ctx);
-            exprs.insert(v.clone(), Expr::Var(v.clone()));
-            v
-        },
-        |seg| seg.reverse(),
-    );
+    let _ = state.stack.permute_top(8, || alloc.alloc(ctx), |seg| seg.reverse());
 }
 
 /// Extract the duplicate depth for dup instructions.
@@ -1162,13 +1099,12 @@ fn mov_index(inst: &Instruction) -> Option<u8> {
 /// Assign an SSA variable from a u32 immediate.
 fn assign_from_u32_immediate(
     imm: &ImmU32,
-    state: &mut Frame,
+    _state: &mut Frame,
     ctx: &mut SsaContext,
     alloc: &mut impl VarAlloc,
 ) -> (Var, Stmt) {
     let dest = alloc.alloc(ctx);
     let expr: Expr = imm.into();
-    state.exprs.insert(dest.clone(), expr.clone());
     (dest.clone(), Stmt::Assign { dest, expr })
 }
 

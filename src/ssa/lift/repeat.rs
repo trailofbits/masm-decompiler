@@ -154,8 +154,7 @@ fn summarize_stmt(stmt: &Stmt, loop_var: &Var) -> Option<StmtSummary> {
         | Stmt::Inst(_)
         | Stmt::Repeat { .. }
         | Stmt::If { .. }
-        | Stmt::While { .. }
-        | Stmt::Continue => None,
+        | Stmt::While { .. } => None,
     }
 }
 

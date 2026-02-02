@@ -8,7 +8,7 @@ use crate::cfg::NodeId;
 use super::context::{Frame, SsaContext};
 use super::repeat::RepeatInfo;
 use super::{SsaError, SsaResult};
-use crate::ssa::{Expr, SsaStack, Stmt, Var};
+use crate::ssa::{SsaStack, Stmt, Var};
 
 /// Per-stack-slot phi information for a block.
 #[derive(Default, Clone)]
@@ -123,7 +123,6 @@ pub(super) fn merge_into_block(
             )?;
 
             let mut changed = false;
-            let mut new_exprs = existing.exprs.clone();
             let phis = phi_state.get_mut(block).unwrap();
             if phis.stack.len() < target_len {
                 phis.stack.resize_with(target_len, PhiInfo::default);
@@ -163,14 +162,10 @@ pub(super) fn merge_into_block(
                         phi_slot.sources.push(incoming_var);
                     }
                     phi_slot.seen_preds.insert(pred);
-                    new_stack.push_back(phi_var.clone());
-                    new_exprs.insert(phi_var.clone(), Expr::Var(phi_var));
+                    new_stack.push_back(phi_var);
                     changed = true;
                 } else {
                     phi_slot.seen_preds.insert(pred);
-                    if let Some(expr) = incoming.exprs.get(&existing_var).cloned() {
-                        new_exprs.insert(existing_var.clone(), expr);
-                    }
                     new_stack.push_back(existing_var);
                 }
             }
@@ -181,7 +176,6 @@ pub(super) fn merge_into_block(
                 .max(incoming.stack.required_depth());
             let new_frame = Frame {
                 stack: SsaStack::from_parts(new_stack, new_required_depth),
-                exprs: new_exprs,
             };
             let changed_frame = in_state[block]
                 .as_ref()

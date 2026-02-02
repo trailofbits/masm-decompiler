@@ -29,7 +29,7 @@ use log::debug;
 use std::collections::HashMap;
 
 use crate::{
-    analysis::{build_def_use_map, eliminate_dead_code, propagate_expressions},
+    analysis::{build_def_use_map, eliminate_dead_code},
     callgraph::CallGraph,
     cfg::{CfgError, build_cfg_for_proc},
     fmt::CodeWriter,
@@ -352,30 +352,26 @@ impl<'a> Decompiler<'a> {
             .unwrap_or_default();
 
         // Build CFG
-        debug!("building CFG for `{}`", proc.name());
+        debug!("building CFG for `{}`", fq_name);
         let cfg = build_cfg_for_proc(proc)?;
 
         // Lift to SSA
-        debug!("lifting `{}` CFG to SSA", proc.name());
+        debug!("lifting `{}` CFG to SSA", fq_name);
         let mut ssa = lift_cfg_to_ssa(cfg, &module_path, fq_name, &self.signatures)?;
 
         // Apply optimization passes based on config
-        debug!("building def-use map for `{}`", proc.name());
+        debug!("building def-use map for `{}`", fq_name);
         let mut def_use = build_def_use_map(&ssa);
 
-        if self.config.expression_propagation {
-            debug!("running expression propagation phase on `{}`", proc.name());
-            propagate_expressions(&mut ssa, &mut def_use);
-        }
-
         if self.config.dead_code_elimination {
-            debug!("running DCE phase on `{}`", proc.name());
+            debug!("running DCE phase on `{}`", fq_name);
             eliminate_dead_code(&mut ssa, &mut def_use);
         }
 
-        // Structure the code, and optionally apply simplification passes.
-        debug!("running structuring phase on `{}`", proc.name());
-        let body = structure(ssa, self.config.simplification);
+        // Structure the code, and optionally apply simplification and expression propagation.
+        // Expression propagation now runs after structuring to correctly handle loop boundaries.
+        debug!("running structuring phase on `{}`", fq_name);
+        let body = structure(ssa, &self.config);
         let signature = self.signatures.get(fq_name).cloned();
 
         Ok(DecompiledProc {

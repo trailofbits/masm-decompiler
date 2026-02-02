@@ -1,4 +1,4 @@
-pub proc producing_repeat_0
+pub proc neutral_repeat_0
   push.1
   repeat.4
     dup.0

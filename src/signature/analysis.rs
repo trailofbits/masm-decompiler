@@ -1,3 +1,4 @@
+use log::debug;
 use miden_assembly_syntax::ast::{Block, Instruction, InvocationTarget, Op, Procedure};
 
 use crate::{callgraph::CallGraph, frontend::Workspace};
@@ -14,6 +15,17 @@ pub fn infer_signatures(workspace: &Workspace, callgraph: &CallGraph) -> Signatu
             let module_path = node.module_path.as_ref();
             let analysis = Analysis::new(module_path, &signatures);
             let signature = analysis.visit_proc(proc);
+            if let ProcSignature::Known {
+                inputs, outputs, ..
+            } = signature
+            {
+                debug!(
+                    "`{}` takes {} inputs and returns {} outputs",
+                    node.name, inputs, outputs
+                );
+            } else {
+                debug!("failed to infer signature for `{}`", node.name)
+            }
             signatures.insert(node.name.clone(), signature);
         }
     }

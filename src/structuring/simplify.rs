@@ -251,6 +251,7 @@ impl Simplify for Stmt {
                     changed,
                 )
             }
+            Stmt::Nop => SimplifyResult::changed(Vec::new()),
             _ => SimplifyResult::unchanged(vec![self]),
         }
     }

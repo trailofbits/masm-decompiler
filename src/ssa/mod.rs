@@ -468,8 +468,6 @@ pub enum Stmt {
     },
     /// While loop with a condition expression.
     While { cond: Expr, body: Vec<Stmt> },
-    /// Continue to the next iteration of the nearest loop.
-    Continue,
     /// Return the given values (top of stack order).
     Return(Vec<Var>),
 }

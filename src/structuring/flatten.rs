@@ -14,7 +14,7 @@
 //!
 //! 2. **`WhileBranch`** → `Stmt::While`: Identifies body and exit targets, collects
 //!    loop body code (following edges until a back-edge to the header), and builds
-//!    a `While` statement with a `Continue` at the end.
+//!    a `While` statement from the body.
 //!
 //! 3. **`RepeatBranch`** → `Stmt::Repeat`: Similar to while, but uses the iteration
 //!    count from the condition and creates a `Repeat` statement with a loop variable.
@@ -40,7 +40,7 @@
 //! ```
 //! becomes:
 //! ```text
-//! while (cond) { body_code; continue; }
+//! while (cond) { body_code; }
 //! ```
 //!
 //! **Repeat loop:**
@@ -83,7 +83,9 @@ pub fn flatten_control_flow(mut cfg: Cfg) -> Vec<Stmt> {
         match branch_type {
             Some(BranchType::If) => collapse_if(&mut cfg, node),
             Some(BranchType::While) => collapse_while(&mut cfg, node),
-            Some(BranchType::Repeat(count, loop_var)) => collapse_repeat(&mut cfg, node, count, loop_var),
+            Some(BranchType::Repeat(count, loop_var)) => {
+                collapse_repeat(&mut cfg, node, count, loop_var)
+            }
             None => {}
         }
     }
@@ -153,7 +155,9 @@ fn collapse_if(cfg: &mut Cfg, header: NodeId) {
             back_edge: false,
         });
         // Update join's predecessors.
-        cfg.nodes[join].prev.retain(|e| e.node() != then_node && e.node() != else_node);
+        cfg.nodes[join]
+            .prev
+            .retain(|e| e.node() != then_node && e.node() != else_node);
         cfg.nodes[join].prev.push(Edge::Unconditional {
             node: header,
             back_edge: false,
@@ -177,18 +181,10 @@ fn collapse_while(cfg: &mut Cfg, header: NodeId) {
     };
 
     // Collect code from the loop body.
-    let mut body_code = collect_loop_body_code(cfg, header, body_node);
-
-    // Add Continue at the end if not already present.
-    if !body_code.last().map_or(false, |s| matches!(s, Stmt::Continue)) {
-        body_code.push(Stmt::Continue);
-    }
+    let body = collect_loop_body_code(cfg, header, body_node);
 
     // Build the While statement.
-    let while_stmt = Stmt::While {
-        cond,
-        body: body_code,
-    };
+    let while_stmt = Stmt::While { cond, body };
 
     // Remove the branch marker and insert the While statement.
     if let Some(idx) = branch_idx {
@@ -204,7 +200,16 @@ fn collapse_while(cfg: &mut Cfg, header: NodeId) {
     });
 
     // Update exit's predecessors.
-    cfg.nodes[exit_node].prev.retain(|e| e.node() != header || !matches!(e, Edge::Conditional { true_branch: false, .. }));
+    cfg.nodes[exit_node].prev.retain(|e| {
+        e.node() != header
+            || !matches!(
+                e,
+                Edge::Conditional {
+                    true_branch: false,
+                    ..
+                }
+            )
+    });
     cfg.nodes[exit_node].prev.push(Edge::Unconditional {
         node: header,
         back_edge: false,
@@ -249,7 +254,16 @@ fn collapse_repeat(cfg: &mut Cfg, header: NodeId, count: usize, loop_var: Option
     });
 
     // Update exit's predecessors.
-    cfg.nodes[exit_node].prev.retain(|e| e.node() != header || !matches!(e, Edge::Conditional { true_branch: false, .. }));
+    cfg.nodes[exit_node].prev.retain(|e| {
+        e.node() != header
+            || !matches!(
+                e,
+                Edge::Conditional {
+                    true_branch: false,
+                    ..
+                }
+            )
+    });
     cfg.nodes[exit_node].prev.push(Edge::Unconditional {
         node: header,
         back_edge: false,
@@ -285,7 +299,10 @@ fn find_conditional_targets(edges: &[Edge]) -> Option<(NodeId, NodeId)> {
     let mut false_target = None;
 
     for edge in edges {
-        if let Edge::Conditional { node, true_branch, .. } = edge {
+        if let Edge::Conditional {
+            node, true_branch, ..
+        } = edge
+        {
             if *true_branch {
                 true_target = Some(*node);
             } else {

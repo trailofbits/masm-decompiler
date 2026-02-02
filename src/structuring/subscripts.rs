@@ -205,8 +205,7 @@ impl<'a> SubscriptContext<'a> {
             | Stmt::WhileBranch(_)
             | Stmt::RepeatBranch(_)
             | Stmt::Inst(_)
-            | Stmt::Nop
-            | Stmt::Continue => {}
+            | Stmt::Nop => {}
         }
     }
 
@@ -223,11 +222,13 @@ impl<'a> SubscriptContext<'a> {
     }
 
     /// Return the innermost consuming loop context, if any.
+    /// Note: Only loops with negative effect (consuming) should use stack-position arithmetic.
+    /// Neutral loops (effect = 0) should use birth-depth based subscripts.
     fn innermost_consuming_loop(&self) -> Option<&ActiveLoop> {
         self.loop_stack
             .iter()
             .rev()
-            .find(|l| l.effect_per_iter <= 0)
+            .find(|l| l.effect_per_iter < 0)
     }
 
     /// Process an assignment inside a consuming loop using stack position arithmetic.

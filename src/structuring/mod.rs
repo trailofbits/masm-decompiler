@@ -3,11 +3,13 @@
 //! This module transforms a CFG containing `IfBranch`, `WhileBranch`, and `RepeatBranch`
 //! markers into a flat sequence of `If`, `While`, and `Repeat` statements.
 
+use log::info;
 use std::collections::{HashMap, HashSet};
 
 use miden_assembly_syntax::ast::{ProcedureName, Visibility};
 use miden_assembly_syntax::debuginfo::SourceSpan;
 
+use crate::DecompilationConfig;
 use crate::analysis::DefinesVars;
 use crate::{
     cfg::{Cfg, NodeId},
@@ -15,9 +17,12 @@ use crate::{
     ssa::{Expr, Stmt, Var},
 };
 
+pub mod eliminate;
 mod flatten;
+mod propagate;
 mod simplify;
 mod subscripts;
+pub mod used_vars;
 
 /// A structured procedure body with no CFG edges.
 ///
@@ -111,7 +116,13 @@ impl StructuredProc {
 }
 
 /// Structure a CFG into a structured body.
-pub fn structure(cfg: Cfg, simplify: bool) -> DecompiledBody {
+///
+/// # Arguments
+///
+/// * `cfg` - The control flow graph to structure
+/// * `simplify` - Whether to apply simplification passes
+/// * `expression_propagation` - Whether to apply expression propagation
+pub fn structure(cfg: Cfg, config: &DecompilationConfig) -> DecompiledBody {
     if cfg.nodes.is_empty() {
         return DecompiledBody::new(Vec::new());
     }
@@ -123,16 +134,34 @@ pub fn structure(cfg: Cfg, simplify: bool) -> DecompiledBody {
     let loop_contexts = std::mem::take(&mut cfg.loop_contexts);
 
     // Lower phi nodes while CFG edge info is available.
+    info!("lifting loop phis");
     lift_loop_phis_with_cfg(&mut cfg);
 
     // Flatten control flow into structured statements.
+    info!("flattening control flow statements");
     let mut code = flatten::flatten_control_flow(cfg);
 
     // Apply subscripts used during formatting.
+    info!("computing variable subscripts");
     subscripts::compute_subscripts(&mut code, &var_depths, &loop_contexts);
 
+    // Apply expression propagation on structured code.
+    // This runs after structuring so loop boundaries are explicit and respected.
+    if config.expression_propagation {
+        info!("propagating expressions");
+        propagate::propagate_expressions(&mut code);
+    }
+
+    // Apply dead code elimination on structured code with resolved subscripts.
+    // This runs after expression propagation since inlining can create dead assignments.
+    if config.dead_code_elimination {
+        info!("eliminating dead code");
+        eliminate::eliminate_dead_code(&mut code);
+    }
+
     // Apply cleanup passes.
-    if simplify {
+    if config.simplification {
+        info!("simplifying control flow and expressions");
         simplify::apply_simplification(&mut code);
     }
     DecompiledBody::new(code)

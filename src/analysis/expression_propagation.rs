@@ -50,7 +50,6 @@ impl ExprProperties {
             }
             Stmt::Return(_) => true,
             Stmt::Phi { .. } | Stmt::Nop => true,
-            Stmt::Continue => false,
             Stmt::Inst(_)
             | Stmt::AdvLoad(_)
             | Stmt::AdvStore(_)
@@ -163,7 +162,7 @@ fn can_propagate(
         | Stmt::Inst(_) => return false,
         Stmt::Repeat { .. } => return false,
         Stmt::If { .. } | Stmt::While { .. } => return false,
-        Stmt::Continue | Stmt::Return(_) => return false,
+        Stmt::Return(_) => return false,
         Stmt::IfBranch(_) | Stmt::WhileBranch(_) | Stmt::RepeatBranch(_) => return false,
         Stmt::Assign { .. } | Stmt::Nop => {}
     }
@@ -272,8 +271,7 @@ fn replace_all(stmt: &mut Stmt, var: &Var, with: &Expr) {
         }
         Stmt::AdvLoad(_) | Stmt::AdvStore(_) | Stmt::LocalLoad(_) | Stmt::LocalStore(_) => {}
         Stmt::Return(_) | Stmt::Phi { .. } => {}
-        Stmt::Continue
-        | Stmt::Inst(_)
+        Stmt::Inst(_)
         | Stmt::MemLoad(_)
         | Stmt::MemStore(_)
         | Stmt::Call(_)
@@ -347,7 +345,6 @@ fn count_var_occ(stmt: &Stmt, var: &Var) -> usize {
         Stmt::DynCall { args, .. } => args.iter().filter(|v| *v == var).count(),
         Stmt::Intrinsic(intr) => intr.args.iter().filter(|v| *v == var).count(),
         Stmt::Return(vals) => vals.iter().filter(|v| *v == var).count(),
-        Stmt::Continue => 0,
         Stmt::Inst(_) | Stmt::Nop => 0,
     }
 }
@@ -390,7 +387,6 @@ impl Complexity for Stmt {
             Stmt::Repeat { body, .. } => 1 + body.complexity(),
             Stmt::Phi { .. } | Stmt::Nop => 0,
             Stmt::Return(_) => 1,
-            Stmt::Continue => 0,
             Stmt::Inst(_)
             | Stmt::AdvLoad(_)
             | Stmt::AdvStore(_)

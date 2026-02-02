@@ -107,7 +107,7 @@ impl UsesVars for Stmt {
             Stmt::IfBranch(Condition::Count { .. })
             | Stmt::WhileBranch(Condition::Count { .. })
             | Stmt::RepeatBranch(_) => HashSet::new(),
-            Stmt::Inst(_) | Stmt::Nop | Stmt::Continue => HashSet::new(),
+            Stmt::Inst(_) | Stmt::Nop => HashSet::new(),
         }
     }
 }
@@ -158,7 +158,7 @@ impl DefinesVars for Stmt {
             Stmt::IfBranch(_) | Stmt::WhileBranch(_) | Stmt::RepeatBranch(_) => {
                 // No definitions.
             }
-            Stmt::Return(_) | Stmt::Inst(_) | Stmt::Nop | Stmt::Continue => {
+            Stmt::Return(_) | Stmt::Inst(_) | Stmt::Nop => {
                 // No definitions.
             }
         }

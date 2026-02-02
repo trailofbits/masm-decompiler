@@ -9,7 +9,7 @@ use crate::cfg::{Cfg, Edge, NodeId};
 use crate::signature::{ProcSignature, SignatureMap};
 
 use super::{Condition, Expr, SsaError, SsaResult, SsaStack, Stmt, Var};
-use context::{Frame, SsaContext, VarAlloc, alloc_scope, build_entry_frame, retain_live_exprs};
+use context::{Frame, SsaContext, VarAlloc, alloc_scope, build_entry_frame};
 use inst::lift_inst_to_stmt;
 use phi::{BlockPhiState, emit_phis, merge_into_block};
 use repeat::{RepeatBodySummary, RepeatInfo, extract_repeat_info, summarize_repeat_body};
@@ -192,7 +192,6 @@ fn process_node(
         &mut branch_alloc,
     )?;
     cfg.nodes[node].code = new_code;
-    retain_live_exprs(&mut state);
 
     // Add return statement for exit nodes (no successors).
     if cfg.nodes[node].next.is_empty() {
@@ -367,19 +366,10 @@ fn compute_repeat_exit_frame(
         }
     }
 
-    let mut exprs = entry.exprs.clone();
-    let live: std::collections::HashSet<Var> = stack.iter().cloned().collect();
-    exprs.retain(|k, _| live.contains(k));
-    for var in &stack {
-        exprs
-            .entry(var.clone())
-            .or_insert_with(|| Expr::Var(var.clone()));
-    }
     let required_depth = entry.stack.required_depth().max(stack.len());
     let stack = std::collections::VecDeque::from(stack);
     Ok(Frame {
         stack: SsaStack::from_parts(stack, required_depth),
-        exprs,
     })
 }
 
@@ -425,7 +415,7 @@ fn ensure_branch_cond(
 ) -> SsaResult<()> {
     // Exit early if the block is empty or does not have multiple outgoing
     // edges.
-    if code.len() == 0 || edges.len() <= 1 {
+    if code.is_empty() || edges.len() <= 1 {
         return Ok(());
     }
 
@@ -434,21 +424,11 @@ fn ensure_branch_cond(
     match &code[idx] {
         Stmt::IfBranch(Condition::Stack(expr)) if matches!(expr, Expr::Unknown) => {
             let cond_var = state.pop_one(ctx, alloc, 1);
-            let cond_expr = state
-                .exprs
-                .get(&cond_var)
-                .cloned()
-                .unwrap_or(Expr::Var(cond_var));
-            code[idx] = Stmt::IfBranch(Condition::Stack(cond_expr));
+            code[idx] = Stmt::IfBranch(Condition::Stack(Expr::Var(cond_var)));
         }
         Stmt::WhileBranch(Condition::Stack(expr)) if matches!(expr, Expr::Unknown) => {
             let cond_var = state.pop_one(ctx, alloc, 1);
-            let cond_expr = state
-                .exprs
-                .get(&cond_var)
-                .cloned()
-                .unwrap_or(Expr::Var(cond_var));
-            code[idx] = Stmt::WhileBranch(Condition::Stack(cond_expr));
+            code[idx] = Stmt::WhileBranch(Condition::Stack(Expr::Var(cond_var)));
         }
         _ => {}
     }

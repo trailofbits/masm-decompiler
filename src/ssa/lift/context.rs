@@ -1,19 +1,17 @@
 //! Shared SSA lifting context, frame state, and allocation helpers.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::cfg::NodeId;
 use crate::signature::{ProcSignature, SignatureMap};
 
-use crate::ssa::{Expr, SsaStack, Var, VarArena};
+use crate::ssa::{SsaStack, Var, VarArena};
 
-/// Per-block symbolic frame containing the stack and expression bindings.
+/// Per-block symbolic frame containing the stack state.
 #[derive(Clone)]
 pub(super) struct Frame {
     /// Current symbolic stack state.
     pub(super) stack: SsaStack,
-    /// Expressions bound to SSA variables in this frame.
-    pub(super) exprs: HashMap<Var, Expr>,
 }
 
 impl Frame {
@@ -25,7 +23,6 @@ impl Frame {
         alloc: &mut impl VarAlloc,
         required_depth: usize,
     ) {
-        let exprs = &mut self.exprs;
         // Variables added to the front get depths 0, 1, 2, ... as they're prepended.
         // We need to track how many we're adding and assign depths accordingly.
         let current_len = self.stack.len();
@@ -38,7 +35,6 @@ impl Frame {
         for depth in (0..to_add).rev() {
             let value = alloc.alloc(ctx);
             ctx.record_depth(&value, depth);
-            exprs.insert(value.clone(), Expr::Var(value.clone()));
             self.stack.push_front_one(value);
         }
     }
@@ -103,24 +99,19 @@ pub(super) fn build_entry_frame(
     ctx: &mut SsaContext,
 ) -> Frame {
     let mut inputs = Vec::new();
-    let mut exprs = HashMap::new();
-    if let Some(ProcSignature::Known { inputs: count, .. }) = sigs.get(proc_path) {
-        for depth in 0..*count {
+    if let Some(ProcSignature::Known {
+        inputs: input_count,
+        ..
+    }) = sigs.get(proc_path)
+    {
+        for depth in 0..*input_count {
             let v = ctx.new_var_at_depth(depth);
-            exprs.insert(v.clone(), Expr::Var(v.clone()));
             inputs.push(v);
         }
     }
     Frame {
         stack: SsaStack::from_inputs(inputs),
-        exprs,
     }
-}
-
-/// Drop expression bindings for variables not present on the stack.
-pub(super) fn retain_live_exprs(state: &mut Frame) {
-    let live: HashSet<Var> = state.stack.iter().cloned().collect();
-    state.exprs.retain(|k, _| live.contains(k));
 }
 
 /// Shared SSA lifting context for variable allocation and lookups.
@@ -160,11 +151,6 @@ impl SsaContext {
     /// Record the birth depth of an existing variable.
     pub(super) fn record_depth(&mut self, var: &Var, depth: usize) {
         self.var_depths.insert(var.index, depth);
-    }
-
-    /// Resolve an SSA variable to its bound expression if present.
-    pub(super) fn lookup_expr(&self, frame: &Frame, var: Var) -> Expr {
-        frame.exprs.get(&var).cloned().unwrap_or(Expr::Var(var))
     }
 }
 
