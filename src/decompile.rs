@@ -312,6 +312,8 @@ impl<'a> Decompiler<'a> {
         if self.config.expression_propagation {
             debug!("propagating expressions in `{}`", fq_name);
             simplify::propagate_expressions(&mut stmts);
+            debug!("propagating copies in `{}`", fq_name);
+            simplify::propagate_copies(&mut stmts);
         }
         if self.config.dead_code_elimination {
             debug!("applying dead-code elimination on `{}`", fq_name);
