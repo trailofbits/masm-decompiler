@@ -11,6 +11,10 @@
 You must review the `ARCHITECTURE.md` file to understand the overall design and
 design constraints of the decompiler.
 
+New analysis passes and bug fixes in existing code must always preserve the
+semantics of the procedure being analyzed. It is never sufficient that the code
+does the right thing in "most" cases.
+
 When encountering unsupported patterns, return an error or `Unknown` result
 variant (e.g. `ProcSignature::Unknown`) rather than producing incorrect output.
 
@@ -34,3 +38,23 @@ variant (e.g. `ProcSignature::Unknown`) rather than producing incorrect output.
 - Errors and `Unknown` results should be explicit and informative, and must
   indicate what pattern was unsupported and the location (typically an instruction
   span) where it occurred.
+
+# Debugging
+
+The decompiler supports logging that can be enabled using the `RUST_LOG`
+environment variable. To run the decompiler on a file, use the command
+
+```sh
+target/debug/masm-decompiler --no-color path/to/file.masm
+```
+
+Note the `--no-color` flag which can be used to disable color output. To
+decompile individual procedures, use the `--procedure` argument.
+
+```sh
+target/debug/masm-decompiler --no-color --procedure proc_name path/to/file.masm
+```
+
+Finally, use the `--no-dce`, `--no-propagation`, and `--no-simplification` to
+disable individual optimization passes. This can be useful to see the initial
+output from the decompiler, before optimizations are applied.
