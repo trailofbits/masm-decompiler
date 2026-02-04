@@ -4,9 +4,10 @@ use crate::{
     decompile::{DecompiledHeader, DecompiledProc},
     ir::{
         AdvLoad, AdvStore, BinOp, Call, Constant, Expr, IndexExpr, Intrinsic, LocalLoad,
-        LocalStore, LoopVar, MemLoad, MemStore, Stmt, UnOp, Var,
+        LocalStore, LoopVar, MemLoad, MemStore, Stmt, UnOp, ValueId, Var, VarBase,
     },
 };
+use std::collections::{HashMap, HashSet};
 use yansi::Paint;
 
 /// Syntax highlighting colors for decompiled output.
@@ -76,6 +77,343 @@ pub fn variable(s: String) -> String {
 /// Format a constant value with syntax highlighting.
 pub fn constant(s: String) -> String {
     s.fg(colors::CONSTANT).to_string()
+}
+
+/// Accumulated variable usage information for name assignment.
+#[derive(Debug, Default)]
+struct VarUsage {
+    /// Variables in first-seen order.
+    vars_in_order: Vec<Var>,
+    /// Set of variables already recorded.
+    seen: HashSet<Var>,
+    /// SSA value IDs defined in the statement sequence.
+    defined_ids: HashSet<ValueId>,
+    /// SSA value IDs used in the statement sequence.
+    used_ids: HashSet<ValueId>,
+}
+
+impl VarUsage {
+    /// Record a variable occurrence, preserving first-seen order.
+    fn record_var(&mut self, var: &Var) {
+        if self.seen.insert(var.clone()) {
+            self.vars_in_order.push(var.clone());
+        }
+    }
+
+    /// Record a variable use.
+    fn record_use(&mut self, var: &Var) {
+        self.record_var(var);
+        if let VarBase::Value(id) = var.base {
+            self.used_ids.insert(id);
+        }
+    }
+
+    /// Record a variable definition.
+    fn record_def(&mut self, var: &Var) {
+        self.record_var(var);
+        if let VarBase::Value(id) = var.base {
+            self.defined_ids.insert(id);
+        }
+    }
+}
+
+/// Assign stable, unique display names to variables based on SSA identity.
+///
+/// Input variables and repeat-loop entry values keep their base names
+/// (`v_6`, `v_(3 - i)`), while later definitions that collide are suffixed
+/// (`v_6_1`, `v_(3 - i)_1`).
+pub fn assign_var_names(stmts: &[Stmt]) -> HashMap<Var, String> {
+    let alias_names = collect_phi_alias_names(stmts);
+    let usage = collect_var_usage(stmts);
+    let input_ids: HashSet<ValueId> = usage
+        .used_ids
+        .difference(&usage.defined_ids)
+        .cloned()
+        .collect();
+
+    let mut names = HashMap::new();
+    let mut name_counts = HashMap::new();
+
+    for name in alias_names.values() {
+        name_counts.entry(name.clone()).or_insert(1);
+    }
+    for (var, name) in alias_names {
+        names.insert(var, name);
+    }
+
+    for var in usage.vars_in_order.iter() {
+        if is_reserved_var(var, &input_ids) {
+            assign_name_for_var(var, &mut names, &mut name_counts);
+        }
+    }
+
+    for var in usage.vars_in_order.iter() {
+        if !names.contains_key(var) {
+            assign_name_for_var(var, &mut names, &mut name_counts);
+        }
+    }
+
+    names
+}
+
+/// Collect variable usage data for a statement list.
+fn collect_var_usage(stmts: &[Stmt]) -> VarUsage {
+    let mut usage = VarUsage::default();
+    for stmt in stmts {
+        collect_stmt_usage(stmt, &mut usage);
+    }
+    usage
+}
+
+/// Collect variable usage data for a single statement.
+fn collect_stmt_usage(stmt: &Stmt, usage: &mut VarUsage) {
+    match stmt {
+        Stmt::Assign { dest, expr } => {
+            usage.record_def(dest);
+            collect_expr_usage(expr, usage);
+        }
+        Stmt::MemLoad(load) => {
+            for v in &load.address {
+                usage.record_use(v);
+            }
+            for v in &load.outputs {
+                usage.record_def(v);
+            }
+        }
+        Stmt::MemStore(store) => {
+            for v in &store.address {
+                usage.record_use(v);
+            }
+            for v in &store.values {
+                usage.record_use(v);
+            }
+        }
+        Stmt::AdvLoad(load) => {
+            for v in &load.outputs {
+                usage.record_def(v);
+            }
+        }
+        Stmt::AdvStore(store) => {
+            for v in &store.values {
+                usage.record_use(v);
+            }
+        }
+        Stmt::LocalLoad(load) => {
+            for v in &load.outputs {
+                usage.record_def(v);
+            }
+        }
+        Stmt::LocalStore(store) => {
+            for v in &store.values {
+                usage.record_use(v);
+            }
+        }
+        Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+            for v in &call.args {
+                usage.record_use(v);
+            }
+            for v in &call.results {
+                usage.record_def(v);
+            }
+        }
+        Stmt::DynCall { args, results } => {
+            for v in args {
+                usage.record_use(v);
+            }
+            for v in results {
+                usage.record_def(v);
+            }
+        }
+        Stmt::Intrinsic(intrinsic) => {
+            for v in &intrinsic.args {
+                usage.record_use(v);
+            }
+            for v in &intrinsic.results {
+                usage.record_def(v);
+            }
+        }
+        Stmt::Repeat {
+            loop_var: _,
+            loop_count: _,
+            body,
+            phis,
+        } => {
+            for phi in phis {
+                usage.record_def(&phi.dest);
+                usage.record_use(&phi.init);
+                usage.record_use(&phi.step);
+            }
+            for stmt in body {
+                collect_stmt_usage(stmt, usage);
+            }
+        }
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+            phis,
+        } => {
+            collect_expr_usage(cond, usage);
+            for phi in phis {
+                usage.record_def(&phi.dest);
+                usage.record_use(&phi.then_var);
+                usage.record_use(&phi.else_var);
+            }
+            for stmt in then_body {
+                collect_stmt_usage(stmt, usage);
+            }
+            for stmt in else_body {
+                collect_stmt_usage(stmt, usage);
+            }
+        }
+        Stmt::While { cond, body, phis } => {
+            collect_expr_usage(cond, usage);
+            for phi in phis {
+                usage.record_def(&phi.dest);
+                usage.record_use(&phi.init);
+                usage.record_use(&phi.step);
+            }
+            for stmt in body {
+                collect_stmt_usage(stmt, usage);
+            }
+        }
+        Stmt::Return(vars) => {
+            for v in vars {
+                usage.record_use(v);
+            }
+        }
+    }
+}
+
+/// Collect variable usage data from an expression.
+fn collect_expr_usage(expr: &Expr, usage: &mut VarUsage) {
+    match expr {
+        Expr::Var(v) => usage.record_use(v),
+        Expr::Binary(_, lhs, rhs) => {
+            collect_expr_usage(lhs, usage);
+            collect_expr_usage(rhs, usage);
+        }
+        Expr::Unary(_, inner) => collect_expr_usage(inner, usage),
+        Expr::True | Expr::False | Expr::Constant(_) => {}
+    }
+}
+
+/// Determine whether a variable should keep its base name.
+fn is_reserved_var(var: &Var, input_ids: &HashSet<ValueId>) -> bool {
+    match &var.base {
+        VarBase::LoopInput { .. } => true,
+        VarBase::Value(id) => input_ids.contains(id),
+    }
+}
+
+/// Assign a unique display name for a variable based on its subscript.
+fn assign_name_for_var(
+    var: &Var,
+    names: &mut HashMap<Var, String>,
+    name_counts: &mut HashMap<String, usize>,
+) {
+    if names.contains_key(var) {
+        return;
+    }
+    let base = base_name_for_var(var);
+    let count = name_counts.entry(base.clone()).or_insert(0);
+    let name = if *count == 0 {
+        base.clone()
+    } else {
+        format!("{base}_{}", *count)
+    };
+    *count += 1;
+    names.insert(var.clone(), name);
+}
+
+/// Build the base display name for a variable from its subscript.
+fn base_name_for_var(var: &Var) -> String {
+    match &var.subscript {
+        IndexExpr::Const(n) => format!("v_{}", n),
+        IndexExpr::LoopVar(idx) => format!("v_{}", loop_name_for_depth(*idx)),
+        expr => format!("v_({})", format_index_expr_for_name(expr)),
+    }
+}
+
+/// Format an index expression without syntax highlighting.
+fn format_index_expr_for_name(expr: &IndexExpr) -> String {
+    match expr {
+        IndexExpr::Const(v) => v.to_string(),
+        IndexExpr::LoopVar(idx) => loop_name_for_depth(*idx),
+        IndexExpr::Add(a, b) => {
+            let lhs = format_index_expr_for_name(a);
+            match &**b {
+                IndexExpr::Const(c) if *c < 0 => format!("{lhs} - {}", -c),
+                IndexExpr::Mul(x, y) => match (&**x, &**y) {
+                    (IndexExpr::Const(-1), rhs) => {
+                        format!("{lhs} - {}", format_index_expr_for_name(rhs))
+                    }
+                    (IndexExpr::Const(c), rhs) if *c < 0 => {
+                        format!("{lhs} - {} * {}", -c, format_index_expr_for_name(rhs))
+                    }
+                    (lhs_term, IndexExpr::Const(-1)) => {
+                        format!("{lhs} - {}", format_index_expr_for_name(lhs_term))
+                    }
+                    (lhs_term, IndexExpr::Const(c)) if *c < 0 => {
+                        format!("{lhs} - {} * {}", -c, format_index_expr_for_name(lhs_term))
+                    }
+                    _ => format!("{lhs} + {}", format_index_expr_for_name(b)),
+                },
+                _ => format!("{lhs} + {}", format_index_expr_for_name(b)),
+            }
+        }
+        IndexExpr::Mul(a, b) => match (&**a, &**b) {
+            (IndexExpr::Const(1), rhs) => format_index_expr_for_name(rhs),
+            (lhs, IndexExpr::Const(1)) => format_index_expr_for_name(lhs),
+            _ => format!(
+                "{} * {}",
+                format_index_expr_for_name(a),
+                format_index_expr_for_name(b)
+            ),
+        },
+    }
+}
+
+fn collect_phi_alias_names(stmts: &[Stmt]) -> HashMap<Var, String> {
+    let mut aliases = HashMap::new();
+    for stmt in stmts {
+        collect_phi_alias_names_stmt(stmt, &mut aliases);
+    }
+    aliases
+}
+
+fn collect_phi_alias_names_stmt(stmt: &Stmt, aliases: &mut HashMap<Var, String>) {
+    match stmt {
+        Stmt::Repeat { body, phis, .. } => {
+            for phi in phis {
+                let base = base_name_for_var(&phi.init);
+                aliases.entry(phi.init.clone()).or_insert_with(|| base.clone());
+                aliases.entry(phi.dest.clone()).or_insert_with(|| base.clone());
+                aliases.entry(phi.step.clone()).or_insert_with(|| base.clone());
+            }
+            for stmt in body {
+                collect_phi_alias_names_stmt(stmt, aliases);
+            }
+        }
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            for stmt in then_body {
+                collect_phi_alias_names_stmt(stmt, aliases);
+            }
+            for stmt in else_body {
+                collect_phi_alias_names_stmt(stmt, aliases);
+            }
+        }
+        Stmt::While { body, .. } => {
+            for stmt in body {
+                collect_phi_alias_names_stmt(stmt, aliases);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Format a comment with syntax highlighting.
@@ -341,7 +679,7 @@ impl CodeDisplay for DecompiledHeader {
         // Build argument list
         let mut args = Vec::new();
         for i in 0..self.inputs {
-            let v = Var::new(i);
+            let v = Var::new(ValueId::from(i as u64), i);
             args.push(f.fmt_var(&v));
         }
         let arg_list = args.join(", ");
@@ -501,6 +839,7 @@ impl CodeDisplay for Stmt {
                 cond,
                 then_body,
                 else_body,
+                ..
             } => {
                 f.write_line(&format!("{} ({}) {{", keyword("if"), fmt_expr(f, cond, 0)));
                 f.indent();
@@ -518,6 +857,7 @@ impl CodeDisplay for Stmt {
                 loop_var,
                 loop_count,
                 body,
+                ..
             } => {
                 f.enter_loop(loop_var);
                 let counter_name = f.fmt_loop_counter(loop_var);
@@ -534,7 +874,7 @@ impl CodeDisplay for Stmt {
                 f.write_line("}");
                 f.exit_loop(loop_var);
             }
-            Stmt::While { cond, body } => {
+            Stmt::While { cond, body, .. } => {
                 let head = if matches!(cond, Expr::True) {
                     keyword("loop")
                 } else {

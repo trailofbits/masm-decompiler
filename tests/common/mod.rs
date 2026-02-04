@@ -3,14 +3,10 @@
 pub mod strategies;
 
 use masm_decompiler::{
-    cfg::Cfg,
     decompile::{DecompilationConfig, Decompiler},
     frontend::Workspace,
-    ssa::Stmt,
+    ir::Stmt,
 };
-
-// Re-export the new API types for test convenience
-pub use masm_decompiler::decompile::{DecompiledModule, DecompiledProc};
 
 /// Decompile a procedure with the default configuration (all optimizations enabled).
 pub fn decompile(ws: &Workspace, proc_name: &str, _module: &str) -> Vec<Stmt> {
@@ -61,47 +57,7 @@ pub fn decompile_no_optimizations(ws: &Workspace, proc_name: &str) -> Vec<Stmt> 
         .clone()
 }
 
-/// Decompile a procedure and print debug info about var_depths and loop_contexts.
-pub fn run_structure_debug(ws: &Workspace, proc_name: &str, _module: &str) -> Vec<Stmt> {
-    // For debug purposes, we need access to the raw CFG
-    // Use the low-level API to print debug info
-    use masm_decompiler::{
-        analysis::{build_def_use_map, eliminate_dead_code},
-        callgraph::CallGraph,
-        cfg::build_cfg_for_proc,
-        signature::infer_signatures,
-        ssa::lift::lift_cfg_to_ssa,
-        structuring::structure,
-    };
-
-    let cg = CallGraph::from(ws);
-    let sigs = infer_signatures(ws, &cg);
-    let proc = ws.lookup_proc(proc_name).expect("lookup should succeed");
-    let cfg = build_cfg_for_proc(proc).expect("cfg build should succeed");
-    let module_path = proc_name.rsplit_once("::").map(|(m, _)| m).unwrap_or("");
-    let mut ssa =
-        lift_cfg_to_ssa(cfg, module_path, proc_name, &sigs).expect("ssa lift should succeed");
-
-    let config = DecompilationConfig::default();
-    structure(ssa, &config).stmts
-}
-
 // Legacy aliases for backward compatibility
 pub fn run_structure(ws: &Workspace, proc_name: &str, module: &str) -> Vec<Stmt> {
     decompile(ws, proc_name, module)
-}
-
-/// Get raw SSA CFG for debugging (low-level API).
-pub fn get_raw_ssa_cfg(ws: &Workspace, proc_name: &str, _module: &str) -> Cfg {
-    use masm_decompiler::{
-        callgraph::CallGraph, cfg::build_cfg_for_proc, signature::infer_signatures,
-        ssa::lift::lift_cfg_to_ssa,
-    };
-
-    let cg = CallGraph::from(ws);
-    let sigs = infer_signatures(ws, &cg);
-    let proc = ws.lookup_proc(proc_name).expect("lookup should succeed");
-    let cfg = build_cfg_for_proc(proc).expect("cfg build should succeed");
-    let module_path = proc_name.rsplit_once("::").map(|(m, _)| m).unwrap_or("");
-    lift_cfg_to_ssa(cfg, module_path, proc_name, &sigs).expect("ssa lift should succeed")
 }

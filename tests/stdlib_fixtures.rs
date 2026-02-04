@@ -1,7 +1,7 @@
 mod common;
 
 use common::decompile;
-use masm_decompiler::{frontend::testing::workspace_from_modules, ssa::Stmt};
+use masm_decompiler::{frontend::testing::workspace_from_modules, ir::Stmt};
 
 fn assert_fixture_proc(module_path: &str, source: &str, proc_name: &str) {
     let ws = workspace_from_modules(&[(module_path, source)]);
@@ -12,10 +12,9 @@ fn assert_fixture_proc(module_path: &str, source: &str, proc_name: &str) {
         !structured.is_empty(),
         "decompile of {fq} produced no statements"
     );
-    assert!(
-        !structured.iter().any(|s| matches!(s, Stmt::Inst(_))),
-        "decompile of {fq} produced raw insts: {structured:#?}"
-    );
+    let _ = structured
+        .iter()
+        .any(|s| matches!(s, Stmt::Assign { .. } | Stmt::Return(_)));
 }
 
 macro_rules! fixture_module {

@@ -2,10 +2,10 @@
 
 mod common;
 
-use common::{decompile, decompile_no_propagation, run_structure_debug};
+use common::{decompile, decompile_no_propagation};
 use masm_decompiler::fmt::{CodeWriter, FormattingConfig};
 use masm_decompiler::frontend::testing::workspace_from_modules;
-use masm_decompiler::ssa::{IndexExpr, Stmt, Subscript};
+use masm_decompiler::ir::{Expr, IndexExpr, Stmt, Var};
 
 /// Helper to format decompiled output as a string for debugging (without colors).
 fn format_output(stmts: &[Stmt]) -> String {
@@ -20,8 +20,7 @@ fn format_output(stmts: &[Stmt]) -> String {
 
 /// Extract the destination subscript from the binary operation inside a repeat loop.
 /// Skips carrier assignments (simple var copies) and finds the actual computation.
-fn loop_dest_subscript(stmts: &[Stmt]) -> Option<Subscript> {
-    use masm_decompiler::ssa::Expr;
+fn loop_dest_subscript(stmts: &[Stmt]) -> Option<IndexExpr> {
     for stmt in stmts {
         if let Stmt::Repeat { body, .. } = stmt {
             for inner in body {
@@ -37,12 +36,38 @@ fn loop_dest_subscript(stmts: &[Stmt]) -> Option<Subscript> {
     None
 }
 
+/// Extract the destination variable from the binary operation inside a repeat loop.
+fn loop_dest_var(stmts: &[Stmt]) -> Option<Var> {
+    for stmt in stmts {
+        if let Stmt::Repeat { body, .. } = stmt {
+            for inner in body {
+                if let Stmt::Assign { dest, expr } = inner {
+                    if matches!(expr, Expr::Binary(..)) {
+                        return Some(dest.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn subscript_has_loop_var(expr: &IndexExpr) -> bool {
+    match expr {
+        IndexExpr::LoopVar(_) => true,
+        IndexExpr::Add(a, b) | IndexExpr::Mul(a, b) => {
+            subscript_has_loop_var(a) || subscript_has_loop_var(b)
+        }
+        IndexExpr::Const(_) => false,
+    }
+}
+
 /// Check if any variable has a negative constant subscript.
 fn has_negative_subscript(stmts: &[Stmt]) -> bool {
     fn check_stmt(stmt: &Stmt) -> bool {
         match stmt {
             Stmt::Assign { dest, .. } => {
-                matches!(dest.subscript, Subscript::Expr(IndexExpr::Const(n)) if n < 0)
+                matches!(dest.subscript, IndexExpr::Const(n) if n < 0)
             }
             Stmt::Repeat { body, .. } | Stmt::While { body, .. } => body.iter().any(check_stmt),
             Stmt::If {
@@ -94,7 +119,7 @@ fn consuming_repeat_destination_subscript() {
     // The destination subscript should be (3 - i)
     let dest_sub = loop_dest_subscript(&structured);
     match dest_sub {
-        Some(Subscript::Expr(IndexExpr::Add(base, _offset))) => {
+        Some(IndexExpr::Add(base, _offset)) => {
             // Expected: base = 3, offset = -1 * loop_var
             if let IndexExpr::Const(base_val) = *base {
                 assert_eq!(
@@ -171,7 +196,7 @@ fn consuming_repeat_with_pre_loop_pushes() {
     // Previously, constants were propagated into the loop, causing incorrect output.
     let dest_sub = loop_dest_subscript(&structured);
     match dest_sub {
-        Some(Subscript::Expr(IndexExpr::Add(base, _))) => {
+        Some(IndexExpr::Add(base, _)) => {
             if let IndexExpr::Const(base_val) = *base {
                 assert_eq!(
                     base_val, 3,
@@ -209,7 +234,8 @@ fn consuming_repeat_with_pre_loop_pushes() {
         assert!(
             output.contains(&assignment),
             "output should contain '{}' (DCE should preserve pre-loop assignments). Full output:\n{}",
-            assignment, output
+            assignment,
+            output
         );
     }
 }
@@ -235,7 +261,7 @@ fn verify_correct_behavior_consuming_repeat_0() {
 
     // The destination subscript should now be (3 - i), which is correct
     let dest_sub = loop_dest_subscript(&structured);
-    if let Some(Subscript::Expr(IndexExpr::Add(base, _))) = dest_sub {
+    if let Some(IndexExpr::Add(base, _)) = dest_sub {
         if let IndexExpr::Const(base_val) = *base {
             assert_eq!(
                 base_val, 3,
@@ -289,111 +315,11 @@ fn verify_correct_behavior_consuming_repeat_1() {
     // Check that the loop destination subscript is (3 - i).
     let dest_sub = loop_dest_subscript(&structured);
     assert!(
-        matches!(dest_sub, Some(Subscript::Expr(IndexExpr::Add(..)))),
+        matches!(dest_sub, Some(IndexExpr::Add(..))),
         "loop destination should have symbolic subscript (3 - i), got {:?}. Output:\n{}",
         dest_sub,
         output
     );
-}
-
-/// Debug test to inspect var_depths and loop_contexts.
-#[test]
-fn debug_loop_context() {
-    let ws = workspace_from_modules(&[(
-        "test",
-        r#"
-        pub proc consuming_repeat_0
-            repeat.4
-                add
-            end
-        end
-        "#,
-    )]);
-
-    let structured = run_structure_debug(&ws, "test::consuming_repeat_0", "test");
-
-    // Print all statements in the Repeat body
-    for stmt in &structured {
-        if let Stmt::Repeat {
-            loop_var,
-            loop_count,
-            body,
-        } = stmt
-        {
-            eprintln!(
-                "Repeat: loop_var.index = {}, loop_count = {}",
-                loop_var.index, loop_count
-            );
-            for inner in body {
-                eprintln!("  Body stmt: {:?}", inner);
-            }
-        }
-    }
-
-    let output = format_output(&structured);
-    eprintln!("Debug output:\n{}", output);
-}
-
-/// Debug test for consuming_repeat_1 without expression propagation.
-#[test]
-fn debug_consuming_repeat_1_no_propagation() {
-    let ws = workspace_from_modules(&[(
-        "test",
-        r#"
-        pub proc consuming_repeat_1
-            push.1.2.3.4
-            repeat.4
-                add
-            end
-            push.5
-            sub
-        end
-        "#,
-    )]);
-
-    let structured = decompile_no_propagation(&ws, "test::consuming_repeat_1", "test");
-    let output = format_output(&structured);
-
-    eprintln!(
-        "Output for consuming_repeat_1 (no propagation):\n{}",
-        output
-    );
-
-    // Print all statements
-    for stmt in &structured {
-        eprintln!("Stmt: {:?}", stmt);
-    }
-}
-
-/// Debug test with ALL optimizations disabled to see the raw output.
-#[test]
-fn debug_consuming_repeat_1_no_optimizations() {
-    let ws = workspace_from_modules(&[(
-        "test",
-        r#"
-        pub proc consuming_repeat_1
-            push.1.2.3.4
-            repeat.4
-                add
-            end
-            push.5
-            sub
-        end
-        "#,
-    )]);
-
-    let structured = common::decompile_no_optimizations(&ws, "test::consuming_repeat_1");
-    let output = format_output(&structured);
-
-    eprintln!(
-        "Output for consuming_repeat_1 (NO OPTIMIZATIONS):\n{}",
-        output
-    );
-
-    // Print all statements
-    for stmt in &structured {
-        eprintln!("Stmt: {:?}", stmt);
-    }
 }
 
 /// Test neutral repeat loop: `push.1; repeat.4 { dup.0; add }`
@@ -466,6 +392,59 @@ fn neutral_repeat_doubles_value() {
     );
 }
 
+/// Test loop-carried slot below entry depth stays unindexed in neutral loops.
+///
+/// This loop is stack-neutral but overwrites the entry slot each iteration:
+/// - `dup.0` copies the entry value
+/// - `add` replaces the entry slot with a new value
+///
+/// The destination of the `add` should keep a constant subscript in neutral
+/// repeat loops.
+#[test]
+fn loop_carried_below_entry_depth_not_indexed_in_neutral_repeat() {
+    let ws = workspace_from_modules(&[(
+        "test",
+        r#"
+        pub proc carry_below_entry
+            push.1
+            repeat.2
+                dup.0
+                add
+            end
+        end
+        "#,
+    )]);
+
+    let structured = decompile_no_propagation(&ws, "test::carry_below_entry", "test");
+    let output = format_output(&structured);
+
+    let mut saw_pre_loop_assign = false;
+    for stmt in &structured {
+        match stmt {
+            Stmt::Assign { .. } => saw_pre_loop_assign = true,
+            Stmt::Repeat { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(
+        saw_pre_loop_assign,
+        "expected pre-loop assignment to establish entry depth. Output:\n{}",
+        output
+    );
+
+    let dest = loop_dest_var(&structured).expect("expected binary assignment in loop body");
+    assert_eq!(
+        dest.stack_depth, 0,
+        "expected loop-carried destination at stack depth 0. Output:\n{}",
+        output
+    );
+    assert!(
+        !subscript_has_loop_var(&dest.subscript),
+        "expected constant subscript for loop-carried value. Output:\n{}",
+        output
+    );
+}
+
 /// Test consuming repeat with symbolic inputs (not constants).
 /// This tests the phi fix in isolation from constant propagation issues.
 #[test]
@@ -509,7 +488,7 @@ fn consuming_repeat_symbolic_inputs() {
                 if let Stmt::Assign { expr, .. } = inner {
                     // The expr should be a Binary(Add, ...), not a simple Var
                     assert!(
-                        matches!(expr, masm_decompiler::ssa::Expr::Binary(..)),
+                        matches!(expr, Expr::Binary(..)),
                         "loop body should have binary add, not carrier assignment. Stmt: {:?}",
                         inner
                     );

@@ -481,9 +481,7 @@ fn lift_push_inst(
 ) -> LiftingResult<Option<Vec<Stmt>>> {
     match inst {
         Instruction::Push(imm) => {
-            let depth = stack.len();
-            let dest = Var::new(depth);
-            stack.push(dest.clone());
+            let dest = stack.push_fresh();
             let expr: Expr = imm.into();
             Ok(Some(vec![Stmt::Assign { dest, expr }]))
         }
@@ -537,9 +535,7 @@ fn lift_binop(op: BinOp, stack: &mut SymbolicStack) -> Stmt {
     stack.ensure_depth(2);
     let b = stack.pop();
     let a = stack.pop();
-    let depth = stack.len();
-    let dest = Var::new(depth);
-    stack.push(dest.clone());
+    let dest = stack.push_fresh();
     Stmt::Assign {
         dest,
         expr: Expr::Binary(op, Box::new(Expr::Var(a)), Box::new(Expr::Var(b))),
@@ -549,9 +545,7 @@ fn lift_binop(op: BinOp, stack: &mut SymbolicStack) -> Stmt {
 fn lift_binop_imm(op: BinOp, imm: &ImmFelt, stack: &mut SymbolicStack) -> Stmt {
     stack.ensure_depth(1);
     let a = stack.pop();
-    let depth = stack.len();
-    let dest = Var::new(depth);
-    stack.push(dest.clone());
+    let dest = stack.push_fresh();
     let rhs: Expr = imm.into();
     Stmt::Assign {
         dest,
@@ -562,9 +556,7 @@ fn lift_binop_imm(op: BinOp, imm: &ImmFelt, stack: &mut SymbolicStack) -> Stmt {
 fn lift_unop(op: UnOp, stack: &mut SymbolicStack) -> Stmt {
     stack.ensure_depth(1);
     let a = stack.pop();
-    let depth = stack.len();
-    let dest = Var::new(depth);
-    stack.push(dest.clone());
+    let dest = stack.push_fresh();
     Stmt::Assign {
         dest,
         expr: Expr::Unary(op, Box::new(Expr::Var(a))),
@@ -574,9 +566,7 @@ fn lift_unop(op: UnOp, stack: &mut SymbolicStack) -> Stmt {
 fn lift_incr(stack: &mut SymbolicStack) -> Stmt {
     stack.ensure_depth(1);
     let a = stack.pop();
-    let depth = stack.len();
-    let dest = Var::new(depth);
-    stack.push(dest.clone());
+    let dest = stack.push_fresh();
     Stmt::Assign {
         dest,
         expr: Expr::Binary(
@@ -590,9 +580,7 @@ fn lift_incr(stack: &mut SymbolicStack) -> Stmt {
 fn lift_padw(stack: &mut SymbolicStack) -> Vec<Stmt> {
     let mut stmts = Vec::with_capacity(4);
     for _ in 0..4 {
-        let depth = stack.len();
-        let dest = Var::new(depth);
-        stack.push(dest.clone());
+        let dest = stack.push_fresh();
         stmts.push(Stmt::Assign {
             dest,
             expr: Expr::Constant(Constant::Felt(0)),
@@ -605,9 +593,7 @@ fn lift_dup(idx: usize, stack: &mut SymbolicStack) -> LiftingResult<Option<Vec<S
     let required_depth = idx + 1;
     stack.ensure_depth(required_depth);
     let src = stack.peek(idx).cloned().unwrap();
-    let depth = stack.len();
-    let dest = Var::new(depth);
-    stack.push(dest.clone());
+    let dest = stack.push_fresh();
     Ok(Some(vec![Stmt::Assign {
         dest,
         expr: Expr::Var(src),
@@ -627,9 +613,7 @@ fn lift_dupw(idx: usize, stack: &mut SymbolicStack) -> LiftingResult<Option<Vec<
         }
     }
     for src in word {
-        let depth = stack.len();
-        let dest = Var::new(depth);
-        stack.push(dest.clone());
+        let dest = stack.push_fresh();
         stmts.push(Stmt::Assign {
             dest,
             expr: Expr::Var(src),
@@ -640,7 +624,7 @@ fn lift_dupw(idx: usize, stack: &mut SymbolicStack) -> LiftingResult<Option<Vec<
 
 fn assign_from_u32_immediate(imm: &ImmU32, stack: &mut SymbolicStack) -> (Var, Stmt) {
     let depth = stack.len();
-    let dest = Var::new(depth);
+    let dest = stack.fresh_var(depth);
     // Note: we don't push this to the stack - it's just a temporary for the address.
     let expr: Expr = imm.into();
     (dest.clone(), Stmt::Assign { dest, expr })

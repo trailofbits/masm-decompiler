@@ -115,10 +115,11 @@ fn eliminate_at_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{BinOp, Constant, Expr, IndexExpr, LoopVar, Var};
+    use crate::ir::{BinOp, Constant, Expr, IndexExpr, LoopPhi, LoopVar, Var, VarBase, ValueId};
 
     fn var_with_subscript(stack_depth: usize, sub: i64) -> Var {
         Var {
+            base: VarBase::Value(ValueId::from(stack_depth as u64)),
             stack_depth,
             subscript: IndexExpr::Const(sub),
         }
@@ -272,6 +273,7 @@ mod tests {
                     dest: var_with_subscript(2, 2),
                     expr: Expr::Constant(Constant::Felt(3)),
                 }],
+                phis: Vec::new(),
             },
             Stmt::Return(vec![var_with_subscript(1, 1)]),
         ];
@@ -310,8 +312,14 @@ mod tests {
         );
 
         let var_in_loop = Var {
+            base: VarBase::Value(ValueId::from(0)),
             stack_depth: 0,
             subscript: subscript_expr,
+        };
+        let loop_phi_dest = Var {
+            base: VarBase::Value(ValueId::from(2)),
+            stack_depth: 0,
+            subscript: IndexExpr::Const(0),
         };
 
         let mut stmts = vec![
@@ -322,8 +330,17 @@ mod tests {
                     dest: var_in_loop.clone(),
                     expr: Expr::Constant(Constant::Felt(42)),
                 }],
+                phis: vec![LoopPhi {
+                    dest: loop_phi_dest.clone(),
+                    init: Var {
+                        base: VarBase::Value(ValueId::from(3)),
+                        stack_depth: 0,
+                        subscript: IndexExpr::Const(0),
+                    },
+                    step: var_in_loop.clone(),
+                }],
             },
-            Stmt::Return(vec![var_with_subscript(0, 0)]),
+            Stmt::Return(vec![loop_phi_dest]),
         ];
 
         eliminate_dead_code(&mut stmts);
@@ -391,6 +408,7 @@ mod tests {
                     dest: var_with_subscript(0, 0),
                     expr: Expr::Constant(Constant::Felt(2)),
                 }],
+                phis: Vec::new(),
             },
             Stmt::Return(vec![var_with_subscript(0, 0)]),
         ];

@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ir::{Expr, IndexExpr, Stmt, Var};
+use crate::ir::{Expr, IndexExpr, LoopPhi, Stmt, Var, VarBase, ValueId};
 
 /// A path identifying a statement's location in the AST.
 ///
@@ -46,26 +46,31 @@ pub enum PathSegment {
 /// A complete path to a statement.
 pub type StmtPath = Vec<PathSegment>;
 
+/// Base identity for a concrete variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConcreteBase {
+    /// Concrete SSA value identifier.
+    Value(ValueId),
+    /// Loop-entry snapshot identity (by loop depth).
+    LoopInput(usize),
+}
+
 /// A concrete variable with a resolved subscript value.
 ///
-/// The subscript uniquely identifies the logical variable. For concrete subscripts
-/// (outside repeat loops), the subscript equals the stack depth. For loop-carried
-/// variables, the resolved subscript (when loop variables are concretized) equals
-/// the stack depth of the variable referenced in that iteration.
-///
-/// The `Var.stack_depth` field in the IR represents where a reference was created,
-/// not which variable it refers to. Two `Var` instances with different `stack_depth`
-/// but the same resolved subscript refer to the same logical variable.
+/// The identity is `(base, subscript)`. For loop-indexed variables, the subscript
+/// is evaluated for all loop bindings to enumerate the concrete instances.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConcreteVar {
+    /// Base identity.
+    pub base: ConcreteBase,
     /// Resolved subscript value, or `None` if the variable has no subscript.
     pub subscript: Option<i64>,
 }
 
 impl ConcreteVar {
-    /// Create a concrete variable from a subscript value.
-    pub fn new(subscript: Option<i64>) -> Self {
-        Self { subscript }
+    /// Create a concrete variable from a base and subscript value.
+    pub fn new(base: ConcreteBase, subscript: Option<i64>) -> Self {
+        Self { base, subscript }
     }
 }
 
@@ -109,6 +114,29 @@ impl LivenessState {
             self.live_paths.extend(paths);
         }
     }
+
+    /// Mark any active definition with the given subscript as used.
+    ///
+    /// This is used for `LoopInput` values, which refer to the entry stack
+    /// snapshot regardless of SSA base identity.
+    fn mark_used_by_subscript(&mut self, subscript: Option<i64>) {
+        let Some(target) = subscript else {
+            self.live_paths.extend(self.active_defs.values().flatten().cloned());
+            self.active_defs.clear();
+            return;
+        };
+        let mut matches = Vec::new();
+        for (var, paths) in &self.active_defs {
+            if var.subscript == Some(target) {
+                matches.push(var.clone());
+                self.live_paths.extend(paths.iter().cloned());
+            }
+        }
+        for var in matches {
+            self.active_defs.remove(&var);
+        }
+    }
+
 
     /// Add a definition of a variable at the given path.
     /// If there's already an active definition for this variable, it means the variable
@@ -195,6 +223,7 @@ fn analyze_stmt(
             cond,
             then_body,
             else_body,
+            phis,
         } => {
             // Process uses in condition.
             for var in expr_used_vars(cond, loop_stack) {
@@ -233,12 +262,32 @@ fn analyze_stmt(
             *state = LivenessState::new();
             state.merge(then_state);
             state.merge(else_state);
+
+            // Phi sources are uses from either branch.
+            for phi in phis {
+                for var in var_used_vars(&phi.then_var, loop_stack) {
+                    state.mark_used(&var);
+                }
+                for var in var_used_vars(&phi.else_var, loop_stack) {
+                    state.mark_used(&var);
+                }
+            }
+
+            // Phi destinations define new values after the if.
+            let current_path = path.clone();
+            for phi in phis {
+                for var in var_defined_vars(&phi.dest, loop_stack) {
+                    state.add_definition(var, current_path.clone());
+                }
+                all_def_paths.insert(current_path.clone());
+            }
         }
 
         Stmt::Repeat {
             loop_var,
             loop_count,
             body,
+            phis,
         } => {
             // For repeat loops: a definition is live if the variable is used
             // anywhere in the loop body (cross-iteration use).
@@ -248,12 +297,27 @@ fn analyze_stmt(
                 count: *loop_count,
             });
 
+            for phi in phis {
+                for var in var_used_vars(&phi.init, loop_stack) {
+                    state.mark_used(&var);
+                }
+            }
+
             path.push(PathSegment::Repeat);
-            analyze_loop_body(body, &inner_stack, path, state, all_def_paths);
+            let phi_steps = collect_phi_step_vars(phis, &inner_stack);
+            analyze_loop_body(body, &inner_stack, path, state, all_def_paths, &phi_steps);
             path.pop();
+
+            let current_path = path.clone();
+            for phi in phis {
+                for var in var_defined_vars(&phi.dest, loop_stack) {
+                    state.add_definition(var, current_path.clone());
+                }
+                all_def_paths.insert(current_path.clone());
+            }
         }
 
-        Stmt::While { cond, body } => {
+        Stmt::While { cond, body, phis } => {
             // Process uses in condition (condition is evaluated before each iteration).
             for var in expr_used_vars(cond, loop_stack) {
                 state.mark_used(&var);
@@ -261,9 +325,23 @@ fn analyze_stmt(
 
             // For while loops: same as repeat - if defined and used anywhere in body, it's live.
             // No loop binding is pushed since while loops are stack-neutral.
+            for phi in phis {
+                for var in var_used_vars(&phi.init, loop_stack) {
+                    state.mark_used(&var);
+                }
+            }
             path.push(PathSegment::While);
-            analyze_loop_body(body, loop_stack, path, state, all_def_paths);
+            let phi_steps = collect_phi_step_vars(phis, loop_stack);
+            analyze_loop_body(body, loop_stack, path, state, all_def_paths, &phi_steps);
             path.pop();
+
+            let current_path = path.clone();
+            for phi in phis {
+                for var in var_defined_vars(&phi.dest, loop_stack) {
+                    state.add_definition(var, current_path.clone());
+                }
+                all_def_paths.insert(current_path.clone());
+            }
         }
 
         // Statements that only use variables (no definitions).
@@ -376,9 +454,12 @@ fn analyze_loop_body(
     path: &mut StmtPath,
     state: &mut LivenessState,
     all_def_paths: &mut HashSet<StmtPath>,
+    extra_uses: &[ConcreteVar],
 ) {
     // Collect all definitions and uses in the loop body.
     let (body_defs, body_uses) = collect_loop_defs_uses(body, loop_stack, path);
+    let mut body_uses = body_uses;
+    body_uses.extend(extra_uses.iter().cloned());
 
     // Register all definition paths.
     for (def_path, _) in &body_defs {
@@ -402,7 +483,11 @@ fn analyze_loop_body(
 
     // Uses in the loop body also consume definitions from before the loop.
     for use_var in &body_uses {
-        state.mark_used(use_var);
+        if matches!(use_var.base, ConcreteBase::LoopInput(_)) {
+            state.mark_used_by_subscript(use_var.subscript);
+        } else {
+            state.mark_used(use_var);
+        }
     }
 
     // Add remaining definitions (not used in loop) to the state.
@@ -413,6 +498,15 @@ fn analyze_loop_body(
 
     // Add loop-internal live paths to the state.
     state.live_paths.extend(loop_live_paths);
+}
+
+/// Collect concrete variables used by loop-phi step values.
+fn collect_phi_step_vars(phis: &[LoopPhi], loop_stack: &[LoopBinding]) -> Vec<ConcreteVar> {
+    let mut result = Vec::new();
+    for phi in phis {
+        result.extend(var_used_vars(&phi.step, loop_stack));
+    }
+    result
 }
 
 /// Collect all definitions and uses in a loop body.
@@ -453,8 +547,17 @@ fn collect_defs_uses_recursive(
                 cond,
                 then_body,
                 else_body,
+                phis,
             } => {
                 uses.extend(expr_used_vars(cond, loop_stack));
+
+                for phi in phis {
+                    uses.extend(var_used_vars(&phi.then_var, loop_stack));
+                    uses.extend(var_used_vars(&phi.else_var, loop_stack));
+                    for var in var_defined_vars(&phi.dest, loop_stack) {
+                        defs.push((path.clone(), var));
+                    }
+                }
 
                 let mut then_path = path.clone();
                 then_path.push(PathSegment::Then);
@@ -469,6 +572,7 @@ fn collect_defs_uses_recursive(
                 loop_var,
                 loop_count,
                 body,
+                phis,
             } => {
                 let mut inner_stack = loop_stack.to_vec();
                 inner_stack.push(LoopBinding {
@@ -476,13 +580,29 @@ fn collect_defs_uses_recursive(
                     count: *loop_count,
                 });
 
+                for phi in phis {
+                    uses.extend(var_used_vars(&phi.init, loop_stack));
+                    uses.extend(var_used_vars(&phi.step, &inner_stack));
+                    for var in var_defined_vars(&phi.dest, loop_stack) {
+                        defs.push((path.clone(), var));
+                    }
+                }
+
                 let mut repeat_path = path.clone();
                 repeat_path.push(PathSegment::Repeat);
                 collect_defs_uses_recursive(body, &inner_stack, &repeat_path, defs, uses);
             }
 
-            Stmt::While { cond, body } => {
+            Stmt::While { cond, body, phis } => {
                 uses.extend(expr_used_vars(cond, loop_stack));
+
+                for phi in phis {
+                    uses.extend(var_used_vars(&phi.init, loop_stack));
+                    uses.extend(var_used_vars(&phi.step, loop_stack));
+                    for var in var_defined_vars(&phi.dest, loop_stack) {
+                        defs.push((path.clone(), var));
+                    }
+                }
 
                 let mut while_path = path.clone();
                 while_path.push(PathSegment::While);
@@ -576,11 +696,16 @@ fn var_defined_vars(var: &Var, loop_stack: &[LoopBinding]) -> Vec<ConcreteVar> {
 /// For a variable `v_(3 - i)` inside a `repeat.4` loop with loop variable i,
 /// this returns `[v_3, v_2, v_1, v_0]` corresponding to `i = 0, 1, 2, 3`.
 fn expand_var(var: &Var, loop_stack: &[LoopBinding]) -> Vec<ConcreteVar> {
+    let base = match &var.base {
+        VarBase::Value(id) => ConcreteBase::Value(*id),
+        VarBase::LoopInput { loop_depth } => ConcreteBase::LoopInput(*loop_depth),
+    };
+
     // Enumerate all combinations of loop variable values.
     let mut result = Vec::new();
     enumerate_all_values(loop_stack, &mut Vec::new(), &mut |bindings| {
         if let Some(val) = eval_index_expr(&var.subscript, bindings) {
-            result.push(ConcreteVar::new(Some(val)));
+            result.push(ConcreteVar::new(base, Some(val)));
         }
     });
     result
@@ -635,10 +760,11 @@ fn eval_index_expr(expr: &IndexExpr, bindings: &[(usize, i64)]) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{BinOp, Constant, LoopVar};
+    use crate::ir::{BinOp, Constant, LoopPhi, LoopVar, VarBase, ValueId};
 
     fn var_with_subscript(stack_depth: usize, sub: i64) -> Var {
         Var {
+            base: VarBase::Value(ValueId::from(stack_depth as u64)),
             stack_depth,
             subscript: IndexExpr::Const(sub),
         }
@@ -780,6 +906,7 @@ mod tests {
                     dest: var_with_subscript(0, 0),
                     expr: Expr::Constant(Constant::Felt(2)),
                 }],
+                phis: Vec::new(),
             },
             Stmt::Return(vec![var_with_subscript(0, 0)]),
         ];
@@ -800,6 +927,86 @@ mod tests {
 
         assert!(!result.dead_paths.contains(&then_path));
         assert!(!result.dead_paths.contains(&else_path));
+    }
+
+    #[test]
+    fn test_distinct_bases_same_subscript() {
+        let v_a = Var {
+            base: VarBase::Value(ValueId::from(0)),
+            stack_depth: 0,
+            subscript: IndexExpr::Const(0),
+        };
+        let v_b = Var {
+            base: VarBase::Value(ValueId::from(1)),
+            stack_depth: 0,
+            subscript: IndexExpr::Const(0),
+        };
+
+        let stmts = vec![
+            Stmt::Assign {
+                dest: v_a.clone(),
+                expr: Expr::Constant(Constant::Felt(1)),
+            },
+            Stmt::Assign {
+                dest: v_b.clone(),
+                expr: Expr::Constant(Constant::Felt(2)),
+            },
+            Stmt::Return(vec![v_a]),
+        ];
+
+        let result = analyze_liveness(&stmts);
+
+        assert!(
+            !result.dead_paths.contains(&path(&[0])),
+            "v_a definition should be live"
+        );
+        assert!(
+            result.dead_paths.contains(&path(&[1])),
+            "v_b definition should be dead"
+        );
+    }
+
+    #[test]
+    fn test_loop_input_marks_entry_defs_live() {
+        let entry = Var {
+            base: VarBase::Value(ValueId::from(0)),
+            stack_depth: 0,
+            subscript: IndexExpr::Const(0),
+        };
+        let loop_input = Var {
+            base: VarBase::LoopInput { loop_depth: 0 },
+            stack_depth: 0,
+            subscript: IndexExpr::Const(0),
+        };
+        let tmp = Var {
+            base: VarBase::Value(ValueId::from(1)),
+            stack_depth: 1,
+            subscript: IndexExpr::Const(1),
+        };
+
+        let stmts = vec![
+            Stmt::Assign {
+                dest: entry.clone(),
+                expr: Expr::Constant(Constant::Felt(1)),
+            },
+            Stmt::Repeat {
+                loop_var: LoopVar::new(0),
+                loop_count: 2,
+                body: vec![Stmt::Assign {
+                    dest: tmp,
+                    expr: Expr::Var(loop_input),
+                }],
+                phis: Vec::new(),
+            },
+            Stmt::Return(vec![entry]),
+        ];
+
+        let result = analyze_liveness(&stmts);
+
+        assert!(
+            !result.dead_paths.contains(&path(&[0])),
+            "entry definition should be live"
+        );
     }
 
     #[test]
@@ -830,6 +1037,7 @@ mod tests {
                     dest: var_with_subscript(1, 1),
                     expr: Expr::Constant(Constant::Felt(2)),
                 }],
+                phis: Vec::new(),
             },
             Stmt::Return(vec![var_with_subscript(1, 1)]),
         ];
@@ -856,8 +1064,8 @@ mod tests {
         // repeat.4 {
         //   v_(3-i) = v_(4-i);  // Reads from "previous" subscript
         // }
-        // The assignments should be live because v_(4-i) in iteration 1 reads v_3
-        // which was defined in iteration 0.
+        // The assignment should be live because the loop phi ties the step value
+        // (produced in the body) to the next iteration.
 
         let loop_var = LoopVar::new(0); // Outermost loop has depth 0
 
@@ -878,19 +1086,39 @@ mod tests {
             )),
         );
 
+        let dest = Var {
+            base: VarBase::Value(ValueId::from(0)),
+            stack_depth: 0,
+            subscript: dest_subscript.clone(),
+        };
+        let src = Var {
+            base: VarBase::Value(ValueId::from(1)),
+            stack_depth: 0,
+            subscript: src_subscript,
+        };
+
+        let phi = LoopPhi {
+            dest: Var {
+                base: VarBase::Value(ValueId::from(2)),
+                stack_depth: 0,
+                subscript: dest_subscript,
+            },
+            init: Var {
+                base: VarBase::Value(ValueId::from(3)),
+                stack_depth: 0,
+                subscript: IndexExpr::Const(3),
+            },
+            step: dest.clone(),
+        };
+
         let stmts = vec![Stmt::Repeat {
             loop_var,
             loop_count: 4,
             body: vec![Stmt::Assign {
-                dest: Var {
-                    stack_depth: 0,
-                    subscript: dest_subscript,
-                },
-                expr: Expr::Var(Var {
-                    stack_depth: 0,
-                    subscript: src_subscript,
-                }),
+                dest,
+                expr: Expr::Var(src),
             }],
+            phis: vec![phi],
         }];
 
         let result = analyze_liveness(&stmts);
@@ -912,7 +1140,7 @@ mod tests {
         // repeat.4 {
         //   v_(3-i) = const;  // Defines v_3, v_2, v_1, v_0
         // }
-        // return v_0;  // Uses v_0 from the last iteration
+        // return v_0;  // Uses the loop phi destination
 
         let loop_var = LoopVar::new(0); // Outermost loop has depth 0
         let subscript_expr = IndexExpr::Add(
@@ -923,19 +1151,36 @@ mod tests {
             )),
         );
 
+        let loop_def = Var {
+            base: VarBase::Value(ValueId::from(0)),
+            stack_depth: 0,
+            subscript: subscript_expr,
+        };
+        let loop_phi_dest = Var {
+            base: VarBase::Value(ValueId::from(2)),
+            stack_depth: 0,
+            subscript: IndexExpr::Const(0),
+        };
+
         let stmts = vec![
             Stmt::Repeat {
                 loop_var,
                 loop_count: 4,
                 body: vec![Stmt::Assign {
-                    dest: Var {
-                        stack_depth: 0,
-                        subscript: subscript_expr,
-                    },
+                    dest: loop_def.clone(),
                     expr: Expr::Constant(Constant::Felt(42)),
                 }],
+                phis: vec![LoopPhi {
+                    dest: loop_phi_dest.clone(),
+                    init: Var {
+                        base: VarBase::Value(ValueId::from(3)),
+                        stack_depth: 0,
+                        subscript: IndexExpr::Const(0),
+                    },
+                    step: loop_def,
+                }],
             },
-            Stmt::Return(vec![var_with_subscript(0, 0)]),
+            Stmt::Return(vec![loop_phi_dest]),
         ];
 
         let result = analyze_liveness(&stmts);

@@ -3,9 +3,39 @@
 //! This module provides a symbolic stack that tracks variables during lifting,
 //! modeled after the provenance stack used in signature inference.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 
-use crate::ir::Var;
+use crate::ir::{ValueId, Var, VarBase};
+
+/// Generator for unique SSA value identifiers.
+#[derive(Debug, Clone)]
+pub struct ValueIdGen {
+    next: Rc<Cell<u64>>,
+}
+
+impl ValueIdGen {
+    /// Create a new value identifier generator.
+    pub fn new() -> Self {
+        Self {
+            next: Rc::new(Cell::new(0)),
+        }
+    }
+
+    /// Allocate the next unique value identifier.
+    pub fn next(&self) -> ValueId {
+        let current = self.next.get();
+        self.next.set(current + 1);
+        ValueId::new(current)
+    }
+}
+
+impl Default for ValueIdGen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Symbolic stack tracking variables during lifting.
 ///
@@ -15,6 +45,8 @@ use crate::ir::Var;
 pub struct SymbolicStack {
     /// Stack contents, bottom to top.
     stack: VecDeque<Var>,
+    /// Shared generator for unique SSA value identifiers.
+    ids: ValueIdGen,
 }
 
 impl SymbolicStack {
@@ -22,6 +54,7 @@ impl SymbolicStack {
     pub fn new() -> Self {
         Self {
             stack: VecDeque::new(),
+            ids: ValueIdGen::new(),
         }
     }
 
@@ -41,6 +74,38 @@ impl SymbolicStack {
     /// before pushing (i.e., the depth at which it is born).
     pub fn push(&mut self, var: Var) {
         self.stack.push_back(var);
+    }
+
+    /// Create a fresh variable at the given depth.
+    pub fn fresh_var(&mut self, stack_depth: usize) -> Var {
+        Var::new(self.ids.next(), stack_depth)
+    }
+
+    /// Create and push a fresh variable at the current stack depth.
+    pub fn push_fresh(&mut self) -> Var {
+        let depth = self.stack.len();
+        let var = self.fresh_var(depth);
+        self.stack.push_back(var.clone());
+        var
+    }
+
+    /// Create a fresh variable using the template's depth and subscript.
+    pub fn fresh_like(&mut self, template: &Var) -> Var {
+        Var {
+            base: VarBase::Value(self.ids.next()),
+            stack_depth: template.stack_depth,
+            subscript: template.subscript.clone(),
+        }
+    }
+
+    /// Replace the entire stack with the provided variables.
+    pub fn set_stack(&mut self, vars: Vec<Var>) {
+        self.stack = vars.into();
+    }
+
+    /// Return a snapshot of the current stack as a vector from bottom to top.
+    pub fn to_vec(&self) -> Vec<Var> {
+        self.stack.iter().cloned().collect()
     }
 
     /// Pop a variable from the top of the stack.
@@ -90,7 +155,7 @@ impl SymbolicStack {
             // Input variables are numbered by their stack depth from the bottom.
             // v_0 is at the bottom (first input), v_n is at the top (last input).
             let depth = self.stack.len();
-            let var = Var::new(depth);
+            let var = self.fresh_var(depth);
             self.stack.push_back(var.clone());
             inputs.push(var);
         }
@@ -116,7 +181,7 @@ impl SymbolicStack {
         let mut pushed = Vec::with_capacity(pushes);
         for _ in 0..pushes {
             let depth = self.stack.len();
-            let var = Var::new(depth);
+            let var = self.fresh_var(depth);
             self.stack.push_back(var.clone());
             pushed.push(var);
         }
@@ -174,12 +239,14 @@ impl SymbolicStack {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use std::collections::HashSet;
 
     #[test]
     fn test_push_pop() {
         let mut stack = SymbolicStack::new();
-        stack.push(Var::new(0));
-        stack.push(Var::new(1));
+        stack.push(Var::new(ValueId::from(0), 0));
+        stack.push(Var::new(ValueId::from(1), 1));
         assert_eq!(stack.len(), 2);
 
         let v = stack.pop();
@@ -217,8 +284,8 @@ mod tests {
     #[test]
     fn test_dup() {
         let mut stack = SymbolicStack::new();
-        stack.push(Var::new(0));
-        stack.push(Var::new(1));
+        stack.push(Var::new(ValueId::from(0), 0));
+        stack.push(Var::new(ValueId::from(1), 1));
         stack.dup(1); // Duplicate the element at depth 1 (second from top).
         assert_eq!(stack.len(), 3);
         let top = stack.pop();
@@ -228,10 +295,28 @@ mod tests {
     #[test]
     fn test_swap() {
         let mut stack = SymbolicStack::new();
-        stack.push(Var::new(0));
-        stack.push(Var::new(1));
+        stack.push(Var::new(ValueId::from(0), 0));
+        stack.push(Var::new(ValueId::from(1), 1));
         stack.swap(1);
         assert_eq!(stack.peek(0).unwrap().stack_depth, 0);
         assert_eq!(stack.peek(1).unwrap().stack_depth, 1);
+    }
+
+    proptest! {
+        #[test]
+        fn value_id_gen_is_unique(count_a in 0u8..32, count_b in 0u8..32) {
+            let id_gen = ValueIdGen::new();
+            let id_clone = id_gen.clone();
+            let mut ids = HashSet::new();
+
+            for _ in 0..count_a {
+                ids.insert(id_gen.next());
+            }
+            for _ in 0..count_b {
+                ids.insert(id_clone.next());
+            }
+
+            prop_assert_eq!(ids.len(), (count_a as usize) + (count_b as usize));
+        }
     }
 }

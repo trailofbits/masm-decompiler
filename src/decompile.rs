@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::{
     callgraph::CallGraph,
-    fmt::CodeWriter,
+    fmt::{CodeWriter, assign_var_names},
     frontend::Workspace,
     ir::{Stmt, Var},
     lift::{self, LiftingError},
@@ -214,7 +214,8 @@ impl DecompiledProc {
 
 impl std::fmt::Display for DecompiledProc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut writer = CodeWriter::new();
+        let var_names = assign_var_names(self.stmts());
+        let mut writer = CodeWriter::with_var_names(var_names);
         writer.write(self);
         write!(f, "{}", writer.finish())
     }

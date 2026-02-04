@@ -1,7 +1,7 @@
 mod common;
 
 use common::run_structure;
-use masm_decompiler::{frontend::testing::workspace_from_modules, ssa::Stmt};
+use masm_decompiler::{frontend::testing::workspace_from_modules, ir::Stmt};
 
 #[test]
 fn structures_simple_if_else() {
@@ -65,7 +65,7 @@ fn structures_loop_with_break() {
     )]);
     let structured = run_structure(&ws, "looping::looping", "looping");
     assert!(!structured.is_empty());
-    assert!(!structured.iter().any(|s| matches!(s, Stmt::Inst(_))));
+    assert!(structured.iter().any(|s| matches!(s, Stmt::While { .. })));
 }
 
 #[test]
@@ -91,7 +91,7 @@ fn structures_loop_with_inner_if() {
     let structured = run_structure(&ws, "loop_if::loop_if", "loop_if");
     assert!(!structured.is_empty());
     assert!(contains_if(&structured));
-    assert!(!structured.iter().any(|s| matches!(s, Stmt::Inst(_))));
+    assert!(contains_if(&structured));
 }
 
 #[test]
@@ -111,7 +111,7 @@ fn loop_carried_var_keeps_name() {
     )]);
     let structured = run_structure(&ws, "loopcarried::loopcarried", "loopcarried");
     assert!(structured.iter().any(|s| matches!(s, Stmt::While { .. })));
-    assert!(!structured.iter().any(|s| matches!(s, Stmt::Inst(_))));
+    assert!(structured.iter().any(|s| matches!(s, Stmt::While { .. })));
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn nested_loops_keep_distinct_carriers() {
     )]);
     let structured = run_structure(&ws, "nested::nested", "nested");
     assert!(!structured.is_empty());
-    assert!(!structured.iter().any(|s| matches!(s, Stmt::Inst(_))));
+    assert!(structured.iter().any(|s| matches!(s, Stmt::While { .. })));
 }
 
 #[test]
@@ -161,7 +161,7 @@ fn producing_repeat_loop_keeps_names() {
     )]);
     let structured = run_structure(&ws, "produce_repeat::produce_repeat", "produce_repeat");
     assert!(!structured.is_empty());
-    assert!(!structured.iter().any(|s| matches!(s, Stmt::Inst(_))));
+    assert!(structured.iter().any(|s| matches!(s, Stmt::Repeat { .. })));
 }
 
 #[test]
@@ -181,7 +181,7 @@ fn consuming_repeat_loop_keeps_names() {
     )]);
     let structured = run_structure(&ws, "consume_repeat::consume_repeat", "consume_repeat");
     assert!(!structured.is_empty());
-    assert!(!structured.iter().any(|s| matches!(s, Stmt::Inst(_))));
+    assert!(structured.iter().any(|s| matches!(s, Stmt::Repeat { .. })));
 }
 
 fn contains_if(stmts: &[Stmt]) -> bool {

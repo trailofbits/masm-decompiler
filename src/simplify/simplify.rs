@@ -126,6 +126,7 @@ impl Simplify for Stmt {
                 cond,
                 then_body,
                 else_body,
+                phis,
             } => {
                 let cond_result = cond.simplify();
                 let then_result = then_body.simplify();
@@ -159,6 +160,7 @@ impl Simplify for Stmt {
                         cond,
                         then_body,
                         else_body,
+                        phis,
                     }],
                     changed,
                 )
@@ -167,6 +169,7 @@ impl Simplify for Stmt {
                 loop_var,
                 loop_count,
                 body,
+                phis,
             } => {
                 let body_result = body.simplify();
                 let changed = body_result.changed;
@@ -181,6 +184,7 @@ impl Simplify for Stmt {
                         loop_var,
                         loop_count,
                         body,
+                        phis,
                     }],
                     changed,
                 )

@@ -24,14 +24,73 @@ pub enum IndexExpr {
     Mul(Box<IndexExpr>, Box<IndexExpr>),
 }
 
+/// Unique SSA identifier for a single value definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ValueId(u64);
+
+impl ValueId {
+    /// Create a new value identifier from a raw integer.
+    ///
+    /// This is primarily intended for tests and deterministic fixtures.
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Return the raw integer value of this identifier.
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for ValueId {
+    fn from(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
+/// Base identity for a variable reference.
+///
+/// `Value` represents a concrete SSA definition. `LoopInput` represents the
+/// entry-stack snapshot for a repeat loop, indexed by the loop counter.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum VarBase {
+    /// A concrete SSA value definition.
+    Value(ValueId),
+    /// Entry stack snapshot for a repeat loop identified by `loop_depth`.
+    LoopInput {
+        /// The nesting depth of the repeat loop.
+        loop_depth: usize,
+    },
+}
+
+impl VarBase {
+    /// Return the loop depth for loop-input bases, if any.
+    pub const fn loop_depth(&self) -> Option<usize> {
+        match self {
+            VarBase::LoopInput { loop_depth } => Some(*loop_depth),
+            VarBase::Value(_) => None,
+        }
+    }
+
+    /// Return the value identifier for value bases, if any.
+    pub const fn value_id(&self) -> Option<ValueId> {
+        match self {
+            VarBase::Value(id) => Some(*id),
+            VarBase::LoopInput { .. } => None,
+        }
+    }
+}
+
 /// Variable representing a stack value.
 ///
-/// Variables are identified by their birth depth (stack position when created)
-/// and a subscript for indexing. For variables outside loops, the subscript
-/// is a constant equal to the stack depth. For variables inside non-neutral
-/// loops, the subscript is an expression involving loop counters.
+/// Variables carry a base identity (`VarBase`), a birth depth, and a subscript
+/// expression for loop indexing. For variables outside loops, the subscript is
+/// a constant equal to the stack depth. For variables inside non-neutral loops,
+/// the subscript is an expression involving loop counters.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Var {
+    /// Base identity for this variable.
+    pub base: VarBase,
     /// Stack depth when this variable was created (birth depth).
     pub stack_depth: usize,
     /// Subscript expression for variable indexing.
@@ -40,18 +99,38 @@ pub struct Var {
 
 impl Var {
     /// Create a new variable with a constant subscript equal to the stack depth.
-    pub fn new(stack_depth: usize) -> Self {
+    pub fn new(value_id: ValueId, stack_depth: usize) -> Self {
         Self {
+            base: VarBase::Value(value_id),
             stack_depth,
             subscript: IndexExpr::Const(stack_depth as i64),
+        }
+    }
+
+    /// Create a new loop-input variable for a repeat loop entry snapshot.
+    pub fn loop_input(loop_depth: usize, stack_depth: usize, subscript: IndexExpr) -> Self {
+        Self {
+            base: VarBase::LoopInput { loop_depth },
+            stack_depth,
+            subscript,
         }
     }
 
     /// Return a copy of this variable with a new subscript.
     pub fn with_subscript(&self, subscript: IndexExpr) -> Self {
         Self {
+            base: self.base.clone(),
             stack_depth: self.stack_depth,
             subscript,
+        }
+    }
+
+    /// Return a copy of this variable with a new base identity.
+    pub fn with_base(&self, base: VarBase) -> Self {
+        Self {
+            base,
+            stack_depth: self.stack_depth,
+            subscript: self.subscript.clone(),
         }
     }
 }
@@ -310,6 +389,28 @@ pub struct Intrinsic {
     pub results: Vec<Var>,
 }
 
+/// Phi node for an if/else merge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfPhi {
+    /// Merged destination value.
+    pub dest: Var,
+    /// Value produced by the then-branch.
+    pub then_var: Var,
+    /// Value produced by the else-branch.
+    pub else_var: Var,
+}
+
+/// Phi node for loop-carried values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopPhi {
+    /// Loop-carried destination value.
+    pub dest: Var,
+    /// Initial value before the loop.
+    pub init: Var,
+    /// Value produced at the end of one iteration.
+    pub step: Var,
+}
+
 /// Statement in the IR.
 ///
 /// All control flow is structured: `If`, `While`, and `Repeat` contain
@@ -348,6 +449,8 @@ pub enum Stmt {
         loop_count: usize,
         /// Loop body statements.
         body: Vec<Stmt>,
+        /// Loop phi nodes (reserved for future use in repeat loops).
+        phis: Vec<LoopPhi>,
     },
     /// If/else conditional.
     If {
@@ -357,6 +460,8 @@ pub enum Stmt {
         then_body: Vec<Stmt>,
         /// Else branch statements.
         else_body: Vec<Stmt>,
+        /// Phi nodes merging stack values after the branches.
+        phis: Vec<IfPhi>,
     },
     /// While loop.
     While {
@@ -364,6 +469,8 @@ pub enum Stmt {
         cond: Expr,
         /// Loop body statements.
         body: Vec<Stmt>,
+        /// Phi nodes for loop-carried values.
+        phis: Vec<LoopPhi>,
     },
     /// Return statement.
     Return(Vec<Var>),

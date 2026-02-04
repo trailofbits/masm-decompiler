@@ -13,9 +13,9 @@
 //! 3. No intervening statement redefines variables used by `e`
 //! 4. The use is NOT inside a loop that defines any variable used by `e`
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use crate::ir::{Expr, Stmt};
+use crate::ir::{Expr, IfPhi, IndexExpr, LoopPhi, Stmt, Var, VarBase, ValueId};
 
 /// Maximum number of propagation passes to avoid infinite loops.
 const MAX_PROPAGATION_PASSES: usize = 100;
@@ -25,6 +25,66 @@ const MAX_EXPR_COMPLEXITY: usize = 4;
 
 /// Maximum combined complexity of expression + use site.
 const MAX_COMBINED_COMPLEXITY: usize = 7;
+
+/// Base identity for propagation keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum VarBaseKey {
+    /// Concrete SSA value identifier.
+    Value(ValueId),
+    /// Loop-entry snapshot identity (by loop depth).
+    LoopInput(usize),
+}
+
+/// Identity key for a variable in propagation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VarKey {
+    base: VarBaseKey,
+    subscript: IndexExpr,
+}
+
+/// Helper trait for extracting phi destinations.
+trait PhiDest {
+    /// Return the destination variable for this phi node.
+    fn dest(&self) -> &Var;
+}
+
+impl PhiDest for IfPhi {
+    /// Return the destination variable for an if-phi.
+    fn dest(&self) -> &Var {
+        &self.dest
+    }
+}
+
+impl PhiDest for LoopPhi {
+    /// Return the destination variable for a loop-phi.
+    fn dest(&self) -> &Var {
+        &self.dest
+    }
+}
+
+/// Collect all phi destination variables as propagation keys.
+fn collect_defined_vars_in_phis<T: PhiDest>(phis: &[T]) -> HashSet<VarKey> {
+    phis.iter().map(|phi| VarKey::from_var(phi.dest())).collect()
+}
+
+impl VarKey {
+    /// Build a propagation identity key from a variable reference.
+    fn from_var(var: &Var) -> Self {
+        let base = match &var.base {
+            VarBase::Value(id) => VarBaseKey::Value(*id),
+            VarBase::LoopInput { loop_depth } => VarBaseKey::LoopInput(*loop_depth),
+        };
+        Self {
+            base,
+            subscript: var.subscript.clone(),
+        }
+    }
+
+    /// Return true if this key is indexed by a loop variable.
+    fn is_loop_indexed(&self) -> bool {
+        !matches!(self.subscript, IndexExpr::Const(_))
+    }
+}
 
 // ============================================================================
 // Public API
@@ -49,20 +109,39 @@ pub fn propagate_expressions(code: &mut Vec<Stmt>) {
 /// Perform one pass of expression propagation.
 /// Returns true if any propagation was performed.
 fn propagate_one_pass(code: &mut Vec<Stmt>) -> bool {
-    // Collect all definitions at the top level (not inside loops).
-    let defs = collect_top_level_defs(code);
+    // Process definitions in order, trying to propagate each one.
+    // This handles cases where a variable is defined multiple times -
+    // we try to propagate each definition to its uses before the next redefinition.
+    for def_idx in 0..code.len() {
+        let (var_key, def_expr) = match &code[def_idx] {
+            Stmt::Assign { dest, expr } => (VarKey::from_var(dest), expr.clone()),
+            _ => continue,
+        };
 
-    // Try to propagate each definition.
-    for (var_index, (def_idx, def_expr)) in defs {
         let props = ExprProperties::compute(&def_expr);
         if props.complexity > MAX_EXPR_COMPLEXITY {
             continue;
         }
 
+        // Don't propagate loop-indexed or loop-input variables.
+        if matches!(var_key.base, VarBaseKey::LoopInput(_)) || var_key.is_loop_indexed() {
+            continue;
+        }
+
+        // Don't propagate expressions that contain the variable being defined.
+        // Such expressions read the OLD value of the variable (e.g., v_0 = v_0 + 1),
+        // and propagating them would be incorrect - the use sites expect the NEW value.
+        let used_vars: HashSet<VarKey> = expr_uses_vars(&def_expr).into_iter().collect();
+        if used_vars.contains(&var_key) {
+            continue;
+        }
+
         // Find uses of this variable that can be propagated.
-        if let Some(use_info) = find_propagatable_use(code, var_index, def_idx, &def_expr, &props) {
+        if let Some(use_info) =
+            find_propagatable_use(code, &var_key, def_idx, &def_expr, &props)
+        {
             // Perform the substitution.
-            substitute_at_path(code, &use_info.path, var_index, &def_expr);
+            substitute_at_path(code, &use_info.path, &var_key, &def_expr);
             return true;
         }
     }
@@ -76,41 +155,26 @@ struct UseInfo {
     path: Vec<usize>,
 }
 
-/// Collect definitions at the top level of the code (not inside loops).
-/// Returns a map from variable index to (statement index, expression).
-fn collect_top_level_defs(code: &[Stmt]) -> HashMap<usize, (usize, Expr)> {
-    let mut defs = HashMap::new();
-
-    for (idx, stmt) in code.iter().enumerate() {
-        if let Stmt::Assign { dest, expr } = stmt {
-            // Only collect simple assignments (not inside control flow).
-            defs.insert(dest.stack_depth, (idx, expr.clone()));
-        }
-    }
-
-    defs
-}
-
-/// Find a use of `var_index` that can be safely propagated.
+/// Find a use of `var_key` that can be safely propagated.
 fn find_propagatable_use(
     code: &[Stmt],
-    var_index: usize,
+    var_key: &VarKey,
     def_idx: usize,
     def_expr: &Expr,
     props: &ExprProperties,
 ) -> Option<UseInfo> {
-    let used_vars: HashSet<usize> = expr_uses_vars(def_expr).into_iter().collect();
+    let used_vars: HashSet<VarKey> = expr_uses_vars(def_expr).into_iter().collect();
 
     // Search for uses after the definition.
     for (idx, stmt) in code.iter().enumerate().skip(def_idx + 1) {
         // Check if this statement uses the variable and can receive propagation.
-        if let Some(path) = can_propagate_into(stmt, var_index, &used_vars, props, vec![idx]) {
+        if let Some(path) = can_propagate_into(stmt, var_key, &used_vars, props, vec![idx]) {
             return Some(UseInfo { path });
         }
 
         // Check if this statement kills propagation (redefines used vars,
         // redefines the variable being propagated, or is a barrier).
-        if is_propagation_barrier(stmt, var_index, &used_vars) {
+        if is_propagation_barrier(stmt, var_key, &used_vars) {
             return None;
         }
     }
@@ -122,8 +186,8 @@ fn find_propagatable_use(
 /// Returns the path to the use site if propagation is valid.
 fn can_propagate_into(
     stmt: &Stmt,
-    var_index: usize,
-    used_vars: &HashSet<usize>,
+    var_key: &VarKey,
+    used_vars: &HashSet<VarKey>,
     props: &ExprProperties,
     current_path: Vec<usize>,
 ) -> Option<Vec<usize>> {
@@ -133,7 +197,7 @@ fn can_propagate_into(
             // 1. This assignment uses the variable
             // 2. The variable appears exactly once
             // 3. Combined complexity is acceptable
-            let occurrences = count_var_in_expr(expr, var_index);
+            let occurrences = count_var_in_expr(expr, var_key);
             if occurrences == 1 {
                 let use_complexity = expr_complexity(expr);
                 if props.complexity + use_complexity <= MAX_COMBINED_COMPLEXITY {
@@ -142,7 +206,7 @@ fn can_propagate_into(
             }
 
             // Can't propagate into this assignment, but check if it's a barrier.
-            if used_vars.contains(&dest.stack_depth) {
+            if used_vars.contains(&VarKey::from_var(dest)) {
                 return None; // Variable redefined, stop searching.
             }
             None
@@ -152,9 +216,10 @@ fn can_propagate_into(
             cond,
             then_body,
             else_body,
+            phis,
         } => {
             // Can propagate into condition if variable is used there.
-            let cond_uses = count_var_in_expr(cond, var_index);
+            let cond_uses = count_var_in_expr(cond, var_key);
             if cond_uses == 1 {
                 let use_complexity = expr_complexity(cond);
                 if props.complexity + use_complexity <= MAX_COMBINED_COMPLEXITY {
@@ -165,10 +230,12 @@ fn can_propagate_into(
             // Check branches - but only if neither branch defines variables we need.
             let then_defs = collect_defined_vars_in_block(then_body);
             let else_defs = collect_defined_vars_in_block(else_body);
+            let phi_defs = collect_defined_vars_in_phis(phis);
 
             // If either branch defines a variable we use, we can't propagate past this If.
             if then_defs.intersection(used_vars).next().is_some()
                 || else_defs.intersection(used_vars).next().is_some()
+                || phi_defs.intersection(used_vars).next().is_some()
             {
                 return None;
             }
@@ -178,7 +245,7 @@ fn can_propagate_into(
                 let mut path = current_path.clone();
                 path.push(i);
                 if let Some(result) =
-                    can_propagate_into_if_branch(inner, var_index, used_vars, props, path, true)
+                    can_propagate_into_if_branch(inner, var_key, used_vars, props, path, true)
                 {
                     return Some(result);
                 }
@@ -189,7 +256,7 @@ fn can_propagate_into(
                 let mut path = current_path.clone();
                 path.push(i);
                 if let Some(result) =
-                    can_propagate_into_if_branch(inner, var_index, used_vars, props, path, false)
+                    can_propagate_into_if_branch(inner, var_key, used_vars, props, path, false)
                 {
                     return Some(result);
                 }
@@ -198,12 +265,16 @@ fn can_propagate_into(
             None
         }
 
-        Stmt::Repeat { body, .. } => {
+        Stmt::Repeat { body, phis, .. } => {
             // CRITICAL: Never propagate into a repeat loop if the loop body
             // defines any variable used by the expression being propagated.
             let loop_defs = collect_defined_vars_in_block(body);
+            let phi_defs = collect_defined_vars_in_phis(phis);
             if loop_defs.intersection(used_vars).next().is_some() {
                 return None; // Unsafe to propagate.
+            }
+            if phi_defs.intersection(used_vars).next().is_some() {
+                return None;
             }
 
             // Also don't propagate if the variable we're propagating is used inside,
@@ -213,15 +284,19 @@ fn can_propagate_into(
             None
         }
 
-        Stmt::While { cond, body } => {
+        Stmt::While { cond, body, phis } => {
             // Similar to Repeat - don't propagate into while loops.
             let loop_defs = collect_defined_vars_in_block(body);
+            let phi_defs = collect_defined_vars_in_phis(phis);
             if loop_defs.intersection(used_vars).next().is_some() {
+                return None;
+            }
+            if phi_defs.intersection(used_vars).next().is_some() {
                 return None;
             }
 
             // Can propagate into condition if it doesn't involve loop-modified vars.
-            let cond_uses = count_var_in_expr(cond, var_index);
+            let cond_uses = count_var_in_expr(cond, var_key);
             if cond_uses == 1 && loop_defs.intersection(used_vars).next().is_none() {
                 let use_complexity = expr_complexity(cond);
                 if props.complexity + use_complexity <= MAX_COMBINED_COMPLEXITY {
@@ -251,47 +326,56 @@ fn can_propagate_into(
 /// Helper for propagating into if branches (marks which branch we're in).
 fn can_propagate_into_if_branch(
     stmt: &Stmt,
-    var_index: usize,
-    used_vars: &HashSet<usize>,
+    var_key: &VarKey,
+    used_vars: &HashSet<VarKey>,
     props: &ExprProperties,
     current_path: Vec<usize>,
     _is_then: bool,
 ) -> Option<Vec<usize>> {
-    can_propagate_into(stmt, var_index, used_vars, props, current_path)
+    can_propagate_into(stmt, var_key, used_vars, props, current_path)
 }
 
 /// Check if a statement is a barrier that prevents further propagation.
 ///
 /// A statement is a barrier if it:
-/// - Redefines the variable being propagated (`var_index`)
+/// - Redefines the variable being propagated (`var_key`)
 /// - Redefines any variable used by the expression being propagated (`used_vars`)
 /// - Has side effects that could affect propagation
-fn is_propagation_barrier(stmt: &Stmt, var_index: usize, used_vars: &HashSet<usize>) -> bool {
+fn is_propagation_barrier(stmt: &Stmt, var_index: &VarKey, used_vars: &HashSet<VarKey>) -> bool {
     match stmt {
         Stmt::Assign { dest, .. } => {
             // Barrier if it redefines the propagated variable or any used variable.
-            dest.stack_depth == var_index || used_vars.contains(&dest.stack_depth)
+            let dest_key = VarKey::from_var(dest);
+            dest_key == *var_index || used_vars.contains(&dest_key)
         }
 
-        Stmt::Repeat { body, .. } | Stmt::While { body, .. } => {
+        Stmt::Repeat { body, phis, .. } | Stmt::While { body, phis, .. } => {
             // A loop is a barrier if it defines the propagated variable or any used variable.
             let loop_defs = collect_defined_vars_in_block(body);
-            loop_defs.contains(&var_index) || loop_defs.intersection(used_vars).next().is_some()
+            let phi_defs = collect_defined_vars_in_phis(phis);
+            loop_defs.contains(var_index)
+                || loop_defs.intersection(used_vars).next().is_some()
+                || phi_defs.contains(var_index)
+                || phi_defs.intersection(used_vars).next().is_some()
         }
 
         Stmt::If {
             then_body,
             else_body,
+            phis,
             ..
         } => {
             // An if is a barrier if either branch defines the propagated variable
             // or any variable we're using.
             let then_defs = collect_defined_vars_in_block(then_body);
             let else_defs = collect_defined_vars_in_block(else_body);
-            then_defs.contains(&var_index)
-                || else_defs.contains(&var_index)
+            let phi_defs = collect_defined_vars_in_phis(phis);
+            then_defs.contains(var_index)
+                || else_defs.contains(var_index)
+                || phi_defs.contains(var_index)
                 || then_defs.intersection(used_vars).next().is_some()
                 || else_defs.intersection(used_vars).next().is_some()
+                || phi_defs.intersection(used_vars).next().is_some()
         }
 
         // Side-effecting statements are barriers.
@@ -315,8 +399,8 @@ fn is_propagation_barrier(stmt: &Stmt, var_index: usize, used_vars: &HashSet<usi
 // Substitution
 // ============================================================================
 
-/// Substitute variable `var_index` with `expr` at the given path.
-fn substitute_at_path(code: &mut Vec<Stmt>, path: &[usize], var_index: usize, expr: &Expr) {
+/// Substitute variable `var_key` with `expr` at the given path.
+fn substitute_at_path(code: &mut Vec<Stmt>, path: &[usize], var_key: &VarKey, expr: &Expr) {
     if path.is_empty() {
         return;
     }
@@ -324,7 +408,7 @@ fn substitute_at_path(code: &mut Vec<Stmt>, path: &[usize], var_index: usize, ex
     let idx = path[0];
     if path.len() == 1 {
         // This is the target statement.
-        substitute_in_stmt(&mut code[idx], var_index, expr);
+        substitute_in_stmt(&mut code[idx], var_key, expr);
     } else {
         // Navigate into nested structure.
         match &mut code[idx] {
@@ -332,6 +416,7 @@ fn substitute_at_path(code: &mut Vec<Stmt>, path: &[usize], var_index: usize, ex
                 cond,
                 then_body,
                 else_body,
+                ..
             } => {
                 // For If, we need to determine which branch to descend into.
                 // The path encoding here is simplified - we just try both.
@@ -339,60 +424,60 @@ fn substitute_at_path(code: &mut Vec<Stmt>, path: &[usize], var_index: usize, ex
                     let inner_path = &path[1..];
                     // Try then branch first.
                     if inner_path[0] < then_body.len() {
-                        substitute_at_path(then_body, inner_path, var_index, expr);
+                        substitute_at_path(then_body, inner_path, var_key, expr);
                     } else {
                         // Adjust index for else branch.
                         let adjusted_idx = inner_path[0] - then_body.len();
                         if adjusted_idx < else_body.len() {
                             let mut adjusted_path = inner_path.to_vec();
                             adjusted_path[0] = adjusted_idx;
-                            substitute_at_path(else_body, &adjusted_path, var_index, expr);
+                            substitute_at_path(else_body, &adjusted_path, var_key, expr);
                         }
                     }
                 }
                 // Also substitute in condition if it contains the variable.
-                substitute_in_expr(cond, var_index, expr);
+                substitute_in_expr(cond, var_key, expr);
             }
             Stmt::Repeat { body, .. } | Stmt::While { body, .. } => {
-                substitute_at_path(body, &path[1..], var_index, expr);
+                substitute_at_path(body, &path[1..], var_key, expr);
             }
             _ => {
                 // Direct statement - substitute in it.
-                substitute_in_stmt(&mut code[idx], var_index, expr);
+                substitute_in_stmt(&mut code[idx], var_key, expr);
             }
         }
     }
 }
 
 /// Substitute variable in a statement.
-fn substitute_in_stmt(stmt: &mut Stmt, var_index: usize, with: &Expr) {
+fn substitute_in_stmt(stmt: &mut Stmt, var_key: &VarKey, with: &Expr) {
     match stmt {
         Stmt::Assign { expr, .. } => {
-            substitute_in_expr(expr, var_index, with);
+            substitute_in_expr(expr, var_key, with);
         }
         Stmt::If { cond, .. } => {
-            substitute_in_expr(cond, var_index, with);
+            substitute_in_expr(cond, var_key, with);
         }
         Stmt::While { cond, .. } => {
-            substitute_in_expr(cond, var_index, with);
+            substitute_in_expr(cond, var_key, with);
         }
         _ => {}
     }
 }
 
 /// Substitute variable in an expression.
-fn substitute_in_expr(expr: &mut Expr, var_index: usize, with: &Expr) {
+fn substitute_in_expr(expr: &mut Expr, var_key: &VarKey, with: &Expr) {
     match expr {
-        Expr::Var(v) if v.stack_depth == var_index => {
+        Expr::Var(v) if VarKey::from_var(v) == *var_key => {
             *expr = with.clone();
         }
         Expr::Var(_) => {}
         Expr::Binary(_, a, b) => {
-            substitute_in_expr(a, var_index, with);
-            substitute_in_expr(b, var_index, with);
+            substitute_in_expr(a, var_key, with);
+            substitute_in_expr(b, var_key, with);
         }
         Expr::Unary(_, a) => {
-            substitute_in_expr(a, var_index, with);
+            substitute_in_expr(a, var_key, with);
         }
         Expr::True | Expr::False | Expr::Constant(_) => {}
     }
@@ -403,7 +488,7 @@ fn substitute_in_expr(expr: &mut Expr, var_index: usize, with: &Expr) {
 // ============================================================================
 
 /// Collect all variables defined in a block of statements.
-fn collect_defined_vars_in_block(stmts: &[Stmt]) -> HashSet<usize> {
+fn collect_defined_vars_in_block(stmts: &[Stmt]) -> HashSet<VarKey> {
     let mut defs = HashSet::new();
     for stmt in stmts {
         collect_defined_vars(stmt, &mut defs);
@@ -412,14 +497,15 @@ fn collect_defined_vars_in_block(stmts: &[Stmt]) -> HashSet<usize> {
 }
 
 /// Recursively collect all variables defined by a statement.
-fn collect_defined_vars(stmt: &Stmt, defs: &mut HashSet<usize>) {
+fn collect_defined_vars(stmt: &Stmt, defs: &mut HashSet<VarKey>) {
     match stmt {
         Stmt::Assign { dest, .. } => {
-            defs.insert(dest.stack_depth);
+            defs.insert(VarKey::from_var(dest));
         }
         Stmt::If {
             then_body,
             else_body,
+            phis,
             ..
         } => {
             for s in then_body {
@@ -428,40 +514,46 @@ fn collect_defined_vars(stmt: &Stmt, defs: &mut HashSet<usize>) {
             for s in else_body {
                 collect_defined_vars(s, defs);
             }
+            for phi in phis {
+                defs.insert(VarKey::from_var(&phi.dest));
+            }
         }
-        Stmt::Repeat { body, .. } | Stmt::While { body, .. } => {
+        Stmt::Repeat { body, phis, .. } | Stmt::While { body, phis, .. } => {
             for s in body {
                 collect_defined_vars(s, defs);
+            }
+            for phi in phis {
+                defs.insert(VarKey::from_var(&phi.dest));
             }
         }
         Stmt::MemLoad(load) => {
             for v in &load.outputs {
-                defs.insert(v.stack_depth);
+                defs.insert(VarKey::from_var(v));
             }
         }
         Stmt::AdvLoad(load) => {
             for v in &load.outputs {
-                defs.insert(v.stack_depth);
+                defs.insert(VarKey::from_var(v));
             }
         }
         Stmt::LocalLoad(load) => {
             for v in &load.outputs {
-                defs.insert(v.stack_depth);
+                defs.insert(VarKey::from_var(v));
             }
         }
         Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
             for v in &call.results {
-                defs.insert(v.stack_depth);
+                defs.insert(VarKey::from_var(v));
             }
         }
         Stmt::DynCall { results, .. } => {
             for v in results {
-                defs.insert(v.stack_depth);
+                defs.insert(VarKey::from_var(v));
             }
         }
         Stmt::Intrinsic(intr) => {
             for v in &intr.results {
-                defs.insert(v.stack_depth);
+                defs.insert(VarKey::from_var(v));
             }
         }
         _ => {}
@@ -469,15 +561,15 @@ fn collect_defined_vars(stmt: &Stmt, defs: &mut HashSet<usize>) {
 }
 
 /// Get all variables used by an expression.
-fn expr_uses_vars(expr: &Expr) -> Vec<usize> {
+fn expr_uses_vars(expr: &Expr) -> Vec<VarKey> {
     let mut vars = Vec::new();
     collect_expr_vars(expr, &mut vars);
     vars
 }
 
-fn collect_expr_vars(expr: &Expr, vars: &mut Vec<usize>) {
+fn collect_expr_vars(expr: &Expr, vars: &mut Vec<VarKey>) {
     match expr {
-        Expr::Var(v) => vars.push(v.stack_depth),
+        Expr::Var(v) => vars.push(VarKey::from_var(v)),
         Expr::Binary(_, a, b) => {
             collect_expr_vars(a, vars);
             collect_expr_vars(b, vars);
@@ -488,12 +580,12 @@ fn collect_expr_vars(expr: &Expr, vars: &mut Vec<usize>) {
 }
 
 /// Count occurrences of a variable in an expression.
-fn count_var_in_expr(expr: &Expr, var_index: usize) -> usize {
+fn count_var_in_expr(expr: &Expr, var_key: &VarKey) -> usize {
     match expr {
-        Expr::Var(v) if v.stack_depth == var_index => 1,
+        Expr::Var(v) if VarKey::from_var(v) == *var_key => 1,
         Expr::Var(_) => 0,
-        Expr::Binary(_, a, b) => count_var_in_expr(a, var_index) + count_var_in_expr(b, var_index),
-        Expr::Unary(_, a) => count_var_in_expr(a, var_index),
+        Expr::Binary(_, a, b) => count_var_in_expr(a, var_key) + count_var_in_expr(b, var_key),
+        Expr::Unary(_, a) => count_var_in_expr(a, var_key),
         Expr::True | Expr::False | Expr::Constant(_) => 0,
     }
 }
@@ -528,10 +620,11 @@ impl ExprProperties {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{BinOp, Constant, IndexExpr, LoopVar, Var};
+    use crate::ir::{BinOp, Constant, IndexExpr, LoopVar, Var, VarBase, ValueId};
 
     fn make_var(stack_depth: usize) -> Var {
         Var {
+            base: VarBase::Value(ValueId::from(stack_depth as u64)),
             stack_depth,
             subscript: IndexExpr::Const(stack_depth as i64),
         }
@@ -602,6 +695,7 @@ mod tests {
                         Box::new(Expr::Var(make_var(0))),
                     ),
                 }],
+                phis: Vec::new(),
             },
         ];
 
@@ -634,6 +728,7 @@ mod tests {
                         Box::new(make_const(1)),
                     ),
                 }],
+                phis: Vec::new(),
             },
             Stmt::Assign {
                 dest: make_var(2),
@@ -660,6 +755,50 @@ mod tests {
             }
         } else {
             panic!("Expected assign");
+        }
+    }
+
+    #[test]
+    fn test_propagation_into_self_referential_assign() {
+        // v_6 = v_7
+        // v_6 = v_6 == v_8
+        // -> v_6 in the expression should be replaced with v_7
+        // -> result: v_6 = v_7 == v_8
+        let mut code = vec![
+            Stmt::Assign {
+                dest: make_var(6),
+                expr: Expr::Var(make_var(7)),
+            },
+            Stmt::Assign {
+                dest: make_var(6),
+                expr: Expr::Binary(
+                    BinOp::Eq,
+                    Box::new(Expr::Var(make_var(6))),
+                    Box::new(Expr::Var(make_var(8))),
+                ),
+            },
+        ];
+
+        propagate_expressions(&mut code);
+
+        // The second statement should become v_6 = v_7 == v_8.
+        if let Stmt::Assign { expr, .. } = &code[1] {
+            if let Expr::Binary(BinOp::Eq, left, right) = expr {
+                assert!(
+                    matches!(left.as_ref(), Expr::Var(v) if v.stack_depth == 7),
+                    "Expected Var(v_7) on left, got {:?}",
+                    left
+                );
+                assert!(
+                    matches!(right.as_ref(), Expr::Var(v) if v.stack_depth == 8),
+                    "Expected Var(v_8) on right, got {:?}",
+                    right
+                );
+            } else {
+                panic!("Expected binary eq, got {:?}", expr);
+            }
+        } else {
+            panic!("Expected assign at index 1");
         }
     }
 }

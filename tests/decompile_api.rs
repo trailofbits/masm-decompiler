@@ -3,7 +3,7 @@
 use masm_decompiler::{
     decompile::{DecompilationConfig, Decompiler},
     frontend::testing::workspace_from_modules,
-    ssa::Stmt,
+    ir::Stmt,
 };
 
 #[test]
@@ -231,8 +231,7 @@ fn decompiler_with_config() {
     )]);
 
     // Test with_config builder pattern
-    let decompiler = Decompiler::new(&ws)
-        .with_config(DecompilationConfig::no_optimizations());
+    let decompiler = Decompiler::new(&ws).with_config(DecompilationConfig::no_optimizations());
 
     // Config should reflect what we set
     assert!(!decompiler.config().expression_propagation);
