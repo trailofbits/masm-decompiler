@@ -399,6 +399,13 @@ fn analyze_stmt(
                 }
             }
         }
+        Stmt::LocalStoreW(store) => {
+            for v in &store.values {
+                for var in var_used_vars(v, loop_stack) {
+                    state.mark_used(&var);
+                }
+            }
+        }
 
         Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
             for v in &call.args {
@@ -641,6 +648,11 @@ fn collect_defs_uses_recursive(
                     uses.extend(var_used_vars(v, loop_stack));
                 }
             }
+            Stmt::LocalStoreW(store) => {
+                for v in &store.values {
+                    uses.extend(var_used_vars(v, loop_stack));
+                }
+            }
 
             Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
                 for v in &call.args {
@@ -677,6 +689,16 @@ fn expr_used_vars(expr: &Expr, loop_stack: &[LoopBinding]) -> Vec<ConcreteVar> {
             result
         }
         Expr::Unary(_, inner) => expr_used_vars(inner, loop_stack),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            let mut result = expr_used_vars(cond, loop_stack);
+            result.extend(expr_used_vars(then_expr, loop_stack));
+            result.extend(expr_used_vars(else_expr, loop_stack));
+            result
+        }
         Expr::Constant(_) | Expr::True | Expr::False => Vec::new(),
     }
 }

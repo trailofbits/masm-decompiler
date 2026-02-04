@@ -168,6 +168,15 @@ pub enum Expr {
     Binary(BinOp, Box<Expr>, Box<Expr>),
     /// Unary operator application.
     Unary(UnOp, Box<Expr>),
+    /// Ternary conditional expression.
+    Ternary {
+        /// Condition expression.
+        cond: Box<Expr>,
+        /// Expression when condition is true.
+        then_expr: Box<Expr>,
+        /// Expression when condition is false.
+        else_expr: Box<Expr>,
+    },
 }
 
 /// Binary operators.
@@ -213,6 +222,8 @@ pub enum UnOp {
     U32Clo,
     /// Count trailing ones in a 32-bit word.
     U32Cto,
+    /// Compute 2^x (fails if x > 63 in MASM semantics).
+    Pow2,
 }
 
 /// Constant literal.
@@ -385,6 +396,15 @@ pub struct LocalStore {
     pub values: Vec<Var>,
 }
 
+/// Local word store operation (big-endian).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalStoreW {
+    /// Local variable index.
+    pub index: u16,
+    /// Word values written to the local (top of stack first).
+    pub values: Vec<Var>,
+}
+
 /// Procedure call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Call {
@@ -449,6 +469,8 @@ pub enum Stmt {
     LocalLoad(LocalLoad),
     /// Local variable store.
     LocalStore(LocalStore),
+    /// Local word store (big-endian).
+    LocalStoreW(LocalStoreW),
     /// Call to a known procedure.
     Call(Call),
     /// Exec call to a known procedure.

@@ -3,8 +3,8 @@
 use miden_assembly_syntax::ast::{ImmFelt, ImmU32, Immediate, Instruction, InvocationTarget};
 
 use crate::ir::{
-    AdvLoad, BinOp, Call, Constant, Expr, Intrinsic, LocalLoad, LocalStore, MemLoad, MemStore,
-    Stmt, UnOp, Var,
+    AdvLoad, BinOp, Call, Constant, Expr, Intrinsic, LocalLoad, LocalStore, LocalStoreW, MemLoad,
+    MemStore, Stmt, UnOp, Var,
 };
 use crate::signature::{SignatureMap, StackEffect};
 
@@ -102,6 +102,7 @@ fn lift_arith_inst(
         Instruction::Gte => lift_binop(BinOp::Gte, stack),
         Instruction::Not => lift_unop(UnOp::Not, stack),
         Instruction::Neg => lift_unop(UnOp::Neg, stack),
+        Instruction::Pow2 => lift_unop(UnOp::Pow2, stack),
         Instruction::Incr => lift_incr(stack),
         _ => return Ok(None),
     };
@@ -148,6 +149,9 @@ fn lift_u32_inst(
         Instruction::U32OverflowingMadd => {
             return lift_u32_intrinsic(inst, "u32overflowing_madd", module_path, sigs, stack);
         }
+        Instruction::U32Split => {
+            return Ok(Some(vec![lift_u32split(stack)]));
+        }
         Instruction::U32Assert2 => {
             return Ok(Some(vec![lift_u32_assert2("u32assert2", stack)]));
         }
@@ -176,6 +180,8 @@ fn lift_stack_inst(
             Ok(Some(Vec::new()))
         }
         Instruction::PadW => Ok(Some(lift_padw(stack))),
+        Instruction::CDrop => Ok(Some(vec![lift_cdrop(stack)])),
+        Instruction::CSwap => Ok(Some(lift_cswap(stack))),
         Instruction::Dup0 => lift_dup(0, stack),
         Instruction::Dup1 => lift_dup(1, stack),
         Instruction::Dup2 => lift_dup(2, stack),
@@ -254,6 +260,18 @@ fn lift_stack_inst(
         }
         Instruction::Swap15 => {
             stack.swap(15);
+            Ok(Some(Vec::new()))
+        }
+        Instruction::SwapW1 => {
+            stack.swapw(1);
+            Ok(Some(Vec::new()))
+        }
+        Instruction::SwapW2 => {
+            stack.swapw(2);
+            Ok(Some(Vec::new()))
+        }
+        Instruction::SwapW3 => {
+            stack.swapw(3);
             Ok(Some(Vec::new()))
         }
         Instruction::MovUp2 => {
@@ -368,6 +386,10 @@ fn lift_stack_inst(
             stack.movdn(15);
             Ok(Some(Vec::new()))
         }
+        Instruction::Reversew => {
+            stack.reversew();
+            Ok(Some(Vec::new()))
+        }
         Instruction::Nop | Instruction::Debug(_) => Ok(Some(Vec::new())),
         _ => Ok(None),
     }
@@ -479,6 +501,14 @@ fn lift_local_inst(
             Ok(Some(vec![Stmt::LocalStore(LocalStore {
                 index: idx.expect_value(),
                 values: popped,
+            })]))
+        }
+        Instruction::LocStoreWBe(idx) => {
+            stack.ensure_depth(4);
+            let values = stack.top_n(4);
+            Ok(Some(vec![Stmt::LocalStoreW(LocalStoreW {
+                index: idx.expect_value(),
+                values,
             })]))
         }
         _ => Ok(None),
@@ -669,6 +699,66 @@ fn lift_binop_u32_imm(op: BinOp, imm: &ImmU32, stack: &mut SymbolicStack) -> Stm
     }
 }
 
+/// Lift the `cdrop` instruction into a ternary expression assignment.
+/// Lift the `cdrop` instruction into a ternary expression assignment.
+fn lift_cdrop(stack: &mut SymbolicStack) -> Stmt {
+    stack.ensure_depth(3);
+    let cond = stack.pop();
+    let b = stack.pop();
+    let a = stack.pop();
+    let dest = stack.push_fresh();
+    Stmt::Assign {
+        dest,
+        expr: Expr::Ternary {
+            cond: Box::new(Expr::Var(cond)),
+            then_expr: Box::new(Expr::Var(b)),
+            else_expr: Box::new(Expr::Var(a)),
+        },
+    }
+}
+
+/// Lift the `cswap` instruction into two ternary expression assignments.
+fn lift_cswap(stack: &mut SymbolicStack) -> Vec<Stmt> {
+    stack.ensure_depth(3);
+    let cond = stack.pop();
+    let b = stack.pop();
+    let a = stack.pop();
+
+    let d = stack.push_fresh();
+    let e = stack.push_fresh();
+
+    let first = Stmt::Assign {
+        dest: d.clone(),
+        expr: Expr::Ternary {
+            cond: Box::new(Expr::Var(cond.clone())),
+            then_expr: Box::new(Expr::Var(b.clone())),
+            else_expr: Box::new(Expr::Var(a.clone())),
+        },
+    };
+    let second = Stmt::Assign {
+        dest: e,
+        expr: Expr::Ternary {
+            cond: Box::new(Expr::Var(cond)),
+            then_expr: Box::new(Expr::Var(a)),
+            else_expr: Box::new(Expr::Var(b)),
+        },
+    };
+    vec![first, second]
+}
+
+/// Lift the `u32split` instruction into an intrinsic assignment.
+fn lift_u32split(stack: &mut SymbolicStack) -> Stmt {
+    stack.ensure_depth(1);
+    let a = stack.pop();
+    let lo = stack.push_fresh();
+    let hi = stack.push_fresh();
+    Stmt::Intrinsic(Intrinsic {
+        name: "u32split".to_string(),
+        args: vec![a],
+        results: vec![lo, hi],
+    })
+}
+
 fn lift_padw(stack: &mut SymbolicStack) -> Vec<Stmt> {
     let mut stmts = Vec::with_capacity(4);
     for _ in 0..4 {
@@ -774,5 +864,88 @@ impl StackEffectExt for StackEffect {
             StackEffect::Known { required_depth, .. } => *required_depth,
             StackEffect::Unknown => 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::Intrinsic;
+
+    /// Ensure u32split emits an intrinsic with low/high ordering and updates stack order.
+    #[test]
+    fn test_lift_u32split_order() {
+        let mut stack = SymbolicStack::new();
+        stack.ensure_depth(1);
+        let input = stack.peek(0).cloned().expect("input var");
+
+        let stmt = lift_u32split(&mut stack);
+        let (lo, hi) = match stmt {
+            Stmt::Intrinsic(Intrinsic { name, args, results }) => {
+                assert_eq!(name, "u32split");
+                assert_eq!(args, vec![input]);
+                assert_eq!(results.len(), 2);
+                (results[0].clone(), results[1].clone())
+            }
+            _ => panic!("expected intrinsic from u32split"),
+        };
+
+        let top = stack.top_n(2);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0], hi);
+        assert_eq!(top[1], lo);
+    }
+
+    /// Ensure cswap emits two ternary assignments and preserves stack order.
+    #[test]
+    fn test_lift_cswap_order() {
+        let mut stack = SymbolicStack::new();
+        stack.ensure_depth(3);
+        let cond = stack.peek(0).cloned().expect("cond");
+        let b = stack.peek(1).cloned().expect("b");
+        let a = stack.peek(2).cloned().expect("a");
+
+        let stmts = lift_cswap(&mut stack);
+        assert_eq!(stmts.len(), 2);
+
+        let (d, first_expr) = match &stmts[0] {
+            Stmt::Assign { dest, expr } => (dest.clone(), expr.clone()),
+            _ => panic!("expected first cswap assignment"),
+        };
+        let (e, second_expr) = match &stmts[1] {
+            Stmt::Assign { dest, expr } => (dest.clone(), expr.clone()),
+            _ => panic!("expected second cswap assignment"),
+        };
+
+        match first_expr {
+            Expr::Ternary {
+                cond: c,
+                then_expr,
+                else_expr,
+            } => {
+                assert_eq!(*c, Expr::Var(cond.clone()));
+                assert_eq!(*then_expr, Expr::Var(b.clone()));
+                assert_eq!(*else_expr, Expr::Var(a.clone()));
+            }
+            _ => panic!("expected ternary for first cswap assignment"),
+        }
+
+        match second_expr {
+            Expr::Ternary {
+                cond: c,
+                then_expr,
+                else_expr,
+            } => {
+                assert_eq!(*c, Expr::Var(cond));
+                assert_eq!(*then_expr, Expr::Var(a));
+                assert_eq!(*else_expr, Expr::Var(b));
+            }
+            _ => panic!("expected ternary for second cswap assignment"),
+        }
+
+        let top = stack.top_n(2);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0], e);
+        assert_eq!(top[1], d);
     }
 }

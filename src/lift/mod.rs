@@ -502,6 +502,30 @@ fn transform_expr_producing(
             op,
             Box::new(transform_expr_producing(*inner, loop_var_id, stride, index_value_ids)),
         ),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => Expr::Ternary {
+            cond: Box::new(transform_expr_producing(
+                *cond,
+                loop_var_id,
+                stride,
+                index_value_ids,
+            )),
+            then_expr: Box::new(transform_expr_producing(
+                *then_expr,
+                loop_var_id,
+                stride,
+                index_value_ids,
+            )),
+            else_expr: Box::new(transform_expr_producing(
+                *else_expr,
+                loop_var_id,
+                stride,
+                index_value_ids,
+            )),
+        },
         other => other,
     }
 }
@@ -650,6 +674,30 @@ fn transform_expr_consuming(
             op,
             Box::new(transform_expr_consuming(*inner, loop_var_id, stride, index_value_ids)),
         ),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => Expr::Ternary {
+            cond: Box::new(transform_expr_consuming(
+                *cond,
+                loop_var_id,
+                stride,
+                index_value_ids,
+            )),
+            then_expr: Box::new(transform_expr_consuming(
+                *then_expr,
+                loop_var_id,
+                stride,
+                index_value_ids,
+            )),
+            else_expr: Box::new(transform_expr_consuming(
+                *else_expr,
+                loop_var_id,
+                stride,
+                index_value_ids,
+            )),
+        },
         other => other,
     }
 }
@@ -697,7 +745,7 @@ fn collect_defined_in_stmt(stmt: &Stmt, ids: &mut HashSet<ValueId>) {
                 collect_defined_in_var(v, ids);
             }
         }
-        Stmt::LocalStore(_) => {}
+        Stmt::LocalStore(_) | Stmt::LocalStoreW(_) => {}
         Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
             for v in &call.results {
                 collect_defined_in_var(v, ids);
@@ -898,6 +946,23 @@ fn transform_expr_loop_input(
             op,
             Box::new(transform_expr_loop_input(*inner, entry_value_ids, loop_depth)),
         ),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => Expr::Ternary {
+            cond: Box::new(transform_expr_loop_input(*cond, entry_value_ids, loop_depth)),
+            then_expr: Box::new(transform_expr_loop_input(
+                *then_expr,
+                entry_value_ids,
+                loop_depth,
+            )),
+            else_expr: Box::new(transform_expr_loop_input(
+                *else_expr,
+                entry_value_ids,
+                loop_depth,
+            )),
+        },
         other => other,
     }
 }

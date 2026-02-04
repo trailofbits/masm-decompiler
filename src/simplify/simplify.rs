@@ -8,8 +8,8 @@
 //! returns a `SimplifyResult` that tracks whether any changes were made during
 //! simplification.
 use crate::ir::{
-    AdvLoad, AdvStore, BinOp, Call, Constant, Expr, IndexExpr, LocalLoad, LocalStore, MemLoad,
-    MemStore, Stmt, UnOp, Var,
+    AdvLoad, AdvStore, BinOp, Call, Constant, Expr, IndexExpr, LocalLoad, LocalStore, LocalStoreW,
+    MemLoad, MemStore, Stmt, UnOp, Var,
 };
 
 const MAX_SIMPLIFY_PASSES: usize = 100;
@@ -212,6 +212,7 @@ impl Simplify for Stmt {
             Stmt::AdvStore(store) => store.simplify().map(|s| vec![Stmt::AdvStore(s)]),
             Stmt::LocalLoad(load) => load.simplify().map(|l| vec![Stmt::LocalLoad(l)]),
             Stmt::LocalStore(store) => store.simplify().map(|s| vec![Stmt::LocalStore(s)]),
+            Stmt::LocalStoreW(store) => store.simplify().map(|s| vec![Stmt::LocalStoreW(s)]),
             // Calls.
             Stmt::Call(call) => call.simplify().map(|c| vec![Stmt::Call(c)]),
             Stmt::Exec(call) => call.simplify().map(|c| vec![Stmt::Exec(c)]),
@@ -265,6 +266,17 @@ impl Simplify for LocalStore {
 
     fn simplify(self) -> SimplifyResult<Self::Output> {
         self.values.simplify().map(|values| LocalStore {
+            index: self.index,
+            values,
+        })
+    }
+}
+
+impl Simplify for LocalStoreW {
+    type Output = Self;
+
+    fn simplify(self) -> SimplifyResult<Self::Output> {
+        self.values.simplify().map(|values| LocalStoreW {
             index: self.index,
             values,
         })
@@ -400,6 +412,37 @@ impl Simplify for Expr {
                     ),
                 }
             }
+            Expr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                let cond_result = cond.simplify();
+                let then_result = then_expr.simplify();
+                let else_result = else_expr.simplify();
+                let changed = cond_result.changed || then_result.changed || else_result.changed;
+                let cond = cond_result.value;
+                let then_expr = then_result.value;
+                let else_expr = else_result.value;
+
+                if let Some(value) = cond.maybe_boolean() {
+                    let chosen = if value { then_expr } else { else_expr };
+                    return SimplifyResult::new(chosen, true);
+                }
+
+                if then_expr == else_expr {
+                    return SimplifyResult::new(then_expr, true);
+                }
+
+                SimplifyResult::new(
+                    Expr::Ternary {
+                        cond: Box::new(cond),
+                        then_expr: Box::new(then_expr),
+                        else_expr: Box::new(else_expr),
+                    },
+                    changed,
+                )
+            }
             _ => SimplifyResult::unchanged(self),
         }
     }
@@ -492,6 +535,15 @@ impl MaybeBoolean for Expr {
                 (Some(false), Some(false)) => Some(false),
                 (Some(true), _) | (_, Some(true)) => Some(true),
                 _ => None,
+            },
+            Expr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => match cond.maybe_boolean() {
+                Some(true) => then_expr.maybe_boolean(),
+                Some(false) => else_expr.maybe_boolean(),
+                None => None,
             },
             _ => None,
         }

@@ -4,7 +4,7 @@ use crate::{
     decompile::{DecompiledHeader, DecompiledProc},
     ir::{
         AdvLoad, AdvStore, BinOp, Call, Constant, Expr, IndexExpr, Intrinsic, LocalLoad,
-        LocalStore, LoopVar, MemLoad, MemStore, Stmt, UnOp, ValueId, Var, VarBase,
+        LocalStore, LocalStoreW, LoopVar, MemLoad, MemStore, Stmt, UnOp, ValueId, Var, VarBase,
     },
 };
 use std::collections::{HashMap, HashSet};
@@ -208,6 +208,11 @@ fn collect_stmt_usage(stmt: &Stmt, usage: &mut VarUsage) {
                 usage.record_use(v);
             }
         }
+        Stmt::LocalStoreW(store) => {
+            for v in &store.values {
+                usage.record_use(v);
+            }
+        }
         Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
             for v in &call.args {
                 usage.record_use(v);
@@ -294,6 +299,15 @@ fn collect_expr_usage(expr: &Expr, usage: &mut VarUsage) {
             collect_expr_usage(rhs, usage);
         }
         Expr::Unary(_, inner) => collect_expr_usage(inner, usage),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            collect_expr_usage(cond, usage);
+            collect_expr_usage(then_expr, usage);
+            collect_expr_usage(else_expr, usage);
+        }
         Expr::True | Expr::False | Expr::Constant(_) => {}
     }
 }
@@ -794,6 +808,22 @@ impl CodeDisplay for Stmt {
                     .join(", ");
                 f.write_line(&format!("{}.{index}({args});", function_name("loc_store")));
             }
+            Stmt::LocalStoreW(LocalStoreW { index, values }) => {
+                let args = values
+                    .iter()
+                    .map(|v| f.fmt_var(v))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let args = if args.is_empty() {
+                    index.to_string()
+                } else {
+                    format!("{index}, {args}")
+                };
+                f.write_line(&format!(
+                    "{}({args});",
+                    function_name("loc_storew_be")
+                ));
+            }
             Stmt::Call(call) => write_call_like("call", call, f),
             Stmt::Exec(call) => write_call_like("exec", call, f),
             Stmt::SysCall(call) => write_call_like("syscall", call, f),
@@ -919,6 +949,32 @@ fn fmt_expr(f: &CodeWriter, expr: &Expr, parent_prec: u8) -> String {
                 UnOp::U32Ctz => format!("ctz_u32({})", fmt_expr(f, inner, 0)),
                 UnOp::U32Clo => format!("clo_u32({})", fmt_expr(f, inner, 0)),
                 UnOp::U32Cto => format!("cto_u32({})", fmt_expr(f, inner, 0)),
+                UnOp::Pow2 => {
+                    let prec = 11;
+                    let inner_str = fmt_expr(f, inner, prec);
+                    let expr_str = format!("2 ^ {inner_str}");
+                    if prec < parent_prec {
+                        format!("({expr_str})")
+                    } else {
+                        expr_str
+                    }
+                }
+            }
+        }
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            let prec = 2;
+            let cond_str = fmt_expr(f, cond, prec);
+            let then_str = fmt_expr(f, then_expr, prec);
+            let else_str = fmt_expr(f, else_expr, prec + 1);
+            let expr_str = format!("{cond_str} ? {then_str} : {else_str}");
+            if prec < parent_prec {
+                format!("({expr_str})")
+            } else {
+                expr_str
             }
         }
         Expr::Binary(op, a, b) => {
@@ -937,18 +993,18 @@ fn fmt_expr(f: &CodeWriter, expr: &Expr, parent_prec: u8) -> String {
                         _ => "-",
                     },
                 ),
-                BinOp::And => (7, "&"),
-                BinOp::Or => (6, "|"),
-                BinOp::Xor => (6, "^"),
+                BinOp::And => (7, "and"),
+                BinOp::Or => (6, "or"),
+                BinOp::Xor => (6, "xor"),
                 BinOp::Eq => (5, "=="),
                 BinOp::Neq => (5, "!="),
                 BinOp::Lt => (4, "<"),
                 BinOp::Lte => (4, "<="),
                 BinOp::Gt => (4, ">"),
                 BinOp::Gte => (4, ">="),
-                BinOp::U32And => (7, "&_u32"),
-                BinOp::U32Or => (6, "|_u32"),
-                BinOp::U32Xor => (6, "^_u32"),
+                BinOp::U32And => (7, "and_u32"),
+                BinOp::U32Or => (6, "or_u32"),
+                BinOp::U32Xor => (6, "xor_u32"),
                 BinOp::U32Lt => (4, "<_u32"),
                 BinOp::U32Lte => (4, "<=_u32"),
                 BinOp::U32Gt => (4, ">_u32"),

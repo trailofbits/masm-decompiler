@@ -208,6 +208,35 @@ impl SymbolicStack {
         }
     }
 
+    /// Swap the top word (4 elements) with the nth word below it.
+    ///
+    /// The word index is 1-based: swapw(1) swaps the top word with the next word.
+    pub fn swapw(&mut self, word_index: usize) {
+        if word_index == 0 {
+            return;
+        }
+        let len = self.stack.len();
+        let offset = word_index.saturating_mul(4);
+        if offset + 4 > len {
+            return;
+        }
+        for i in 0..4 {
+            let top_idx = len - 1 - i;
+            let other_idx = len - 1 - offset - i;
+            self.stack.swap(top_idx, other_idx);
+        }
+    }
+
+    /// Reverse the order of the top 4 stack elements (word).
+    pub fn reversew(&mut self) {
+        let len = self.stack.len();
+        if len < 4 {
+            return;
+        }
+        self.stack.swap(len - 4, len - 1);
+        self.stack.swap(len - 3, len - 2);
+    }
+
     /// Move the element at the given depth to the top.
     pub fn movup(&mut self, depth: usize) {
         let len = self.stack.len();

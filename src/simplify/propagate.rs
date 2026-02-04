@@ -315,6 +315,7 @@ fn can_propagate_into(
         | Stmt::AdvStore(_)
         | Stmt::LocalLoad(_)
         | Stmt::LocalStore(_)
+        | Stmt::LocalStoreW(_)
         | Stmt::Call(_)
         | Stmt::Exec(_)
         | Stmt::SysCall(_)
@@ -385,6 +386,7 @@ fn is_propagation_barrier(stmt: &Stmt, var_index: &VarKey, used_vars: &HashSet<V
         | Stmt::AdvStore(_)
         | Stmt::LocalLoad(_)
         | Stmt::LocalStore(_)
+        | Stmt::LocalStoreW(_)
         | Stmt::Call(_)
         | Stmt::Exec(_)
         | Stmt::SysCall(_)
@@ -478,6 +480,15 @@ fn substitute_in_expr(expr: &mut Expr, var_key: &VarKey, with: &Expr) {
         }
         Expr::Unary(_, a) => {
             substitute_in_expr(a, var_key, with);
+        }
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            substitute_in_expr(cond, var_key, with);
+            substitute_in_expr(then_expr, var_key, with);
+            substitute_in_expr(else_expr, var_key, with);
         }
         Expr::True | Expr::False | Expr::Constant(_) => {}
     }
@@ -575,6 +586,15 @@ fn collect_expr_vars(expr: &Expr, vars: &mut Vec<VarKey>) {
             collect_expr_vars(b, vars);
         }
         Expr::Unary(_, a) => collect_expr_vars(a, vars),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            collect_expr_vars(cond, vars);
+            collect_expr_vars(then_expr, vars);
+            collect_expr_vars(else_expr, vars);
+        }
         Expr::True | Expr::False | Expr::Constant(_) => {}
     }
 }
@@ -586,6 +606,15 @@ fn count_var_in_expr(expr: &Expr, var_key: &VarKey) -> usize {
         Expr::Var(_) => 0,
         Expr::Binary(_, a, b) => count_var_in_expr(a, var_key) + count_var_in_expr(b, var_key),
         Expr::Unary(_, a) => count_var_in_expr(a, var_key),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            count_var_in_expr(cond, var_key)
+                + count_var_in_expr(then_expr, var_key)
+                + count_var_in_expr(else_expr, var_key)
+        }
         Expr::True | Expr::False | Expr::Constant(_) => 0,
     }
 }
@@ -596,6 +625,11 @@ fn expr_complexity(expr: &Expr) -> usize {
         Expr::True | Expr::False | Expr::Var(_) | Expr::Constant(_) => 1,
         Expr::Unary(_, a) => 1 + expr_complexity(a),
         Expr::Binary(_, a, b) => 1 + expr_complexity(a) + expr_complexity(b),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => 1 + expr_complexity(cond) + expr_complexity(then_expr) + expr_complexity(else_expr),
     }
 }
 
