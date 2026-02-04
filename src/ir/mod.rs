@@ -186,6 +186,16 @@ pub enum BinOp {
     Lte,
     Gt,
     Gte,
+    U32And,
+    U32Or,
+    U32Xor,
+    U32Lt,
+    U32Lte,
+    U32Gt,
+    U32Gte,
+    U32WrappingAdd,
+    U32WrappingSub,
+    U32WrappingMul,
 }
 
 /// Unary operators.
@@ -195,6 +205,14 @@ pub enum UnOp {
     Not,
     /// Arithmetic negation.
     Neg,
+    /// Count leading zeros in a 32-bit word.
+    U32Clz,
+    /// Count trailing zeros in a 32-bit word.
+    U32Ctz,
+    /// Count leading ones in a 32-bit word.
+    U32Clo,
+    /// Count trailing ones in a 32-bit word.
+    U32Cto,
 }
 
 /// Constant literal.

@@ -23,6 +23,9 @@ pub(super) fn lift_inst(
     if let Some(stmts) = lift_call_inst(inst, module_path, sigs, stack)? {
         return Ok(stmts);
     }
+    if let Some(stmts) = lift_u32_inst(inst, module_path, sigs, stack)? {
+        return Ok(stmts);
+    }
     if let Some(stmts) = lift_arith_inst(inst, stack)? {
         return Ok(stmts);
     }
@@ -100,6 +103,57 @@ fn lift_arith_inst(
         Instruction::Not => lift_unop(UnOp::Not, stack),
         Instruction::Neg => lift_unop(UnOp::Neg, stack),
         Instruction::Incr => lift_incr(stack),
+        _ => return Ok(None),
+    };
+    Ok(Some(vec![stmt]))
+}
+
+/// Lift u32 instructions.
+fn lift_u32_inst(
+    inst: &Instruction,
+    module_path: &str,
+    sigs: &SignatureMap,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Option<Vec<Stmt>>> {
+    let stmt = match inst {
+        Instruction::U32And => lift_binop(BinOp::U32And, stack),
+        Instruction::U32Or => lift_binop(BinOp::U32Or, stack),
+        Instruction::U32Xor => lift_binop(BinOp::U32Xor, stack),
+        Instruction::U32Lt => lift_binop(BinOp::U32Lt, stack),
+        Instruction::U32Lte => lift_binop(BinOp::U32Lte, stack),
+        Instruction::U32Gt => lift_binop(BinOp::U32Gt, stack),
+        Instruction::U32Gte => lift_binop(BinOp::U32Gte, stack),
+        Instruction::U32WrappingAdd => lift_binop(BinOp::U32WrappingAdd, stack),
+        Instruction::U32WrappingSub => lift_binop(BinOp::U32WrappingSub, stack),
+        Instruction::U32WrappingMul => lift_binop(BinOp::U32WrappingMul, stack),
+        Instruction::U32WrappingAddImm(imm) => lift_binop_u32_imm(BinOp::U32WrappingAdd, imm, stack),
+        Instruction::U32WrappingSubImm(imm) => lift_binop_u32_imm(BinOp::U32WrappingSub, imm, stack),
+        Instruction::U32WrappingMulImm(imm) => lift_binop_u32_imm(BinOp::U32WrappingMul, imm, stack),
+        Instruction::U32Clz => lift_unop(UnOp::U32Clz, stack),
+        Instruction::U32Ctz => lift_unop(UnOp::U32Ctz, stack),
+        Instruction::U32Clo => lift_unop(UnOp::U32Clo, stack),
+        Instruction::U32Cto => lift_unop(UnOp::U32Cto, stack),
+        Instruction::U32OverflowingAdd => {
+            return lift_u32_intrinsic(inst, "u32overflowing_add", module_path, sigs, stack);
+        }
+        Instruction::U32OverflowingAdd3 => {
+            return lift_u32_intrinsic(inst, "u32overflowing_add3", module_path, sigs, stack);
+        }
+        Instruction::U32OverflowingSub => {
+            return lift_u32_intrinsic(inst, "u32overflowing_sub", module_path, sigs, stack);
+        }
+        Instruction::U32OverflowingMul => {
+            return lift_u32_intrinsic(inst, "u32overflowing_mul", module_path, sigs, stack);
+        }
+        Instruction::U32OverflowingMadd => {
+            return lift_u32_intrinsic(inst, "u32overflowing_madd", module_path, sigs, stack);
+        }
+        Instruction::U32Assert2 => {
+            return Ok(Some(vec![lift_u32_assert2("u32assert2", stack)]));
+        }
+        Instruction::U32Assert2WithError(err) => {
+            return Ok(Some(vec![lift_u32_assert2(&format!("u32assert2.{err}"), stack)]));
+        }
         _ => return Ok(None),
     };
     Ok(Some(vec![stmt]))
@@ -317,6 +371,33 @@ fn lift_stack_inst(
         Instruction::Nop | Instruction::Debug(_) => Ok(Some(Vec::new())),
         _ => Ok(None),
     }
+}
+
+fn lift_u32_intrinsic(
+    inst: &Instruction,
+    name: &str,
+    module_path: &str,
+    sigs: &SignatureMap,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Option<Vec<Stmt>>> {
+    let effect = effect_for_inst(inst, module_path, sigs)?;
+    let (args, results) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+    Ok(Some(vec![Stmt::Intrinsic(Intrinsic {
+        name: name.to_string(),
+        args,
+        results,
+    })]))
+}
+
+fn lift_u32_assert2(name: &str, stack: &mut SymbolicStack) -> Stmt {
+    stack.ensure_depth(2);
+    let b = stack.peek(0).cloned().expect("u32assert2 stack");
+    let a = stack.peek(1).cloned().expect("u32assert2 stack");
+    Stmt::Intrinsic(Intrinsic {
+        name: name.to_string(),
+        args: vec![b, a],
+        results: Vec::new(),
+    })
 }
 
 /// Lift memory load/store instructions.
@@ -574,6 +655,17 @@ fn lift_incr(stack: &mut SymbolicStack) -> Stmt {
             Box::new(Expr::Var(a)),
             Box::new(Expr::Constant(Constant::Felt(1))),
         ),
+    }
+}
+
+fn lift_binop_u32_imm(op: BinOp, imm: &ImmU32, stack: &mut SymbolicStack) -> Stmt {
+    stack.ensure_depth(1);
+    let a = stack.pop();
+    let dest = stack.push_fresh();
+    let rhs: Expr = imm.into();
+    Stmt::Assign {
+        dest,
+        expr: Expr::Binary(op, Box::new(Expr::Var(a)), Box::new(rhs)),
     }
 }
 
