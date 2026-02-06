@@ -3,8 +3,8 @@
 //! This module provides a symbolic stack that tracks variables during lifting,
 //! modeled after the provenance stack used in signature inference.
 
-use std::cell::Cell;
-use std::collections::VecDeque;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use crate::ir::{ValueId, Var, VarBase};
@@ -37,6 +37,74 @@ impl Default for ValueIdGen {
     }
 }
 
+/// Unique identifier for a stack slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SlotId(u64);
+
+impl SlotId {
+    /// Create a new slot identifier from a raw integer.
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Return the raw integer value of this slot identifier.
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+/// Generator for unique stack slot identifiers.
+#[derive(Debug, Clone)]
+pub struct SlotIdGen {
+    next: Rc<Cell<u64>>,
+}
+
+impl SlotIdGen {
+    /// Create a new slot identifier generator.
+    pub fn new() -> Self {
+        Self {
+            next: Rc::new(Cell::new(0)),
+        }
+    }
+
+    /// Allocate the next unique slot identifier.
+    pub fn next(&self) -> SlotId {
+        let current = self.next.get();
+        self.next.set(current + 1);
+        SlotId::new(current)
+    }
+
+    /// Ensure the next slot identifier is at least the provided value.
+    pub fn ensure_next_at_least(&self, next: u64) {
+        let current = self.next.get();
+        if current < next {
+            self.next.set(next);
+        }
+    }
+}
+
+impl Default for SlotIdGen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Stack entry pairing a variable with its slot identity.
+#[derive(Debug, Clone)]
+pub struct StackEntry {
+    /// Variable stored at this stack position.
+    pub var: Var,
+    /// Slot identifier tracking the position across iterations.
+    pub slot_id: SlotId,
+}
+
+impl StackEntry {
+    /// Create a new stack entry.
+    pub const fn new(var: Var, slot_id: SlotId) -> Self {
+        Self { var, slot_id }
+    }
+}
+
 /// Symbolic stack tracking variables during lifting.
 ///
 /// The stack grows to the right (back). Variables are created with their
@@ -44,9 +112,13 @@ impl Default for ValueIdGen {
 #[derive(Debug, Clone, Default)]
 pub struct SymbolicStack {
     /// Stack contents, bottom to top.
-    stack: VecDeque<Var>,
+    stack: VecDeque<StackEntry>,
     /// Shared generator for unique SSA value identifiers.
     ids: ValueIdGen,
+    /// Shared generator for unique slot identifiers.
+    slots: SlotIdGen,
+    /// Mapping from value identifiers to their slot identifiers.
+    value_slots: Rc<RefCell<HashMap<ValueId, SlotId>>>,
 }
 
 impl SymbolicStack {
@@ -55,6 +127,8 @@ impl SymbolicStack {
         Self {
             stack: VecDeque::new(),
             ids: ValueIdGen::new(),
+            slots: SlotIdGen::new(),
+            value_slots: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -73,7 +147,8 @@ impl SymbolicStack {
     /// The variable's stack_depth should be set to the current stack depth
     /// before pushing (i.e., the depth at which it is born).
     pub fn push(&mut self, var: Var) {
-        self.stack.push_back(var);
+        let slot_id = self.slots.next();
+        self.push_with_slot(var, slot_id);
     }
 
     /// Create a fresh variable at the given depth.
@@ -85,7 +160,23 @@ impl SymbolicStack {
     pub fn push_fresh(&mut self) -> Var {
         let depth = self.stack.len();
         let var = self.fresh_var(depth);
-        self.stack.push_back(var.clone());
+        let slot_id = self.slots.next();
+        self.register_value_slot(&var, slot_id);
+        self.stack.push_back(StackEntry::new(var.clone(), slot_id));
+        var
+    }
+
+    /// Create and push a fresh variable reusing the provided slot identifier.
+    ///
+    /// The new variable inherits the template's subscript to preserve slot identity.
+    pub fn push_fresh_with_slot_like(&mut self, slot_id: SlotId, template: &Var) -> Var {
+        let var = Var {
+            base: VarBase::Value(self.ids.next()),
+            stack_depth: template.stack_depth,
+            subscript: template.subscript.clone(),
+        };
+        self.register_value_slot(&var, slot_id);
+        self.stack.push_back(StackEntry::new(var.clone(), slot_id));
         var
     }
 
@@ -98,13 +189,48 @@ impl SymbolicStack {
         }
     }
 
+    /// Push an existing variable using an explicit slot identifier.
+    pub fn push_with_slot(&mut self, var: Var, slot_id: SlotId) {
+        self.register_value_slot(&var, slot_id);
+        self.stack.push_back(StackEntry::new(var, slot_id));
+    }
+
     /// Replace the entire stack with the provided variables.
     pub fn set_stack(&mut self, vars: Vec<Var>) {
-        self.stack = vars.into();
+        let mut new_stack = VecDeque::with_capacity(vars.len());
+        for (idx, var) in vars.into_iter().enumerate() {
+            let slot_id = self
+                .stack
+                .get(idx)
+                .map(|entry| entry.slot_id)
+                .unwrap_or_else(|| self.slots.next());
+            self.register_value_slot(&var, slot_id);
+            new_stack.push_back(StackEntry::new(var, slot_id));
+        }
+        self.stack = new_stack;
+    }
+
+    /// Replace the entire stack with the provided entries (including slot ids).
+    pub fn set_entries(&mut self, entries: VecDeque<StackEntry>) {
+        let mut max_slot: Option<u64> = None;
+        for entry in &entries {
+            self.register_value_slot(&entry.var, entry.slot_id);
+            let slot_value = entry.slot_id.as_u64();
+            max_slot = Some(max_slot.map_or(slot_value, |current| current.max(slot_value)));
+        }
+        if let Some(max_slot) = max_slot {
+            self.slots.ensure_next_at_least(max_slot + 1);
+        }
+        self.stack = entries;
     }
 
     /// Return a snapshot of the current stack as a vector from bottom to top.
     pub fn to_vec(&self) -> Vec<Var> {
+        self.stack.iter().map(|entry| entry.var.clone()).collect()
+    }
+
+    /// Return a snapshot of the current stack entries from bottom to top.
+    pub fn to_entries(&self) -> Vec<StackEntry> {
         self.stack.iter().cloned().collect()
     }
 
@@ -114,6 +240,15 @@ impl SymbolicStack {
     ///
     /// Panics if the stack is empty.
     pub fn pop(&mut self) -> Var {
+        self.pop_entry().var
+    }
+
+    /// Pop a stack entry from the top of the stack.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the stack is empty.
+    pub fn pop_entry(&mut self) -> StackEntry {
         self.stack.pop_back().expect("stack underflow")
     }
 
@@ -127,8 +262,28 @@ impl SymbolicStack {
         result
     }
 
+    /// Pop multiple entries from the stack, returning them in pop order
+    /// (top of stack first).
+    pub fn pop_n_entries(&mut self, n: usize) -> Vec<StackEntry> {
+        let mut result = Vec::with_capacity(n);
+        for _ in 0..n {
+            result.push(self.pop_entry());
+        }
+        result
+    }
+
     /// Peek at the variable at the given depth from the top (0 = top).
     pub fn peek(&self, depth: usize) -> Option<&Var> {
+        if depth >= self.stack.len() {
+            return None;
+        }
+        self.stack
+            .get(self.stack.len() - 1 - depth)
+            .map(|entry| &entry.var)
+    }
+
+    /// Peek at the stack entry at the given depth from the top (0 = top).
+    pub fn peek_entry(&self, depth: usize) -> Option<&StackEntry> {
         if depth >= self.stack.len() {
             return None;
         }
@@ -139,9 +294,19 @@ impl SymbolicStack {
     pub fn top_n(&self, n: usize) -> Vec<Var> {
         let len = self.stack.len();
         if n > len {
-            return self.stack.iter().rev().cloned().collect();
+            return self.stack.iter().rev().map(|e| e.var.clone()).collect();
         }
-        self.stack.iter().skip(len - n).rev().cloned().collect()
+        self.stack
+            .iter()
+            .skip(len - n)
+            .rev()
+            .map(|entry| entry.var.clone())
+            .collect()
+    }
+
+    /// Return a copy of the value-to-slot map.
+    pub fn value_slots(&self) -> HashMap<ValueId, SlotId> {
+        self.value_slots.borrow().clone()
     }
 
     /// Ensure the stack has at least the given depth by pushing input variables.
@@ -156,7 +321,9 @@ impl SymbolicStack {
             // v_0 is at the bottom (first input), v_n is at the top (last input).
             let depth = self.stack.len();
             let var = self.fresh_var(depth);
-            self.stack.push_back(var.clone());
+            let slot_id = self.slots.next();
+            self.register_value_slot(&var, slot_id);
+            self.stack.push_back(StackEntry::new(var.clone(), slot_id));
             inputs.push(var);
         }
         inputs
@@ -175,27 +342,34 @@ impl SymbolicStack {
         self.ensure_depth(required_depth);
 
         // Pop values (top of stack first).
-        let popped = self.pop_n(pops);
+        let popped_entries = self.pop_n_entries(pops);
+        let popped = popped_entries
+            .iter()
+            .map(|entry| entry.var.clone())
+            .collect::<Vec<_>>();
+        let reuse_slots = popped_entries
+            .iter()
+            .rev()
+            .map(|entry| entry.slot_id)
+            .collect::<Vec<_>>();
 
         // Push new variables with their birth depth.
         let mut pushed = Vec::with_capacity(pushes);
-        for _ in 0..pushes {
+        let reuse_count = reuse_slots.len().min(pushes);
+        for idx in 0..pushes {
             let depth = self.stack.len();
             let var = self.fresh_var(depth);
-            self.stack.push_back(var.clone());
+            let slot_id = if idx < reuse_count {
+                reuse_slots[idx]
+            } else {
+                self.slots.next()
+            };
+            self.register_value_slot(&var, slot_id);
+            self.stack.push_back(StackEntry::new(var.clone(), slot_id));
             pushed.push(var);
         }
 
         (popped, pushed)
-    }
-
-    /// Duplicate the variable at the given depth from top onto the top.
-    pub fn dup(&mut self, depth: usize) {
-        if let Some(var) = self.peek(depth).cloned() {
-            // Duplication creates a reference to the same variable,
-            // not a new variable.
-            self.stack.push_back(var);
-        }
     }
 
     /// Swap the top element with the element at the given depth.
@@ -242,8 +416,8 @@ impl SymbolicStack {
         let len = self.stack.len();
         if depth > 0 && depth < len {
             let idx = len - 1 - depth;
-            if let Some(var) = self.stack.remove(idx) {
-                self.stack.push_back(var);
+            if let Some(entry) = self.stack.remove(idx) {
+                self.stack.push_back(entry);
             }
         }
     }
@@ -252,16 +426,28 @@ impl SymbolicStack {
     pub fn movdn(&mut self, depth: usize) {
         let len = self.stack.len();
         if depth > 0 && depth < len {
-            if let Some(var) = self.stack.pop_back() {
+            if let Some(entry) = self.stack.pop_back() {
                 let idx = len - 1 - depth;
-                self.stack.insert(idx, var);
+                self.stack.insert(idx, entry);
             }
         }
     }
 
     /// Get an iterator over the stack from bottom to top.
     pub fn iter(&self) -> impl Iterator<Item = &Var> {
-        self.stack.iter()
+        self.stack.iter().map(|entry| &entry.var)
+    }
+
+    /// Record the slot identifier for a newly created value.
+    fn register_value_slot(&mut self, var: &Var, slot_id: SlotId) {
+        if let VarBase::Value(id) = var.base {
+            self.value_slots.borrow_mut().insert(id, slot_id);
+        }
+    }
+
+    /// Associate an existing variable with a slot identifier.
+    pub fn register_value_slot_for_var(&mut self, var: &Var, slot_id: SlotId) {
+        self.register_value_slot(var, slot_id);
     }
 }
 
@@ -311,17 +497,6 @@ mod tests {
     }
 
     #[test]
-    fn test_dup() {
-        let mut stack = SymbolicStack::new();
-        stack.push(Var::new(ValueId::from(0), 0));
-        stack.push(Var::new(ValueId::from(1), 1));
-        stack.dup(1); // Duplicate the element at depth 1 (second from top).
-        assert_eq!(stack.len(), 3);
-        let top = stack.pop();
-        assert_eq!(top.stack_depth, 0); // Same variable as the one at depth 1.
-    }
-
-    #[test]
     fn test_swap() {
         let mut stack = SymbolicStack::new();
         stack.push(Var::new(ValueId::from(0), 0));
@@ -331,10 +506,42 @@ mod tests {
         assert_eq!(stack.peek(1).unwrap().stack_depth, 1);
     }
 
+    #[test]
+    fn slot_ids_follow_stack_permutations() {
+        let mut stack = SymbolicStack::new();
+        stack.push(Var::new(ValueId::from(0), 0));
+        stack.push(Var::new(ValueId::from(1), 1));
+
+        let before = stack.to_entries();
+        let bottom_slot = before[0].slot_id;
+        let top_slot = before[1].slot_id;
+
+        stack.swap(1);
+        let after = stack.to_entries();
+        assert_eq!(after[0].slot_id, top_slot);
+        assert_eq!(after[1].slot_id, bottom_slot);
+    }
+
     proptest! {
         #[test]
         fn value_id_gen_is_unique(count_a in 0u8..32, count_b in 0u8..32) {
             let id_gen = ValueIdGen::new();
+            let id_clone = id_gen.clone();
+            let mut ids = HashSet::new();
+
+            for _ in 0..count_a {
+                ids.insert(id_gen.next());
+            }
+            for _ in 0..count_b {
+                ids.insert(id_clone.next());
+            }
+
+            prop_assert_eq!(ids.len(), (count_a as usize) + (count_b as usize));
+        }
+
+        #[test]
+        fn slot_id_gen_is_unique(count_a in 0u8..32, count_b in 0u8..32) {
+            let id_gen = SlotIdGen::new();
             let id_clone = id_gen.clone();
             let mut ids = HashSet::new();
 

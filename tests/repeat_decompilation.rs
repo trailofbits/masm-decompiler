@@ -2,10 +2,11 @@
 
 mod common;
 
-use common::{decompile, decompile_no_propagation};
+use common::{decompile, decompile_no_optimizations, decompile_no_propagation};
 use masm_decompiler::fmt::{CodeWriter, FormattingConfig};
 use masm_decompiler::frontend::testing::workspace_from_modules;
-use masm_decompiler::ir::{Expr, IndexExpr, Stmt, Var};
+use masm_decompiler::ir::{BinOp, Expr, IndexExpr, Stmt, ValueId, Var};
+use std::collections::HashSet;
 
 /// Helper to format decompiled output as a string for debugging (without colors).
 fn format_output(stmts: &[Stmt]) -> String {
@@ -62,6 +63,19 @@ fn subscript_has_loop_var(expr: &IndexExpr) -> bool {
     }
 }
 
+/// Extract the constant base from a subscript expression, if present.
+fn subscript_base(expr: &IndexExpr) -> Option<i64> {
+    match expr {
+        IndexExpr::Const(value) => Some(*value),
+        IndexExpr::Add(lhs, rhs) => match (&**lhs, &**rhs) {
+            (IndexExpr::Const(value), _) => Some(*value),
+            (_, IndexExpr::Const(value)) => Some(*value),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Check if any variable has a negative constant subscript.
 fn has_negative_subscript(stmts: &[Stmt]) -> bool {
     fn check_stmt(stmt: &Stmt) -> bool {
@@ -81,6 +95,165 @@ fn has_negative_subscript(stmts: &[Stmt]) -> bool {
     stmts.iter().any(check_stmt)
 }
 
+/// Collect all used and defined value identifiers in structured statements.
+fn collect_used_defined_ids(stmts: &[Stmt]) -> (HashSet<ValueId>, HashSet<ValueId>) {
+    let mut used = HashSet::new();
+    let mut defined = HashSet::new();
+    for stmt in stmts {
+        collect_stmt_ids(stmt, &mut used, &mut defined);
+    }
+    (used, defined)
+}
+
+/// Record the value identifier for a variable if it is value-based.
+fn record_var_id(var: &Var, ids: &mut HashSet<ValueId>) {
+    if let Some(id) = var.base.value_id() {
+        ids.insert(id);
+    }
+}
+
+/// Collect used and defined value identifiers from a statement.
+fn collect_stmt_ids(stmt: &Stmt, used: &mut HashSet<ValueId>, defined: &mut HashSet<ValueId>) {
+    match stmt {
+        Stmt::Assign { dest, expr } => {
+            record_var_id(dest, defined);
+            collect_expr_ids(expr, used);
+        }
+        Stmt::MemLoad(load) => {
+            for v in &load.address {
+                record_var_id(v, used);
+            }
+            for v in &load.outputs {
+                record_var_id(v, defined);
+            }
+        }
+        Stmt::MemStore(store) => {
+            for v in &store.address {
+                record_var_id(v, used);
+            }
+            for v in &store.values {
+                record_var_id(v, used);
+            }
+        }
+        Stmt::AdvLoad(load) => {
+            for v in &load.outputs {
+                record_var_id(v, defined);
+            }
+        }
+        Stmt::AdvStore(store) => {
+            for v in &store.values {
+                record_var_id(v, used);
+            }
+        }
+        Stmt::LocalLoad(load) => {
+            for v in &load.outputs {
+                record_var_id(v, defined);
+            }
+        }
+        Stmt::LocalStore(store) => {
+            for v in &store.values {
+                record_var_id(v, used);
+            }
+        }
+        Stmt::LocalStoreW(store) => {
+            for v in &store.values {
+                record_var_id(v, used);
+            }
+        }
+        Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+            for v in &call.args {
+                record_var_id(v, used);
+            }
+            for v in &call.results {
+                record_var_id(v, defined);
+            }
+        }
+        Stmt::DynCall { args, results } => {
+            for v in args {
+                record_var_id(v, used);
+            }
+            for v in results {
+                record_var_id(v, defined);
+            }
+        }
+        Stmt::Intrinsic(intrinsic) => {
+            for v in &intrinsic.args {
+                record_var_id(v, used);
+            }
+            for v in &intrinsic.results {
+                record_var_id(v, defined);
+            }
+        }
+        Stmt::Repeat { body, phis, .. } => {
+            for phi in phis {
+                record_var_id(&phi.dest, defined);
+                record_var_id(&phi.init, used);
+                record_var_id(&phi.step, used);
+            }
+            for stmt in body {
+                collect_stmt_ids(stmt, used, defined);
+            }
+        }
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+            phis,
+        } => {
+            collect_expr_ids(cond, used);
+            for phi in phis {
+                record_var_id(&phi.dest, defined);
+                record_var_id(&phi.then_var, used);
+                record_var_id(&phi.else_var, used);
+            }
+            for stmt in then_body {
+                collect_stmt_ids(stmt, used, defined);
+            }
+            for stmt in else_body {
+                collect_stmt_ids(stmt, used, defined);
+            }
+        }
+        Stmt::While { cond, body, phis } => {
+            collect_expr_ids(cond, used);
+            for phi in phis {
+                record_var_id(&phi.dest, defined);
+                record_var_id(&phi.init, used);
+                record_var_id(&phi.step, used);
+            }
+            for stmt in body {
+                collect_stmt_ids(stmt, used, defined);
+            }
+        }
+        Stmt::Return(vars) => {
+            for v in vars {
+                record_var_id(v, used);
+            }
+        }
+    }
+}
+
+/// Collect used value identifiers from an expression.
+fn collect_expr_ids(expr: &Expr, used: &mut HashSet<ValueId>) {
+    match expr {
+        Expr::Var(v) => record_var_id(v, used),
+        Expr::Binary(_, lhs, rhs) => {
+            collect_expr_ids(lhs, used);
+            collect_expr_ids(rhs, used);
+        }
+        Expr::Unary(_, inner) => collect_expr_ids(inner, used),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            collect_expr_ids(cond, used);
+            collect_expr_ids(then_expr, used);
+            collect_expr_ids(else_expr, used);
+        }
+        Expr::True | Expr::False | Expr::Constant(_) => {}
+    }
+}
+
 /// Consuming repeat loop: `repeat.4 { add }`
 ///
 /// Initial stack: `[v_0, v_1, v_2, v_3, v_4]` (5 inputs)
@@ -88,12 +261,12 @@ fn has_negative_subscript(stmts: &[Stmt]) -> bool {
 /// Expected output:
 /// ```text
 /// for i in 0..4 {
-///   v_(3 - i) = v_(4 - i) + v_(3 - i);
+///   v_3 = v_3 + v_(4 - i);
 /// }
 /// return v_0;
 /// ```
 ///
-/// The key property: destination is `v_(3-i)`, not `v_(4-i)`.
+/// The key property: the accumulator stays in the `v_3` slot.
 ///
 /// Stack trace at iteration i:
 /// - Depth before add: 5 - i
@@ -116,27 +289,19 @@ fn consuming_repeat_destination_subscript() {
     let output = format_output(&structured);
     eprintln!("Actual output:\n{}", output);
 
-    // The destination subscript should be (3 - i)
+    // The destination subscript should be constant (the accumulator slot).
     let dest_sub = loop_dest_subscript(&structured);
     match dest_sub {
-        Some(IndexExpr::Add(base, _offset)) => {
-            // Expected: base = 3, offset = -1 * loop_var
-            if let IndexExpr::Const(base_val) = *base {
-                assert_eq!(
-                    base_val, 3,
-                    "destination subscript base should be 3, got {}. Full output:\n{}",
-                    base_val, output
-                );
-            } else {
-                panic!(
-                    "expected constant base in destination subscript, got {:?}. Full output:\n{}",
-                    base, output
-                );
-            }
+        Some(IndexExpr::Const(base_val)) => {
+            assert_eq!(
+                base_val, 3,
+                "destination subscript base should be 3, got {}. Full output:\n{}",
+                base_val, output
+            );
         }
         other => {
             panic!(
-                "expected Add subscript for loop destination, got {:?}. Full output:\n{}",
+                "expected constant subscript for loop destination, got {:?}. Full output:\n{}",
                 other, output
             );
         }
@@ -149,8 +314,8 @@ fn consuming_repeat_destination_subscript() {
 /// 1. Expression propagation does NOT inline constants into the repeat loop body
 /// 2. DCE keeps all pre-loop assignments alive (they feed into the consuming loop)
 ///
-/// The loop body should use symbolic subscripts like `v_(3 - i) = v_(4 - i) + v_(3 - i)`
-/// rather than constant values.
+/// The loop body should keep the accumulator in a fixed slot and index the
+/// consumed input with the loop counter (e.g., `v_3 = v_3 + v_(4 - i)`).
 ///
 /// Expected output:
 /// ```text
@@ -159,7 +324,7 @@ fn consuming_repeat_destination_subscript() {
 /// v_3 = 3;
 /// v_4 = 4;
 /// for i in 0..4 {
-///   v_(3 - i) = v_(4 - i) + v_(3 - i);
+///   v_3 = v_3 + v_(4 - i);
 /// }
 /// v_1 = 5;
 /// v_0 = v_0 - 5;
@@ -192,22 +357,19 @@ fn consuming_repeat_with_pre_loop_pushes() {
         output
     );
 
-    // Check 2: Loop destination should be (3 - i) - this is the key fix!
-    // Previously, constants were propagated into the loop, causing incorrect output.
+    // Check 2: Loop destination should stay in the accumulator slot.
     let dest_sub = loop_dest_subscript(&structured);
     match dest_sub {
-        Some(IndexExpr::Add(base, _)) => {
-            if let IndexExpr::Const(base_val) = *base {
-                assert_eq!(
-                    base_val, 3,
-                    "destination subscript base should be 3, got {}. Full output:\n{}",
-                    base_val, output
-                );
-            }
+        Some(IndexExpr::Const(base_val)) => {
+            assert_eq!(
+                base_val, 3,
+                "destination subscript base should be 3, got {}. Full output:\n{}",
+                base_val, output
+            );
         }
         other => {
             panic!(
-                "expected Add subscript for loop destination, got {:?}. Full output:\n{}",
+                "expected constant subscript for loop destination, got {:?}. Full output:\n{}",
                 other, output
             );
         }
@@ -259,16 +421,14 @@ fn verify_correct_behavior_consuming_repeat_0() {
 
     eprintln!("Output for consuming_repeat_0:\n{}", output);
 
-    // The destination subscript should now be (3 - i), which is correct
+    // The destination subscript should stay in the accumulator slot.
     let dest_sub = loop_dest_subscript(&structured);
-    if let Some(IndexExpr::Add(base, _)) = dest_sub {
-        if let IndexExpr::Const(base_val) = *base {
-            assert_eq!(
-                base_val, 3,
-                "destination subscript base should be 3, got {}",
-                base_val
-            );
-        }
+    if let Some(IndexExpr::Const(base_val)) = dest_sub {
+        assert_eq!(
+            base_val, 3,
+            "destination subscript base should be 3, got {}",
+            base_val
+        );
     }
 
     // Return should be v_0 (final result at position 0)
@@ -311,12 +471,11 @@ fn verify_correct_behavior_consuming_repeat_1() {
         output
     );
 
-    // The loop body should use symbolic subscripts, not inlined constants.
-    // Check that the loop destination subscript is (3 - i).
+    // The loop body should keep the accumulator in a fixed slot.
     let dest_sub = loop_dest_subscript(&structured);
     assert!(
-        matches!(dest_sub, Some(IndexExpr::Add(..))),
-        "loop destination should have symbolic subscript (3 - i), got {:?}. Output:\n{}",
+        matches!(dest_sub, Some(IndexExpr::Const(3))),
+        "loop destination should stay in v_3, got {:?}. Output:\n{}",
         dest_sub,
         output
     );
@@ -468,7 +627,7 @@ fn consuming_repeat_symbolic_inputs() {
 
     // The output should have proper symbolic loop body:
     // for i in 0..4 {
-    //   v_(3 - i) = v_(4 - i) + v_(3 - i);
+    //   v_3 = v_3 + v_(4 - i);
     // }
     // return v_0;
 
@@ -501,6 +660,153 @@ fn consuming_repeat_symbolic_inputs() {
     assert!(
         output.contains("return v_0"),
         "return should be v_0, got: {}",
+        output
+    );
+}
+
+/// Consuming repeat loop with a loop-carried accumulator after `eq.0`.
+///
+/// The `and` operation must combine the accumulator (dest base) with the
+/// freshly computed `eq.0` result (dest base + 1). The current analysis
+/// incorrectly uses the consumed input instead of the accumulator.
+#[test]
+fn consuming_repeat_eqz_uses_accumulator_operand() {
+    let ws = workspace_from_modules(&[("repeat", include_str!("fixtures/repeat.masm"))]);
+
+    let structured = decompile_no_propagation(&ws, "repeat::consuming_repeat_eqz", "repeat");
+    let output = format_output(&structured);
+    eprintln!("Output for consuming_repeat_eqz:\n{}", output);
+
+    let mut found = None;
+    for stmt in &structured {
+        if let Stmt::Repeat { body, .. } = stmt {
+            for inner in body {
+                if let Stmt::Assign { dest, expr } = inner {
+                    if let Expr::Binary(BinOp::And, lhs, rhs) = expr {
+                        let dest_base = subscript_base(&dest.subscript);
+                        let lhs_base = match &**lhs {
+                            Expr::Var(v) => subscript_base(&v.subscript),
+                            _ => None,
+                        };
+                        let rhs_base = match &**rhs {
+                            Expr::Var(v) => subscript_base(&v.subscript),
+                            _ => None,
+                        };
+                        found = Some((dest_base, lhs_base, rhs_base));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let (dest_base, lhs_base, rhs_base) =
+        found.expect("expected an `and` assignment in the repeat body");
+    let dest_base = dest_base.expect("expected constant base in dest subscript");
+    let lhs_base = lhs_base.expect("expected constant base in lhs subscript");
+    let rhs_base = rhs_base.expect("expected constant base in rhs subscript");
+
+    let mut bases = [lhs_base, rhs_base];
+    bases.sort();
+    let expected = [dest_base - 1, dest_base];
+    assert_eq!(
+        bases, expected,
+        "and operands should use accumulator (base {}) and consumed eq result (base {}). Output:\n{}",
+        dest_base,
+        dest_base + 1,
+        output
+    );
+}
+
+/// Producing repeat loop that swaps a pushed value with the entry value.
+///
+/// This permutation moves the entry value into the produced region, which
+/// the current loop analysis cannot represent correctly. The decompiler
+/// should reject this pattern rather than misrepresent it.
+#[test]
+fn producing_repeat_swap_entry_has_no_phis() {
+    let ws = workspace_from_modules(&[("repeat", include_str!("fixtures/repeat.masm"))]);
+
+    let structured = decompile_no_optimizations(&ws, "repeat::producing_repeat_swap_entry");
+    let output = format_output(&structured);
+    eprintln!("Output for producing_repeat_swap_entry:\n{}", output);
+
+    let mut saw_repeat = false;
+    for stmt in &structured {
+        if let Stmt::Repeat { phis, .. } = stmt {
+            saw_repeat = true;
+            assert!(
+                phis.is_empty(),
+                "producing swap-only loop should not create repeat phis. Output:\n{}",
+                output
+            );
+        }
+    }
+    assert!(saw_repeat, "expected repeat loop in output");
+}
+
+/// Producing repeat loop should index each pushed value by the loop counter.
+#[test]
+fn producing_repeat_1_indexes_loop_outputs() {
+    let ws = workspace_from_modules(&[("repeat", include_str!("fixtures/repeat.masm"))]);
+
+    let structured = decompile_no_propagation(&ws, "repeat::producing_repeat_1", "repeat");
+    let output = format_output(&structured);
+    eprintln!("Output for producing_repeat_1:\n{}", output);
+
+    let mut dest_subscript = None;
+    for stmt in &structured {
+        if let Stmt::Repeat { body, .. } = stmt {
+            for inner in body {
+                if let Stmt::Assign { dest, .. } = inner {
+                    dest_subscript = Some(dest.subscript.clone());
+                    break;
+                }
+            }
+        }
+    }
+
+    let dest_subscript = dest_subscript.expect("expected assignment in repeat body");
+    assert!(
+        subscript_has_loop_var(&dest_subscript),
+        "producing repeat outputs should be indexed by loop counter. Output:\n{}",
+        output
+    );
+}
+
+/// U256 eqz should return a value defined in the loop, not an input.
+#[test]
+fn u256_eqz_returns_non_input_value() {
+    let ws = workspace_from_modules(&[("u256", include_str!("fixtures/u256.masm"))]);
+
+    let structured = decompile_no_propagation(&ws, "u256::eqz", "u256");
+    let output = format_output(&structured);
+    eprintln!("Output for u256::eqz:\n{}", output);
+
+    let (used, defined) = collect_used_defined_ids(&structured);
+    let input_ids: HashSet<ValueId> = used.difference(&defined).cloned().collect();
+
+    let return_vars = structured
+        .iter()
+        .find_map(|stmt| match stmt {
+            Stmt::Return(vars) => Some(vars),
+            _ => None,
+        })
+        .expect("expected return statement");
+
+    assert_eq!(
+        return_vars.len(),
+        1,
+        "u256::eqz should return a single value. Output:\n{}",
+        output
+    );
+    let return_id = return_vars[0]
+        .base
+        .value_id()
+        .expect("expected return to be a value id");
+    assert!(
+        !input_ids.contains(&return_id),
+        "u256::eqz should return a computed value, not an input. Output:\n{}",
         output
     );
 }

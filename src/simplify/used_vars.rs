@@ -467,6 +467,25 @@ fn analyze_loop_body(
     let (body_defs, body_uses) = collect_loop_defs_uses(body, loop_stack, path);
     let mut body_uses = body_uses;
     body_uses.extend(extra_uses.iter().cloned());
+    // Keep loop-indexed definitions live even if they are not explicitly used.
+    // This prevents producing loops (e.g., repeat { push }) from being eliminated
+    // when their outputs are only observable via loop indexing.
+    let mut defs_by_path: HashMap<StmtPath, Vec<ConcreteVar>> = HashMap::new();
+    for (def_path, def_var) in &body_defs {
+        defs_by_path
+            .entry(def_path.clone())
+            .or_default()
+            .push(def_var.clone());
+    }
+    for vars in defs_by_path.values() {
+        let mut subscripts = HashSet::new();
+        for var in vars {
+            subscripts.insert(var.subscript);
+        }
+        if subscripts.len() > 1 {
+            body_uses.extend(vars.iter().cloned());
+        }
+    }
 
     // Register all definition paths.
     for (def_path, _) in &body_defs {

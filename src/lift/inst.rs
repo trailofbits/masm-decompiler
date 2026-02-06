@@ -602,7 +602,8 @@ fn lift_push_inst(
 
 // Helper functions
 
-fn effect_for_inst(
+/// Compute the stack effect for an instruction, resolving call signatures when needed.
+pub(crate) fn effect_for_inst(
     inst: &Instruction,
     module_path: &str,
     sigs: &SignatureMap,
@@ -644,45 +645,45 @@ where
 
 fn lift_binop(op: BinOp, stack: &mut SymbolicStack) -> Stmt {
     stack.ensure_depth(2);
-    let b = stack.pop();
-    let a = stack.pop();
-    let dest = stack.push_fresh();
+    let b = stack.pop_entry();
+    let a = stack.pop_entry();
+    let dest = stack.push_fresh_with_slot_like(a.slot_id, &a.var);
     Stmt::Assign {
         dest,
-        expr: Expr::Binary(op, Box::new(Expr::Var(a)), Box::new(Expr::Var(b))),
+        expr: Expr::Binary(op, Box::new(Expr::Var(a.var)), Box::new(Expr::Var(b.var))),
     }
 }
 
 fn lift_binop_imm(op: BinOp, imm: &ImmFelt, stack: &mut SymbolicStack) -> Stmt {
     stack.ensure_depth(1);
-    let a = stack.pop();
-    let dest = stack.push_fresh();
+    let a = stack.pop_entry();
+    let dest = stack.push_fresh_with_slot_like(a.slot_id, &a.var);
     let rhs: Expr = imm.into();
     Stmt::Assign {
         dest,
-        expr: Expr::Binary(op, Box::new(Expr::Var(a)), Box::new(rhs)),
+        expr: Expr::Binary(op, Box::new(Expr::Var(a.var)), Box::new(rhs)),
     }
 }
 
 fn lift_unop(op: UnOp, stack: &mut SymbolicStack) -> Stmt {
     stack.ensure_depth(1);
-    let a = stack.pop();
-    let dest = stack.push_fresh();
+    let a = stack.pop_entry();
+    let dest = stack.push_fresh_with_slot_like(a.slot_id, &a.var);
     Stmt::Assign {
         dest,
-        expr: Expr::Unary(op, Box::new(Expr::Var(a))),
+        expr: Expr::Unary(op, Box::new(Expr::Var(a.var))),
     }
 }
 
 fn lift_incr(stack: &mut SymbolicStack) -> Stmt {
     stack.ensure_depth(1);
-    let a = stack.pop();
-    let dest = stack.push_fresh();
+    let a = stack.pop_entry();
+    let dest = stack.push_fresh_with_slot_like(a.slot_id, &a.var);
     Stmt::Assign {
         dest,
         expr: Expr::Binary(
             BinOp::Add,
-            Box::new(Expr::Var(a)),
+            Box::new(Expr::Var(a.var)),
             Box::new(Expr::Constant(Constant::Felt(1))),
         ),
     }
@@ -690,12 +691,12 @@ fn lift_incr(stack: &mut SymbolicStack) -> Stmt {
 
 fn lift_binop_u32_imm(op: BinOp, imm: &ImmU32, stack: &mut SymbolicStack) -> Stmt {
     stack.ensure_depth(1);
-    let a = stack.pop();
-    let dest = stack.push_fresh();
+    let a = stack.pop_entry();
+    let dest = stack.push_fresh_with_slot_like(a.slot_id, &a.var);
     let rhs: Expr = imm.into();
     Stmt::Assign {
         dest,
-        expr: Expr::Binary(op, Box::new(Expr::Var(a)), Box::new(rhs)),
+        expr: Expr::Binary(op, Box::new(Expr::Var(a.var)), Box::new(rhs)),
     }
 }
 
@@ -703,16 +704,16 @@ fn lift_binop_u32_imm(op: BinOp, imm: &ImmU32, stack: &mut SymbolicStack) -> Stm
 /// Lift the `cdrop` instruction into a ternary expression assignment.
 fn lift_cdrop(stack: &mut SymbolicStack) -> Stmt {
     stack.ensure_depth(3);
-    let cond = stack.pop();
-    let b = stack.pop();
-    let a = stack.pop();
-    let dest = stack.push_fresh();
+    let cond = stack.pop_entry();
+    let b = stack.pop_entry();
+    let a = stack.pop_entry();
+    let dest = stack.push_fresh_with_slot_like(a.slot_id, &a.var);
     Stmt::Assign {
         dest,
         expr: Expr::Ternary {
-            cond: Box::new(Expr::Var(cond)),
-            then_expr: Box::new(Expr::Var(b)),
-            else_expr: Box::new(Expr::Var(a)),
+            cond: Box::new(Expr::Var(cond.var)),
+            then_expr: Box::new(Expr::Var(b.var)),
+            else_expr: Box::new(Expr::Var(a.var)),
         },
     }
 }
@@ -720,27 +721,27 @@ fn lift_cdrop(stack: &mut SymbolicStack) -> Stmt {
 /// Lift the `cswap` instruction into two ternary expression assignments.
 fn lift_cswap(stack: &mut SymbolicStack) -> Vec<Stmt> {
     stack.ensure_depth(3);
-    let cond = stack.pop();
-    let b = stack.pop();
-    let a = stack.pop();
+    let cond = stack.pop_entry();
+    let b = stack.pop_entry();
+    let a = stack.pop_entry();
 
-    let d = stack.push_fresh();
-    let e = stack.push_fresh();
+    let d = stack.push_fresh_with_slot_like(a.slot_id, &a.var);
+    let e = stack.push_fresh_with_slot_like(b.slot_id, &b.var);
 
     let first = Stmt::Assign {
         dest: d.clone(),
         expr: Expr::Ternary {
-            cond: Box::new(Expr::Var(cond.clone())),
-            then_expr: Box::new(Expr::Var(b.clone())),
-            else_expr: Box::new(Expr::Var(a.clone())),
+            cond: Box::new(Expr::Var(cond.var.clone())),
+            then_expr: Box::new(Expr::Var(b.var.clone())),
+            else_expr: Box::new(Expr::Var(a.var.clone())),
         },
     };
     let second = Stmt::Assign {
         dest: e,
         expr: Expr::Ternary {
-            cond: Box::new(Expr::Var(cond)),
-            then_expr: Box::new(Expr::Var(a)),
-            else_expr: Box::new(Expr::Var(b)),
+            cond: Box::new(Expr::Var(cond.var)),
+            then_expr: Box::new(Expr::Var(a.var)),
+            else_expr: Box::new(Expr::Var(b.var)),
         },
     };
     vec![first, second]
@@ -749,12 +750,12 @@ fn lift_cswap(stack: &mut SymbolicStack) -> Vec<Stmt> {
 /// Lift the `u32split` instruction into an intrinsic assignment.
 fn lift_u32split(stack: &mut SymbolicStack) -> Stmt {
     stack.ensure_depth(1);
-    let a = stack.pop();
-    let lo = stack.push_fresh();
+    let a = stack.pop_entry();
+    let lo = stack.push_fresh_with_slot_like(a.slot_id, &a.var);
     let hi = stack.push_fresh();
     Stmt::Intrinsic(Intrinsic {
         name: "u32split".to_string(),
-        args: vec![a],
+        args: vec![a.var],
         results: vec![lo, hi],
     })
 }

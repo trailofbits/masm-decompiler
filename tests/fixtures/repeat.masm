@@ -41,3 +41,20 @@ pub proc nested_repeat_0
     end
   end
 end
+
+pub proc consuming_repeat_eqz
+  eq.0
+  repeat.2
+    swap
+    eq.0
+    and
+  end
+end
+
+pub proc producing_repeat_swap_entry
+  push.7
+  repeat.2
+    push.1
+    swap
+  end
+end
