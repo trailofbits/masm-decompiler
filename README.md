@@ -25,7 +25,7 @@ The following MASM procedure implements an equality check for two `u256` values.
 
 ```
 // Miden assembly implementation
-pub proc eqz(rhs: u256, lhs: u256) -> i1
+pub proc eqz
     eq.0
     repeat.7
         swap
