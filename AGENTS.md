@@ -8,6 +8,12 @@
 
 # Design Constraints
 
+The only thing the end user sees is the final textual output from the
+decompiler. If this does not 100% reflect the semantics of the corresponding
+assembly, it is worse than useless, as it may be misleading. _Always_ strive to
+ensure that the textual output accurately reflects the semantics of the
+procedure being decompiled.
+
 You must review the `ARCHITECTURE.md` file to understand the overall design and
 design constraints of the decompiler.
 
@@ -38,6 +44,21 @@ variant (e.g. `ProcSignature::Unknown`) rather than producing incorrect output.
 - Errors and `Unknown` results should be explicit and informative, and must
   indicate what pattern was unsupported and the location (typically an instruction
   span) where it occurred.
+
+# Testing
+
+- Tests fixtures are defined in `tests/fixtures` and test harnesses (e.g. for
+  property testing) are defined in `tests/common`.
+- Whenever the user provides an example MASM procedure that is handled
+  incorrectly by the decompilation pipeline, ensure that the example is recorded
+  in one of the files under `tests/fixtures`. If it is not there, add it to an
+  existing file, or create a new file and add it there. Then analyze the output
+  from the decompiler carefully to understand how the issue manifests itself.
+  Review the implementation carefully to understand why decompilation fails. Add a
+  targeted test that tests for the correct behavior. This test should initially
+  fail, because the underlying issue is not fixed yet. Finally, describe your
+  findings to the user, including the root cause and a suggestion for addressing
+  it.
 
 # Debugging
 
