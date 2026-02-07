@@ -7,14 +7,15 @@
 mod inst;
 mod stack;
 
+use log::trace;
 use miden_assembly_syntax::ast::{Block, Instruction, Op, Procedure};
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::ir::{Expr, IfPhi, IndexExpr, LoopPhi, LoopVar, Stmt, Var, VarBase, ValueId};
+use crate::ir::{Expr, IfPhi, IndexExpr, LoopPhi, LoopVar, Stmt, ValueId, Var, VarBase};
 use crate::signature::{ProcSignature, SignatureMap, StackEffect};
 
-use stack::{SlotId, StackEntry};
 pub use stack::SymbolicStack;
+use stack::{SlotId, StackEntry};
 
 /// Errors that can occur during lifting.
 #[derive(Debug)]
@@ -258,22 +259,19 @@ fn lift_repeat(
     let loop_depth = loop_var.loop_depth;
     let value_slots = stack.value_slots();
     let exit2_slots = if count > 1 {
-        Some(simulate_repeat_slots(body, &exit_entries, module_path, sigs)?)
+        Some(simulate_repeat_slots(
+            body,
+            &exit_entries,
+            module_path,
+            sigs,
+        )?)
     } else {
         None
     };
-    let slot_indices = compute_slot_indices(
-        &entry_entries,
-        &exit_entries,
-        exit2_slots.as_deref(),
-        count,
-    )?;
-    let produced_value_ids = collect_produced_value_ids(
-        &entry_entries,
-        &exit_entries,
-        &body_stmts,
-        &value_slots,
-    );
+    let slot_indices =
+        compute_slot_indices(&entry_entries, &exit_entries, exit2_slots.as_deref(), count)?;
+    let produced_value_ids =
+        collect_produced_value_ids(&entry_entries, &exit_entries, &body_stmts, &value_slots);
     let produced_stride = if delta > 0 { delta as i64 } else { 0 };
     let mut body_stmts = transform_loop_subscripts(
         body_stmts,
@@ -825,10 +823,7 @@ fn collect_produced_value_ids(
 ) -> HashSet<ValueId> {
     let entry_slots: HashSet<SlotId> = entry_entries.iter().map(|entry| entry.slot_id).collect();
     let exit_slots: HashSet<SlotId> = exit_entries.iter().map(|entry| entry.slot_id).collect();
-    let produced_slots: HashSet<SlotId> = exit_slots
-        .difference(&entry_slots)
-        .copied()
-        .collect();
+    let produced_slots: HashSet<SlotId> = exit_slots.difference(&entry_slots).copied().collect();
 
     let defined_ids = collect_defined_value_ids(body_stmts);
     defined_ids
@@ -982,7 +977,12 @@ fn compute_slot_indices(
             };
             slot_indices.insert(entry.slot_id, SlotIndex { delta });
         } else {
-            slot_indices.insert(entry.slot_id, SlotIndex { delta: -consumed_stride });
+            slot_indices.insert(
+                entry.slot_id,
+                SlotIndex {
+                    delta: -consumed_stride,
+                },
+            );
         }
     }
 
@@ -1068,6 +1068,26 @@ fn update_stack_after_repeat(
         return Ok(());
     }
 
+    let loop_carried_slots: HashSet<SlotId> = loop_carried_dests.keys().copied().collect();
+    let exit_slots = exit_entries
+        .iter()
+        .map(|entry| entry.slot_id.as_u64())
+        .collect::<Vec<_>>();
+    let mut carried = loop_carried_slots
+        .iter()
+        .map(|slot| slot.as_u64())
+        .collect::<Vec<_>>();
+    let mut produced = produced_slots
+        .iter()
+        .map(|slot| slot.as_u64())
+        .collect::<Vec<_>>();
+    carried.sort_unstable();
+    produced.sort_unstable();
+    trace!(
+        "starting repeat tag simulation: count={}, exit_slots={:?}, loop_carried={:?}, produced={:?}",
+        count, exit_slots, carried, produced
+    );
+
     let mut fresh_slots = HashSet::new();
     let mut slot_vars: HashMap<SlotId, Var> = exit_entries
         .iter()
@@ -1086,7 +1106,6 @@ fn update_stack_after_repeat(
         })
         .collect();
 
-    let loop_carried_slots: HashSet<SlotId> = loop_carried_dests.keys().copied().collect();
     let mut tagged_stack = TaggedSlotStack::new(
         &exit_entries
             .iter()
@@ -1096,8 +1115,18 @@ fn update_stack_after_repeat(
     );
     let mut known_slots: HashSet<SlotId> = slot_vars.keys().copied().collect();
 
-    for _ in 1..count {
+    for iter in 1..count {
+        trace!(
+            "state snapshot before repeat tag simulation iteration {}: {}",
+            iter,
+            tagged_stack.state_snapshot()
+        );
         simulate_block_tags(body, &mut tagged_stack, module_path, sigs)?;
+        trace!(
+            "state snapshot after repeat tag simulation iteration {}: {}",
+            iter,
+            tagged_stack.state_snapshot()
+        );
         for slot_id in tagged_stack.slots() {
             if !known_slots.contains(slot_id) {
                 let var = stack.fresh_var(0);
@@ -1139,6 +1168,11 @@ fn update_stack_after_repeat(
             final_entries.push_back(StackEntry::new(var, *slot_id));
         }
     }
+
+    trace!(
+        "final state snapshot after repeat tag simulation: {}",
+        tagged_stack.state_snapshot()
+    );
 
     stack.set_entries(final_entries);
     Ok(())
@@ -1421,6 +1455,24 @@ impl TaggedSlotStack {
         &self.slots
     }
 
+    /// Render the slot stack and tags for trace logging.
+    fn state_snapshot(&self) -> String {
+        let mut parts = Vec::with_capacity(self.slots.len());
+        for slot in &self.slots {
+            let mut tags = self
+                .tags
+                .get(slot)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|tag| tag.as_u64())
+                .collect::<Vec<_>>();
+            tags.sort_unstable();
+            parts.push(format!("{}:{:?}", slot.as_u64(), tags));
+        }
+        format!("[{}]", parts.join(", "))
+    }
+
     /// Return tags for a slot identifier.
     fn tags_for(&self, slot_id: &SlotId) -> HashSet<SlotId> {
         self.tags.get(slot_id).cloned().unwrap_or_default()
@@ -1506,6 +1558,7 @@ impl TaggedSlotStack {
 
     /// Apply a stack effect to the tagged slot stack.
     fn apply_effect(&mut self, pops: usize, pushes: usize, required_depth: usize) {
+        let before = self.state_snapshot();
         self.ensure_depth(required_depth);
         let mut popped = Vec::with_capacity(pops);
         let mut popped_tags = Vec::with_capacity(pops);
@@ -1530,6 +1583,14 @@ impl TaggedSlotStack {
             self.tags.entry(slot).or_default();
             self.slots.push(slot);
         }
+        trace!(
+            "repeat tag simulation effect: pops={}, pushes={}, requred_depth={}, before={}, after={}",
+            pops,
+            pushes,
+            required_depth,
+            before,
+            self.state_snapshot()
+        );
     }
 }
 
@@ -1540,9 +1601,17 @@ fn simulate_block_tags(
     module_path: &str,
     sigs: &SignatureMap,
 ) -> LiftingResult<()> {
+    trace!(
+        "starting repeat tag simulation for block: {}",
+        stack.state_snapshot()
+    );
     for op in block.iter() {
         simulate_op_tags(op, stack, module_path, sigs)?;
     }
+    trace!(
+        "finished repeat tag simulation for block: {}",
+        stack.state_snapshot()
+    );
     Ok(())
 }
 
@@ -1589,6 +1658,7 @@ fn simulate_inst_tags(
     module_path: &str,
     sigs: &SignatureMap,
 ) -> LiftingResult<()> {
+    let before = stack.state_snapshot();
     match inst {
         Instruction::Swap1 => stack.swap(1),
         Instruction::Swap2 => stack.swap(2),
@@ -1650,6 +1720,12 @@ fn simulate_inst_tags(
             stack.apply_effect(pops, pushes, required_depth);
         }
     }
+    trace!(
+        "finished repeat tag simulation for {}: before={}, after={}",
+        inst,
+        before,
+        stack.state_snapshot()
+    );
     Ok(())
 }
 
@@ -1763,14 +1839,22 @@ fn transform_expr_loop_input(
         ),
         Expr::Unary(op, inner) => Expr::Unary(
             op,
-            Box::new(transform_expr_loop_input(*inner, entry_value_ids, loop_depth)),
+            Box::new(transform_expr_loop_input(
+                *inner,
+                entry_value_ids,
+                loop_depth,
+            )),
         ),
         Expr::Ternary {
             cond,
             then_expr,
             else_expr,
         } => Expr::Ternary {
-            cond: Box::new(transform_expr_loop_input(*cond, entry_value_ids, loop_depth)),
+            cond: Box::new(transform_expr_loop_input(
+                *cond,
+                entry_value_ids,
+                loop_depth,
+            )),
             then_expr: Box::new(transform_expr_loop_input(
                 *then_expr,
                 entry_value_ids,
@@ -1920,10 +2004,10 @@ mod tests {
                     Expr::Var(v) => {
                         assert!(matches!(v.base, VarBase::LoopInput { loop_depth: 0 }));
                     }
-                    other => panic!("Expected var expr, got {other:?}"),
+                    other => panic!("Expected variable, got {other:?}"),
                 }
             }
-            other => panic!("Expected assign, got {other:?}"),
+            other => panic!("Expected assignment, got {other:?}"),
         }
     }
 }
