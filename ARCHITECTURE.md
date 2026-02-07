@@ -16,6 +16,9 @@ hand-written MASM (like the Miden stdlib) for a few different reasons.
   condition may occupy a different stack slot in each iteration.
 - Branches in conditional statements may have different stack effects, which
   makes stack tracking and signature inference challenging.
+ - Repeat loops may permute stack positions across iterations; we only support
+   repeats whose slot movements are linear in the loop counter. Repeat loops with
+   non-linear permutations (e.g., alternating swaps) are rejected as unsupported.
 
 ## Architecture
 
