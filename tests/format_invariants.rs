@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::decompile_no_optimizations;
+use common::{check_names_defined_when_used, decompile_no_optimizations};
 use masm_decompiler::fmt::assign_var_names;
 use masm_decompiler::frontend::testing::workspace_from_modules;
 use masm_decompiler::ir::{Expr, IndexExpr, Stmt, ValueId, Var, VarBase};
@@ -256,4 +256,36 @@ fn repeat_printed_names_are_identity_stable() {
 
     assert_name_identity_invariants(&producing);
     assert_name_identity_invariants(&consuming);
+}
+
+/// Ensure all variables are defined before they are used in key fixtures.
+#[test]
+fn defined_when_used_invariants() {
+    let ws = workspace_from_modules(&[
+        ("u256", include_str!("fixtures/u256.masm")),
+        ("repeat", include_str!("fixtures/repeat.masm")),
+    ]);
+
+    let procs = [
+        "u256::or",
+        "u256::eqz",
+        "repeat::neutral_repeat_0",
+        "repeat::producing_repeat_1",
+        "repeat::consuming_repeat_0",
+        "repeat::consuming_repeat_1",
+        "repeat::nested_repeat_0",
+        "repeat::consuming_repeat_eqz",
+        "repeat::producing_repeat_swap_entry",
+    ];
+
+    for proc in procs {
+        let stmts = decompile_no_optimizations(&ws, proc);
+        let errors = check_names_defined_when_used(&stmts);
+        assert!(
+            errors.is_empty(),
+            "use-before-definition in {}: {:?}",
+            proc,
+            errors
+        );
+    }
 }

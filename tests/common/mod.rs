@@ -4,8 +4,9 @@ pub mod strategies;
 
 use masm_decompiler::{
     decompile::{DecompilationConfig, Decompiler},
+    fmt::assign_var_names,
     frontend::Workspace,
-    ir::{Expr, IndexExpr, Stmt, ValueId, Var},
+    ir::{Expr, IndexExpr, Stmt, ValueId, Var, VarBase},
 };
 use std::collections::HashSet;
 
@@ -140,6 +141,238 @@ pub fn collect_used_defined_value_ids(stmts: &[Stmt]) -> (HashSet<ValueId>, Hash
         collect_stmt_ids(stmt, &mut used, &mut defined);
     }
     (used, defined)
+}
+
+/// Check that every variable use is defined (or is a loop input / procedure input).
+///
+/// Returns a list of error messages for any use-before-definition cases.
+pub fn check_names_defined_when_used(stmts: &[Stmt]) -> Vec<String> {
+    let names = assign_var_names(stmts);
+    let (used, defined) = collect_used_defined_value_ids(stmts);
+    let input_ids: HashSet<ValueId> = used.difference(&defined).cloned().collect();
+    let mut defined_names = HashSet::new();
+
+    for (var, name) in &names {
+        if matches!(var.base, VarBase::Value(id) if input_ids.contains(&id)) {
+            defined_names.insert(name.clone());
+        }
+    }
+
+    let mut errors = Vec::new();
+    check_stmt_list_defined(stmts, &names, &mut defined_names, &mut errors);
+    errors
+}
+
+/// Traverse a statement list, tracking defined variable names.
+fn check_stmt_list_defined(
+    stmts: &[Stmt],
+    names: &std::collections::HashMap<Var, String>,
+    defined: &mut HashSet<String>,
+    errors: &mut Vec<String>,
+) {
+    for stmt in stmts {
+        check_stmt_defined(stmt, names, defined, errors);
+    }
+}
+
+/// Traverse a single statement, updating defined variable names.
+fn check_stmt_defined(
+    stmt: &Stmt,
+    names: &std::collections::HashMap<Var, String>,
+    defined: &mut HashSet<String>,
+    errors: &mut Vec<String>,
+) {
+    match stmt {
+        Stmt::Assign { dest, expr } => {
+            check_expr_defined(expr, names, defined, errors);
+            define_var(dest, names, defined);
+        }
+        Stmt::MemLoad(load) => {
+            for v in &load.address {
+                check_var_defined(v, names, defined, errors);
+            }
+            for v in &load.outputs {
+                define_var(v, names, defined);
+            }
+        }
+        Stmt::MemStore(store) => {
+            for v in &store.address {
+                check_var_defined(v, names, defined, errors);
+            }
+            for v in &store.values {
+                check_var_defined(v, names, defined, errors);
+            }
+        }
+        Stmt::AdvLoad(load) => {
+            for v in &load.outputs {
+                define_var(v, names, defined);
+            }
+        }
+        Stmt::AdvStore(store) => {
+            for v in &store.values {
+                check_var_defined(v, names, defined, errors);
+            }
+        }
+        Stmt::LocalLoad(load) => {
+            for v in &load.outputs {
+                define_var(v, names, defined);
+            }
+        }
+        Stmt::LocalStore(store) => {
+            for v in &store.values {
+                check_var_defined(v, names, defined, errors);
+            }
+        }
+        Stmt::LocalStoreW(store) => {
+            for v in &store.values {
+                check_var_defined(v, names, defined, errors);
+            }
+        }
+        Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+            for v in &call.args {
+                check_var_defined(v, names, defined, errors);
+            }
+            for v in &call.results {
+                define_var(v, names, defined);
+            }
+        }
+        Stmt::DynCall { args, results } => {
+            for v in args {
+                check_var_defined(v, names, defined, errors);
+            }
+            for v in results {
+                define_var(v, names, defined);
+            }
+        }
+        Stmt::Intrinsic(intrinsic) => {
+            for v in &intrinsic.args {
+                check_var_defined(v, names, defined, errors);
+            }
+            for v in &intrinsic.results {
+                define_var(v, names, defined);
+            }
+        }
+        Stmt::Repeat {
+            loop_var: _,
+            loop_count: _,
+            body,
+            phis,
+        } => {
+            for phi in phis {
+                check_var_defined(&phi.init, names, defined, errors);
+            }
+            let mut loop_defined = defined.clone();
+            for phi in phis {
+                define_var(&phi.dest, names, &mut loop_defined);
+            }
+            check_stmt_list_defined(body, names, &mut loop_defined, errors);
+            for phi in phis {
+                check_var_defined(&phi.step, names, &mut loop_defined, errors);
+            }
+            for phi in phis {
+                define_var(&phi.dest, names, defined);
+            }
+        }
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+            phis,
+        } => {
+            check_expr_defined(cond, names, defined, errors);
+            let mut then_defined = defined.clone();
+            let mut else_defined = defined.clone();
+            check_stmt_list_defined(then_body, names, &mut then_defined, errors);
+            check_stmt_list_defined(else_body, names, &mut else_defined, errors);
+            for phi in phis {
+                check_var_defined(&phi.then_var, names, &then_defined, errors);
+                check_var_defined(&phi.else_var, names, &else_defined, errors);
+                define_var(&phi.dest, names, defined);
+            }
+        }
+        Stmt::While { cond, body, phis } => {
+            check_expr_defined(cond, names, defined, errors);
+            for phi in phis {
+                check_var_defined(&phi.init, names, defined, errors);
+            }
+            let mut loop_defined = defined.clone();
+            for phi in phis {
+                define_var(&phi.dest, names, &mut loop_defined);
+            }
+            check_stmt_list_defined(body, names, &mut loop_defined, errors);
+            for phi in phis {
+                check_var_defined(&phi.step, names, &mut loop_defined, errors);
+            }
+            for phi in phis {
+                define_var(&phi.dest, names, defined);
+            }
+        }
+        Stmt::Return(vars) => {
+            for v in vars {
+                check_var_defined(v, names, defined, errors);
+            }
+        }
+    }
+}
+
+/// Check that variables in an expression are defined.
+fn check_expr_defined(
+    expr: &Expr,
+    names: &std::collections::HashMap<Var, String>,
+    defined: &HashSet<String>,
+    errors: &mut Vec<String>,
+) {
+    match expr {
+        Expr::Var(v) => check_var_defined(v, names, defined, errors),
+        Expr::Binary(_, lhs, rhs) => {
+            check_expr_defined(lhs, names, defined, errors);
+            check_expr_defined(rhs, names, defined, errors);
+        }
+        Expr::Unary(_, inner) => check_expr_defined(inner, names, defined, errors),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            check_expr_defined(cond, names, defined, errors);
+            check_expr_defined(then_expr, names, defined, errors);
+            check_expr_defined(else_expr, names, defined, errors);
+        }
+        Expr::True | Expr::False | Expr::Constant(_) => {}
+    }
+}
+
+/// Record a variable definition in the current scope.
+fn define_var(
+    var: &Var,
+    names: &std::collections::HashMap<Var, String>,
+    defined: &mut HashSet<String>,
+) {
+    if let VarBase::LoopInput { .. } = var.base {
+        return;
+    }
+    if let Some(name) = names.get(var) {
+        defined.insert(name.clone());
+    }
+}
+
+/// Check that a variable is defined (or is a loop-input reference).
+fn check_var_defined(
+    var: &Var,
+    names: &std::collections::HashMap<Var, String>,
+    defined: &HashSet<String>,
+    errors: &mut Vec<String>,
+) {
+    if let VarBase::LoopInput { .. } = var.base {
+        return;
+    }
+    let Some(name) = names.get(var) else {
+        errors.push(format!("missing name for var: {var:?}"));
+        return;
+    };
+    if !defined.contains(name) {
+        errors.push(format!("use of `{name}` before definition"));
+    }
 }
 
 /// Record the value identifier for a variable if it is value-based.

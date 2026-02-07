@@ -2,10 +2,12 @@
 
 mod common;
 
-use common::{decompile, decompile_no_optimizations, decompile_no_propagation};
+use common::{
+    check_names_defined_when_used, decompile, decompile_no_optimizations, decompile_no_propagation,
+};
 use masm_decompiler::fmt::{CodeWriter, FormattingConfig};
 use masm_decompiler::frontend::testing::workspace_from_modules;
-use masm_decompiler::ir::{BinOp, Expr, IndexExpr, Stmt, ValueId, Var};
+use masm_decompiler::ir::{BinOp, Expr, IndexExpr, LoopPhi, Stmt, ValueId, Var};
 use std::collections::HashSet;
 
 /// Helper to format decompiled output as a string for debugging (without colors).
@@ -48,6 +50,16 @@ fn loop_dest_var(stmts: &[Stmt]) -> Option<Var> {
                     }
                 }
             }
+        }
+    }
+    None
+}
+
+/// Find the first repeat loop and return its body and phis.
+fn find_repeat<'a>(stmts: &'a [Stmt]) -> Option<(&'a [Stmt], &'a [LoopPhi])> {
+    for stmt in stmts {
+        if let Stmt::Repeat { body, phis, .. } = stmt {
+            return Some((body, phis));
         }
     }
     None
@@ -263,7 +275,7 @@ fn collect_expr_ids(expr: &Expr, used: &mut HashSet<ValueId>) {
 /// for i in 0..4 {
 ///   v_3 = v_3 + v_(4 - i);
 /// }
-/// return v_0;
+/// return v_3;
 /// ```
 ///
 /// The key property: the accumulator stays in the `v_3` slot.
@@ -327,8 +339,8 @@ fn consuming_repeat_destination_subscript() {
 ///   v_3 = v_3 + v_(4 - i);
 /// }
 /// v_1 = 5;
-/// v_0 = v_0 - 5;
-/// return v_0;
+/// v_3 = v_3 - 5;
+/// return v_3;
 /// ```
 #[test]
 fn consuming_repeat_with_pre_loop_pushes() {
@@ -431,10 +443,10 @@ fn verify_correct_behavior_consuming_repeat_0() {
         );
     }
 
-    // Return should be v_0 (final result at position 0)
+    // Return should be the accumulator (v_3) after consuming the inputs.
     assert!(
-        output.contains("return v_0"),
-        "return should be v_0, got: {}",
+        output.contains("return v_3"),
+        "return should be v_3, got: {}",
         output
     );
 }
@@ -629,7 +641,7 @@ fn consuming_repeat_symbolic_inputs() {
     // for i in 0..4 {
     //   v_3 = v_3 + v_(4 - i);
     // }
-    // return v_0;
+    // return v_3;
 
     // Check for the loop structure
     assert!(
@@ -656,10 +668,10 @@ fn consuming_repeat_symbolic_inputs() {
         }
     }
 
-    // Return should be v_0
+    // Return should be v_3 (accumulator)
     assert!(
-        output.contains("return v_0"),
-        "return should be v_0, got: {}",
+        output.contains("return v_3"),
+        "return should be v_3, got: {}",
         output
     );
 }
@@ -716,6 +728,123 @@ fn consuming_repeat_eqz_uses_accumulator_operand() {
         dest_base + 1,
         output
     );
+}
+
+/// Consuming repeat loop should return the loop accumulator, not an input.
+#[test]
+fn consuming_repeat_0_returns_accumulator() {
+    let ws = workspace_from_modules(&[("repeat", include_str!("fixtures/repeat.masm"))]);
+    let structured = decompile_no_optimizations(&ws, "repeat::consuming_repeat_0");
+    let output = format_output(&structured);
+
+    let (_body, phis) = find_repeat(&structured).expect("expected repeat loop");
+    let loop_dest = loop_dest_var(&structured).expect("expected add assignment in repeat body");
+    let acc_phi = phis
+        .iter()
+        .find(|phi| phi.dest.subscript == loop_dest.subscript)
+        .expect("expected accumulator loop phi");
+    let acc_id = acc_phi
+        .dest
+        .base
+        .value_id()
+        .expect("accumulator phi dest should have value id");
+
+    let return_vars = structured
+        .iter()
+        .find_map(|stmt| match stmt {
+            Stmt::Return(vars) => Some(vars),
+            _ => None,
+        })
+        .expect("expected return statement");
+    assert_eq!(
+        return_vars.len(),
+        1,
+        "consuming_repeat_0 should return a single value. Output:\n{}",
+        output
+    );
+    let return_id = return_vars[0]
+        .base
+        .value_id()
+        .expect("return value should have value id");
+    assert_eq!(
+        return_id, acc_id,
+        "consuming_repeat_0 should return the loop accumulator. Output:\n{}",
+        output
+    );
+}
+
+/// Consuming repeat loop should feed the accumulator into the post-loop `sub`.
+#[test]
+fn consuming_repeat_1_uses_accumulator_after_loop() {
+    let ws = workspace_from_modules(&[("repeat", include_str!("fixtures/repeat.masm"))]);
+    let structured = decompile_no_optimizations(&ws, "repeat::consuming_repeat_1");
+    let output = format_output(&structured);
+
+    let (_body, phis) = find_repeat(&structured).expect("expected repeat loop");
+    let loop_dest = loop_dest_var(&structured).expect("expected add assignment in repeat body");
+    let acc_phi = phis
+        .iter()
+        .find(|phi| phi.dest.subscript == loop_dest.subscript)
+        .expect("expected accumulator loop phi");
+    let acc_id = acc_phi
+        .dest
+        .base
+        .value_id()
+        .expect("accumulator phi dest should have value id");
+
+    let mut saw_sub = false;
+    for stmt in &structured {
+        if let Stmt::Assign { expr, .. } = stmt {
+            if let Expr::Binary(BinOp::Sub, lhs, _rhs) = expr {
+                let Expr::Var(lhs_var) = lhs.as_ref() else {
+                    panic!("expected sub lhs to be a variable. Output:\n{}", output);
+                };
+                let lhs_id = lhs_var
+                    .base
+                    .value_id()
+                    .expect("sub lhs should have value id");
+                assert_eq!(
+                    lhs_id, acc_id,
+                    "consuming_repeat_1 should subtract from the loop accumulator. Output:\n{}",
+                    output
+                );
+                saw_sub = true;
+            }
+        }
+    }
+    assert!(
+        saw_sub,
+        "expected a sub assignment after the repeat loop. Output:\n{}",
+        output
+    );
+}
+
+/// All repeat.masm procedures should only use defined variables.
+#[test]
+fn repeat_procedures_use_defined_vars() {
+    let ws = workspace_from_modules(&[("repeat", include_str!("fixtures/repeat.masm"))]);
+    let procs = [
+        "repeat::neutral_repeat_0",
+        "repeat::producing_repeat_1",
+        "repeat::consuming_repeat_0",
+        "repeat::consuming_repeat_1",
+        "repeat::nested_repeat_0",
+        "repeat::consuming_repeat_eqz",
+        "repeat::producing_repeat_swap_entry",
+    ];
+
+    for proc in procs {
+        let structured = decompile_no_optimizations(&ws, proc);
+        let output = format_output(&structured);
+        let errors = check_names_defined_when_used(&structured);
+        assert!(
+            errors.is_empty(),
+            "use-before-definition in {}: {:?}\nOutput:\n{}",
+            proc,
+            errors,
+            output
+        );
+    }
 }
 
 /// Producing repeat loop that swaps a pushed value with the entry value.

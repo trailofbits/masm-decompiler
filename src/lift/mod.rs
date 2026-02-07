@@ -1085,15 +1085,20 @@ fn update_stack_after_repeat(
             (entry.slot_id, var)
         })
         .collect();
-    let mut slots = exit_entries
-        .iter()
-        .map(|entry| entry.slot_id)
-        .collect::<Vec<_>>();
+
+    let loop_carried_slots: HashSet<SlotId> = loop_carried_dests.keys().copied().collect();
+    let mut tagged_stack = TaggedSlotStack::new(
+        &exit_entries
+            .iter()
+            .map(|entry| entry.slot_id)
+            .collect::<Vec<_>>(),
+        &loop_carried_slots,
+    );
     let mut known_slots: HashSet<SlotId> = slot_vars.keys().copied().collect();
 
     for _ in 1..count {
-        slots = simulate_repeat_slots_from_ids(body, &slots, module_path, sigs)?;
-        for slot_id in &slots {
+        simulate_block_tags(body, &mut tagged_stack, module_path, sigs)?;
+        for slot_id in tagged_stack.slots() {
             if !known_slots.contains(slot_id) {
                 let var = stack.fresh_var(0);
                 slot_vars.insert(*slot_id, var);
@@ -1103,11 +1108,26 @@ fn update_stack_after_repeat(
         }
     }
 
-    let mut final_entries = VecDeque::with_capacity(slots.len());
-    for (idx, slot_id) in slots.iter().enumerate() {
-        let var = slot_vars
-            .get(slot_id)
-            .expect("slot variable must exist");
+    let mut final_entries = VecDeque::with_capacity(tagged_stack.slots().len());
+    for (idx, slot_id) in tagged_stack.slots().iter().enumerate() {
+        let tag_set = tagged_stack.tags_for(slot_id);
+        if tag_set.len() > 1 {
+            return Err(LiftingError::UnsupportedRepeatPattern(
+                "repeat loop merges multiple loop-carried values".to_string(),
+            ));
+        }
+        let var = if let Some(tag) = tag_set.iter().next() {
+            loop_carried_dests.get(tag).cloned().ok_or_else(|| {
+                LiftingError::UnsupportedRepeatPattern(
+                    "repeat loop produced unknown loop-carried value".to_string(),
+                )
+            })?
+        } else {
+            slot_vars
+                .get(slot_id)
+                .cloned()
+                .expect("slot variable must exist")
+        };
         if fresh_slots.contains(slot_id) {
             let adjusted_var = Var {
                 base: var.base.clone(),
@@ -1116,7 +1136,7 @@ fn update_stack_after_repeat(
             };
             final_entries.push_back(StackEntry::new(adjusted_var, *slot_id));
         } else {
-            final_entries.push_back(StackEntry::new(var.clone(), *slot_id));
+            final_entries.push_back(StackEntry::new(var, *slot_id));
         }
     }
 
@@ -1362,6 +1382,275 @@ impl SlotStack {
     fn into_slots(self) -> Vec<SlotId> {
         self.slots
     }
+}
+
+/// Slot stack with loop-carried tag tracking for repeat loops.
+#[derive(Debug, Clone)]
+struct TaggedSlotStack {
+    slots: Vec<SlotId>,
+    next_slot: u64,
+    tags: HashMap<SlotId, HashSet<SlotId>>,
+}
+
+impl TaggedSlotStack {
+    /// Create a tagged slot stack initialized with the given slots.
+    fn new(entry_slots: &[SlotId], loop_carried: &HashSet<SlotId>) -> Self {
+        let next_slot = entry_slots
+            .iter()
+            .map(|slot| slot.as_u64())
+            .max()
+            .map(|value| value + 1)
+            .unwrap_or(0);
+        let mut tags = HashMap::new();
+        for slot in entry_slots {
+            let mut set = HashSet::new();
+            if loop_carried.contains(slot) {
+                set.insert(*slot);
+            }
+            tags.insert(*slot, set);
+        }
+        Self {
+            slots: entry_slots.to_vec(),
+            next_slot,
+            tags,
+        }
+    }
+
+    /// Return the current slot order.
+    fn slots(&self) -> &[SlotId] {
+        &self.slots
+    }
+
+    /// Return tags for a slot identifier.
+    fn tags_for(&self, slot_id: &SlotId) -> HashSet<SlotId> {
+        self.tags.get(slot_id).cloned().unwrap_or_default()
+    }
+
+    /// Ensure the stack has at least the required depth by pushing new slots.
+    fn ensure_depth(&mut self, required_depth: usize) {
+        while self.slots.len() < required_depth {
+            let slot = self.alloc_slot();
+            self.tags.entry(slot).or_default();
+            self.slots.push(slot);
+        }
+    }
+
+    /// Allocate a fresh slot identifier.
+    fn alloc_slot(&mut self) -> SlotId {
+        let id = self.next_slot;
+        self.next_slot += 1;
+        SlotId::new(id)
+    }
+
+    /// Pop a slot identifier from the top of the stack.
+    fn pop(&mut self) -> SlotId {
+        self.slots.pop().expect("slot stack underflow")
+    }
+
+    /// Swap the top slot with the slot at the given depth.
+    fn swap(&mut self, depth: usize) {
+        let len = self.slots.len();
+        if depth > 0 && depth < len {
+            let top_idx = len - 1;
+            let other_idx = len - 1 - depth;
+            self.slots.swap(top_idx, other_idx);
+        }
+    }
+
+    /// Swap the top word with the word below it.
+    fn swapw(&mut self, word_index: usize) {
+        if word_index == 0 {
+            return;
+        }
+        let len = self.slots.len();
+        let offset = word_index.saturating_mul(4);
+        if offset + 4 > len {
+            return;
+        }
+        for i in 0..4 {
+            let top_idx = len - 1 - i;
+            let other_idx = len - 1 - offset - i;
+            self.slots.swap(top_idx, other_idx);
+        }
+    }
+
+    /// Reverse the order of the top word.
+    fn reversew(&mut self) {
+        let len = self.slots.len();
+        if len < 4 {
+            return;
+        }
+        self.slots.swap(len - 4, len - 1);
+        self.slots.swap(len - 3, len - 2);
+    }
+
+    /// Move the slot at the given depth to the top.
+    fn movup(&mut self, depth: usize) {
+        let len = self.slots.len();
+        if depth > 0 && depth < len {
+            let idx = len - 1 - depth;
+            let slot = self.slots.remove(idx);
+            self.slots.push(slot);
+        }
+    }
+
+    /// Move the top slot down to the given depth.
+    fn movdn(&mut self, depth: usize) {
+        let len = self.slots.len();
+        if depth > 0 && depth < len {
+            let slot = self.slots.pop().expect("slot stack underflow");
+            let idx = len - 1 - depth;
+            self.slots.insert(idx, slot);
+        }
+    }
+
+    /// Apply a stack effect to the tagged slot stack.
+    fn apply_effect(&mut self, pops: usize, pushes: usize, required_depth: usize) {
+        self.ensure_depth(required_depth);
+        let mut popped = Vec::with_capacity(pops);
+        let mut popped_tags = Vec::with_capacity(pops);
+        for _ in 0..pops {
+            let slot = self.pop();
+            let tags = self.tags.remove(&slot).unwrap_or_default();
+            popped.push(slot);
+            popped_tags.push(tags);
+        }
+        let mut merged_tags = HashSet::new();
+        for tags in popped_tags {
+            merged_tags.extend(tags);
+        }
+        let mut reuse = popped.into_iter().rev().collect::<Vec<_>>();
+        let reuse_count = reuse.len().min(pushes);
+        for slot in reuse.drain(0..reuse_count) {
+            self.tags.insert(slot, merged_tags.clone());
+            self.slots.push(slot);
+        }
+        for _ in reuse_count..pushes {
+            let slot = self.alloc_slot();
+            self.tags.entry(slot).or_default();
+            self.slots.push(slot);
+        }
+    }
+}
+
+/// Simulate a block of operations on the tagged slot stack.
+fn simulate_block_tags(
+    block: &Block,
+    stack: &mut TaggedSlotStack,
+    module_path: &str,
+    sigs: &SignatureMap,
+) -> LiftingResult<()> {
+    for op in block.iter() {
+        simulate_op_tags(op, stack, module_path, sigs)?;
+    }
+    Ok(())
+}
+
+/// Simulate a single operation on the tagged slot stack.
+fn simulate_op_tags(
+    op: &Op,
+    stack: &mut TaggedSlotStack,
+    module_path: &str,
+    sigs: &SignatureMap,
+) -> LiftingResult<()> {
+    match op {
+        Op::Inst(inst) => simulate_inst_tags(inst.inner(), stack, module_path, sigs),
+        Op::If {
+            then_blk, else_blk, ..
+        } => {
+            let mut then_stack = stack.clone();
+            let mut else_stack = stack.clone();
+            simulate_block_tags(then_blk, &mut then_stack, module_path, sigs)?;
+            simulate_block_tags(else_blk, &mut else_stack, module_path, sigs)?;
+            if then_stack.slots != else_stack.slots || then_stack.tags != else_stack.tags {
+                return Err(LiftingError::UnsupportedRepeatPattern(
+                    "repeat loop contains if with incompatible branches".to_string(),
+                ));
+            }
+            *stack = then_stack;
+            Ok(())
+        }
+        Op::Repeat { count, body, .. } => {
+            for _ in 0..*count {
+                simulate_block_tags(body, stack, module_path, sigs)?;
+            }
+            Ok(())
+        }
+        Op::While { .. } => Err(LiftingError::UnsupportedRepeatPattern(
+            "repeat loop contains a while loop".to_string(),
+        )),
+    }
+}
+
+/// Simulate a single instruction's stack effect for tagged slot tracking.
+fn simulate_inst_tags(
+    inst: &Instruction,
+    stack: &mut TaggedSlotStack,
+    module_path: &str,
+    sigs: &SignatureMap,
+) -> LiftingResult<()> {
+    match inst {
+        Instruction::Swap1 => stack.swap(1),
+        Instruction::Swap2 => stack.swap(2),
+        Instruction::Swap3 => stack.swap(3),
+        Instruction::Swap4 => stack.swap(4),
+        Instruction::Swap5 => stack.swap(5),
+        Instruction::Swap6 => stack.swap(6),
+        Instruction::Swap7 => stack.swap(7),
+        Instruction::Swap8 => stack.swap(8),
+        Instruction::Swap9 => stack.swap(9),
+        Instruction::Swap10 => stack.swap(10),
+        Instruction::Swap11 => stack.swap(11),
+        Instruction::Swap12 => stack.swap(12),
+        Instruction::Swap13 => stack.swap(13),
+        Instruction::Swap14 => stack.swap(14),
+        Instruction::Swap15 => stack.swap(15),
+        Instruction::SwapW1 => stack.swapw(1),
+        Instruction::SwapW2 => stack.swapw(2),
+        Instruction::SwapW3 => stack.swapw(3),
+        Instruction::MovUp2 => stack.movup(2),
+        Instruction::MovUp3 => stack.movup(3),
+        Instruction::MovUp4 => stack.movup(4),
+        Instruction::MovUp5 => stack.movup(5),
+        Instruction::MovUp6 => stack.movup(6),
+        Instruction::MovUp7 => stack.movup(7),
+        Instruction::MovUp8 => stack.movup(8),
+        Instruction::MovUp9 => stack.movup(9),
+        Instruction::MovUp10 => stack.movup(10),
+        Instruction::MovUp11 => stack.movup(11),
+        Instruction::MovUp12 => stack.movup(12),
+        Instruction::MovUp13 => stack.movup(13),
+        Instruction::MovUp14 => stack.movup(14),
+        Instruction::MovUp15 => stack.movup(15),
+        Instruction::MovDn2 => stack.movdn(2),
+        Instruction::MovDn3 => stack.movdn(3),
+        Instruction::MovDn4 => stack.movdn(4),
+        Instruction::MovDn5 => stack.movdn(5),
+        Instruction::MovDn6 => stack.movdn(6),
+        Instruction::MovDn7 => stack.movdn(7),
+        Instruction::MovDn8 => stack.movdn(8),
+        Instruction::MovDn9 => stack.movdn(9),
+        Instruction::MovDn10 => stack.movdn(10),
+        Instruction::MovDn11 => stack.movdn(11),
+        Instruction::MovDn12 => stack.movdn(12),
+        Instruction::MovDn13 => stack.movdn(13),
+        Instruction::MovDn14 => stack.movdn(14),
+        Instruction::MovDn15 => stack.movdn(15),
+        Instruction::Reversew => stack.reversew(),
+        _ => {
+            let effect = inst::effect_for_inst(inst, module_path, sigs)?;
+            let (pops, pushes, required_depth) = match effect {
+                StackEffect::Known {
+                    pops,
+                    pushes,
+                    required_depth,
+                } => (pops, pushes, required_depth),
+                StackEffect::Unknown => (0, 0, 0),
+            };
+            stack.apply_effect(pops, pushes, required_depth);
+        }
+    }
+    Ok(())
 }
 
 /// Rewrite entry-stack references inside consuming loops to use loop-input bases.
