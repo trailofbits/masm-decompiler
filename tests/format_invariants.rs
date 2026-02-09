@@ -180,8 +180,16 @@ fn collect_phi_equivalences(stmts: &[Stmt], parents: &mut HashMap<IdentityKey, I
                 ..
             } => {
                 for phi in phis {
-                    union_identities(parents, &identity_key(&phi.dest), &identity_key(&phi.then_var));
-                    union_identities(parents, &identity_key(&phi.dest), &identity_key(&phi.else_var));
+                    union_identities(
+                        parents,
+                        &identity_key(&phi.dest),
+                        &identity_key(&phi.then_var),
+                    );
+                    union_identities(
+                        parents,
+                        &identity_key(&phi.dest),
+                        &identity_key(&phi.else_var),
+                    );
                 }
                 collect_phi_equivalences(then_body, parents);
                 collect_phi_equivalences(else_body, parents);
@@ -207,10 +215,7 @@ fn identity_key(var: &Var) -> IdentityKey {
 }
 
 /// Find the representative identity for a key.
-fn find_rep(
-    parents: &mut HashMap<IdentityKey, IdentityKey>,
-    key: &IdentityKey,
-) -> IdentityKey {
+fn find_rep(parents: &mut HashMap<IdentityKey, IdentityKey>, key: &IdentityKey) -> IdentityKey {
     let parent = parents
         .entry(key.clone())
         .or_insert_with(|| key.clone())
@@ -236,26 +241,35 @@ fn union_identities(
     }
 }
 
-/// Ensure printed-name and identity invariants hold for u256 decompilation.
+/// Ensure printed-name and identity invariants hold for fixtures.
 #[test]
-fn u256_printed_names_are_identity_stable() {
-    let ws = workspace_from_modules(&[("u256", include_str!("fixtures/u256.masm"))]);
-    let or_stmts = decompile_no_optimizations(&ws, "u256::or");
-    let eqz_stmts = decompile_no_optimizations(&ws, "u256::eqz");
+fn printed_names_are_identity_stable() {
+    let ws = workspace_from_modules(&[
+        ("u256", include_str!("fixtures/u256.masm")),
+        ("repeat", include_str!("fixtures/repeat.masm")),
+    ]);
+    let procs = [
+        "u256::wrapping_add",
+        "u256::wrapping_sub",
+        "u256::and",
+        "u256::or",
+        "u256::xor",
+        "u256::eqz",
+        "u256::mulstep",
+        "u256::mulstep4",
+        "repeat::neutral_repeat_0",
+        "repeat::producing_repeat_0",
+        "repeat::producing_repeat_1",
+        "repeat::consuming_repeat_0",
+        "repeat::consuming_repeat_1",
+        "repeat::consuming_repeat_2",
+        "repeat::nested_repeat_0",
+    ];
 
-    assert_name_identity_invariants(&or_stmts);
-    assert_name_identity_invariants(&eqz_stmts);
-}
-
-/// Ensure printed-name and identity invariants hold for repeat-loop fixtures.
-#[test]
-fn repeat_printed_names_are_identity_stable() {
-    let ws = workspace_from_modules(&[("repeat", include_str!("fixtures/repeat.masm"))]);
-    let producing = decompile_no_optimizations(&ws, "repeat::producing_repeat_1");
-    let consuming = decompile_no_optimizations(&ws, "repeat::consuming_repeat_eqz");
-
-    assert_name_identity_invariants(&producing);
-    assert_name_identity_invariants(&consuming);
+    for proc in procs {
+        let stmts = decompile_no_optimizations(&ws, proc);
+        assert_name_identity_invariants(&stmts);
+    }
 }
 
 /// Ensure all variables are defined before they are used in key fixtures.
@@ -265,17 +279,22 @@ fn defined_when_used_invariants() {
         ("u256", include_str!("fixtures/u256.masm")),
         ("repeat", include_str!("fixtures/repeat.masm")),
     ]);
-
     let procs = [
+        "u256::wrapping_add",
+        "u256::wrapping_sub",
+        "u256::and",
         "u256::or",
+        "u256::xor",
         "u256::eqz",
+        "u256::mulstep",
+        "u256::mulstep4",
         "repeat::neutral_repeat_0",
+        "repeat::producing_repeat_0",
         "repeat::producing_repeat_1",
         "repeat::consuming_repeat_0",
         "repeat::consuming_repeat_1",
+        "repeat::consuming_repeat_2",
         "repeat::nested_repeat_0",
-        "repeat::consuming_repeat_eqz",
-        "repeat::producing_repeat_swap_entry",
     ];
 
     for proc in procs {

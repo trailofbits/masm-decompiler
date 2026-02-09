@@ -6,10 +6,17 @@ pub proc neutral_repeat_0
   end
 end
 
-
-pub proc producing_repeat_1
+pub proc producing_repeat_0
   repeat.4
     push.0
+  end
+end
+
+pub proc producing_repeat_1
+  push.7
+  repeat.2
+    push.1
+    swap
   end
 end
 
@@ -30,6 +37,14 @@ pub proc consuming_repeat_1
   sub
 end
 
+pub proc consuming_repeat_2
+  eq.0
+  repeat.2
+    swap
+    eq.0
+    and
+  end
+end
 
 pub proc nested_repeat_0
   repeat.2
@@ -39,22 +54,5 @@ pub proc nested_repeat_0
     repeat.2
       add
     end
-  end
-end
-
-pub proc consuming_repeat_eqz
-  eq.0
-  repeat.2
-    swap
-    eq.0
-    and
-  end
-end
-
-pub proc producing_repeat_swap_entry
-  push.7
-  repeat.2
-    push.1
-    swap
   end
 end
