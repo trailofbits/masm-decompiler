@@ -188,8 +188,8 @@ impl DecompiledProc {
     /// Find the return statement variables, if present.
     pub fn return_vars(&self) -> Option<Vec<Var>> {
         for stmt in self.body.stmts() {
-            if let Stmt::Return(vals) = stmt {
-                return Some(vals.clone());
+            if let Stmt::Return { values, .. } = stmt {
+                return Some(values.clone());
             }
         }
         None

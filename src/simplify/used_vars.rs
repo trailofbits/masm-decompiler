@@ -205,7 +205,7 @@ fn analyze_stmt(
     all_def_paths: &mut HashSet<StmtPath>,
 ) {
     match stmt {
-        Stmt::Assign { dest, expr } => {
+        Stmt::Assign { dest, expr, .. } => {
             // First: process uses (makes definitions live).
             for var in expr_used_vars(expr, loop_stack) {
                 state.mark_used(&var);
@@ -224,6 +224,7 @@ fn analyze_stmt(
             then_body,
             else_body,
             phis,
+            ..
         } => {
             // Process uses in condition.
             for var in expr_used_vars(cond, loop_stack) {
@@ -288,6 +289,7 @@ fn analyze_stmt(
             loop_count,
             body,
             phis,
+            ..
         } => {
             // For repeat loops: a definition is live if the variable is used
             // anywhere in the loop body (cross-iteration use).
@@ -317,7 +319,7 @@ fn analyze_stmt(
             }
         }
 
-        Stmt::While { cond, body, phis } => {
+        Stmt::While { cond, body, phis, .. } => {
             // Process uses in condition (condition is evaluated before each iteration).
             for var in expr_used_vars(cond, loop_stack) {
                 state.mark_used(&var);
@@ -345,7 +347,7 @@ fn analyze_stmt(
         }
 
         // Statements that only use variables (no definitions).
-        Stmt::Return(vars) => {
+        Stmt::Return { values: vars, .. } => {
             for v in vars {
                 for var in var_used_vars(v, loop_stack) {
                     state.mark_used(&var);
@@ -353,7 +355,7 @@ fn analyze_stmt(
             }
         }
 
-        Stmt::MemLoad(load) => {
+        Stmt::MemLoad { load, .. } => {
             // Uses: address.
             for v in &load.address {
                 for var in var_used_vars(v, loop_stack) {
@@ -363,7 +365,7 @@ fn analyze_stmt(
             // Defines: outputs. MemLoad has side effects, so we don't track for elimination.
         }
 
-        Stmt::MemStore(store) => {
+        Stmt::MemStore { store, .. } => {
             for v in &store.address {
                 for var in var_used_vars(v, loop_stack) {
                     state.mark_used(&var);
@@ -376,11 +378,11 @@ fn analyze_stmt(
             }
         }
 
-        Stmt::AdvLoad(_) => {
+        Stmt::AdvLoad { .. } => {
             // No uses, defines outputs. Side-effectful.
         }
 
-        Stmt::AdvStore(store) => {
+        Stmt::AdvStore { store, .. } => {
             for v in &store.values {
                 for var in var_used_vars(v, loop_stack) {
                     state.mark_used(&var);
@@ -388,18 +390,18 @@ fn analyze_stmt(
             }
         }
 
-        Stmt::LocalLoad(_) => {
+        Stmt::LocalLoad { .. } => {
             // No uses, defines outputs. Side-effectful.
         }
 
-        Stmt::LocalStore(store) => {
+        Stmt::LocalStore { store, .. } => {
             for v in &store.values {
                 for var in var_used_vars(v, loop_stack) {
                     state.mark_used(&var);
                 }
             }
         }
-        Stmt::LocalStoreW(store) => {
+        Stmt::LocalStoreW { store, .. } => {
             for v in &store.values {
                 for var in var_used_vars(v, loop_stack) {
                     state.mark_used(&var);
@@ -407,7 +409,7 @@ fn analyze_stmt(
             }
         }
 
-        Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+        Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
             for v in &call.args {
                 for var in var_used_vars(v, loop_stack) {
                     state.mark_used(&var);
@@ -424,7 +426,7 @@ fn analyze_stmt(
             }
         }
 
-        Stmt::Intrinsic(intr) => {
+        Stmt::Intrinsic { intrinsic: intr, .. } => {
             for v in &intr.args {
                 for var in var_used_vars(v, loop_stack) {
                     state.mark_used(&var);
@@ -562,7 +564,7 @@ fn collect_defs_uses_recursive(
         path.push(PathSegment::Index(i));
 
         match stmt {
-            Stmt::Assign { dest, expr } => {
+            Stmt::Assign { dest, expr, .. } => {
                 uses.extend(expr_used_vars(expr, loop_stack));
                 for var in var_defined_vars(dest, loop_stack) {
                     defs.push((path.clone(), var));
@@ -574,6 +576,7 @@ fn collect_defs_uses_recursive(
                 then_body,
                 else_body,
                 phis,
+                ..
             } => {
                 uses.extend(expr_used_vars(cond, loop_stack));
 
@@ -599,6 +602,7 @@ fn collect_defs_uses_recursive(
                 loop_count,
                 body,
                 phis,
+                ..
             } => {
                 let mut inner_stack = loop_stack.to_vec();
                 inner_stack.push(LoopBinding {
@@ -619,7 +623,7 @@ fn collect_defs_uses_recursive(
                 collect_defs_uses_recursive(body, &inner_stack, &repeat_path, defs, uses);
             }
 
-            Stmt::While { cond, body, phis } => {
+            Stmt::While { cond, body, phis, .. } => {
                 uses.extend(expr_used_vars(cond, loop_stack));
 
                 for phi in phis {
@@ -635,19 +639,19 @@ fn collect_defs_uses_recursive(
                 collect_defs_uses_recursive(body, loop_stack, &while_path, defs, uses);
             }
 
-            Stmt::Return(vars) => {
+            Stmt::Return { values: vars, .. } => {
                 for v in vars {
                     uses.extend(var_used_vars(v, loop_stack));
                 }
             }
 
-            Stmt::MemLoad(load) => {
+            Stmt::MemLoad { load, .. } => {
                 for v in &load.address {
                     uses.extend(var_used_vars(v, loop_stack));
                 }
             }
 
-            Stmt::MemStore(store) => {
+            Stmt::MemStore { store, .. } => {
                 for v in &store.address {
                     uses.extend(var_used_vars(v, loop_stack));
                 }
@@ -656,24 +660,24 @@ fn collect_defs_uses_recursive(
                 }
             }
 
-            Stmt::AdvStore(store) => {
+            Stmt::AdvStore { store, .. } => {
                 for v in &store.values {
                     uses.extend(var_used_vars(v, loop_stack));
                 }
             }
 
-            Stmt::LocalStore(store) => {
+            Stmt::LocalStore { store, .. } => {
                 for v in &store.values {
                     uses.extend(var_used_vars(v, loop_stack));
                 }
             }
-            Stmt::LocalStoreW(store) => {
+            Stmt::LocalStoreW { store, .. } => {
                 for v in &store.values {
                     uses.extend(var_used_vars(v, loop_stack));
                 }
             }
 
-            Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+            Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
                 for v in &call.args {
                     uses.extend(var_used_vars(v, loop_stack));
                 }
@@ -685,13 +689,13 @@ fn collect_defs_uses_recursive(
                 }
             }
 
-            Stmt::Intrinsic(intr) => {
+            Stmt::Intrinsic { intrinsic: intr, .. } => {
                 for v in &intr.args {
                     uses.extend(var_used_vars(v, loop_stack));
                 }
             }
 
-            Stmt::AdvLoad(_) | Stmt::LocalLoad(_) => {
+            Stmt::AdvLoad { .. } | Stmt::LocalLoad { .. } => {
                 // No uses (defines outputs but those are side-effectful).
             }
         }
@@ -802,6 +806,9 @@ fn eval_index_expr(expr: &IndexExpr, bindings: &[(usize, i64)]) -> Option<i64> {
 mod tests {
     use super::*;
     use crate::ir::{BinOp, Constant, LoopPhi, LoopVar, VarBase, ValueId};
+    use miden_assembly_syntax::debuginfo::SourceSpan;
+
+    const TEST_SPAN: SourceSpan = SourceSpan::UNKNOWN;
 
     fn var_with_subscript(stack_depth: usize, sub: i64) -> Var {
         Var {
@@ -822,14 +829,19 @@ mod tests {
         // return v_1;
         let stmts = vec![
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(0, 0),
                 expr: Expr::Constant(Constant::Felt(1)),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(1, 1),
                 expr: Expr::Constant(Constant::Felt(2)),
             },
-            Stmt::Return(vec![var_with_subscript(1, 1)]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![var_with_subscript(1, 1)],
+            },
         ];
 
         let result = analyze_liveness(&stmts);
@@ -845,14 +857,19 @@ mod tests {
         // return v_0;
         let stmts = vec![
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(0, 0),
                 expr: Expr::Constant(Constant::Felt(1)),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(0, 0),
                 expr: Expr::Constant(Constant::Felt(2)),
             },
-            Stmt::Return(vec![var_with_subscript(0, 0)]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![var_with_subscript(0, 0)],
+            },
         ];
 
         let result = analyze_liveness(&stmts);
@@ -869,10 +886,12 @@ mod tests {
         // return v_1;
         let stmts = vec![
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(0, 0),
                 expr: Expr::Constant(Constant::Felt(1)),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(1, 1),
                 expr: Expr::Binary(
                     BinOp::Add,
@@ -881,10 +900,14 @@ mod tests {
                 ),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(0, 0),
                 expr: Expr::Constant(Constant::Felt(2)),
             },
-            Stmt::Return(vec![var_with_subscript(1, 1)]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![var_with_subscript(1, 1)],
+            },
         ];
 
         let result = analyze_liveness(&stmts);
@@ -902,10 +925,12 @@ mod tests {
         // return v_2;
         let stmts = vec![
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(0, 0),
                 expr: Expr::Constant(Constant::Felt(1)),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(1, 1),
                 expr: Expr::Binary(
                     BinOp::Add,
@@ -914,10 +939,14 @@ mod tests {
                 ),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(2, 2),
                 expr: Expr::Constant(Constant::Felt(3)),
             },
-            Stmt::Return(vec![var_with_subscript(2, 2)]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![var_with_subscript(2, 2)],
+            },
         ];
 
         let result = analyze_liveness(&stmts);
@@ -938,18 +967,24 @@ mod tests {
         // return v_0;
         let stmts = vec![
             Stmt::If {
+                span: TEST_SPAN,
                 cond: Expr::True,
                 then_body: vec![Stmt::Assign {
+                    span: TEST_SPAN,
                     dest: var_with_subscript(0, 0),
                     expr: Expr::Constant(Constant::Felt(1)),
                 }],
                 else_body: vec![Stmt::Assign {
+                    span: TEST_SPAN,
                     dest: var_with_subscript(0, 0),
                     expr: Expr::Constant(Constant::Felt(2)),
                 }],
                 phis: Vec::new(),
             },
-            Stmt::Return(vec![var_with_subscript(0, 0)]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![var_with_subscript(0, 0)],
+            },
         ];
 
         let result = analyze_liveness(&stmts);
@@ -985,14 +1020,19 @@ mod tests {
 
         let stmts = vec![
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: v_a.clone(),
                 expr: Expr::Constant(Constant::Felt(1)),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: v_b.clone(),
                 expr: Expr::Constant(Constant::Felt(2)),
             },
-            Stmt::Return(vec![v_a]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![v_a],
+            },
         ];
 
         let result = analyze_liveness(&stmts);
@@ -1027,19 +1067,25 @@ mod tests {
 
         let stmts = vec![
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: entry.clone(),
                 expr: Expr::Constant(Constant::Felt(1)),
             },
             Stmt::Repeat {
+                span: TEST_SPAN,
                 loop_var: LoopVar::new(0),
                 loop_count: 2,
                 body: vec![Stmt::Assign {
+                    span: TEST_SPAN,
                     dest: tmp,
                     expr: Expr::Var(loop_input),
                 }],
                 phis: Vec::new(),
             },
-            Stmt::Return(vec![entry]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![entry],
+            },
         ];
 
         let result = analyze_liveness(&stmts);
@@ -1069,18 +1115,24 @@ mod tests {
         // return v_1;
         let stmts = vec![
             Stmt::If {
+                span: TEST_SPAN,
                 cond: Expr::True,
                 then_body: vec![Stmt::Assign {
+                    span: TEST_SPAN,
                     dest: var_with_subscript(0, 0),
                     expr: Expr::Constant(Constant::Felt(1)),
                 }],
                 else_body: vec![Stmt::Assign {
+                    span: TEST_SPAN,
                     dest: var_with_subscript(1, 1),
                     expr: Expr::Constant(Constant::Felt(2)),
                 }],
                 phis: Vec::new(),
             },
-            Stmt::Return(vec![var_with_subscript(1, 1)]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![var_with_subscript(1, 1)],
+            },
         ];
 
         let result = analyze_liveness(&stmts);
@@ -1153,9 +1205,11 @@ mod tests {
         };
 
         let stmts = vec![Stmt::Repeat {
+            span: TEST_SPAN,
             loop_var,
             loop_count: 4,
             body: vec![Stmt::Assign {
+                span: TEST_SPAN,
                 dest,
                 expr: Expr::Var(src),
             }],
@@ -1205,9 +1259,11 @@ mod tests {
 
         let stmts = vec![
             Stmt::Repeat {
+                span: TEST_SPAN,
                 loop_var,
                 loop_count: 4,
                 body: vec![Stmt::Assign {
+                    span: TEST_SPAN,
                     dest: loop_def.clone(),
                     expr: Expr::Constant(Constant::Felt(42)),
                 }],
@@ -1221,7 +1277,10 @@ mod tests {
                     step: loop_def,
                 }],
             },
-            Stmt::Return(vec![loop_phi_dest]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![loop_phi_dest],
+            },
         ];
 
         let result = analyze_liveness(&stmts);

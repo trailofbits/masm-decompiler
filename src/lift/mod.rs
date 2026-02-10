@@ -9,6 +9,7 @@ mod stack;
 
 use log::trace;
 use miden_assembly_syntax::ast::{Block, Instruction, Op, Procedure};
+use miden_assembly_syntax::debuginfo::{SourceSpan, Spanned};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::ir::{Expr, IfPhi, IndexExpr, LoopPhi, LoopVar, Stmt, ValueId, Var, VarBase};
@@ -21,34 +22,58 @@ use stack::{SlotId, StackEntry};
 #[derive(Debug)]
 pub enum LiftingError {
     /// Unsupported instruction encountered.
-    UnsupportedInstruction(Instruction),
+    UnsupportedInstruction {
+        /// Source span of the unsupported instruction.
+        span: SourceSpan,
+        /// The instruction which could not be lifted.
+        instruction: Instruction,
+    },
     /// Call to procedure with unknown signature.
-    UnknownCallTarget(String),
+    UnknownCallTarget {
+        /// Source span of the call instruction.
+        span: SourceSpan,
+        /// The unresolved call target.
+        target: String,
+    },
     /// Unbalanced if-statement (branches have different stack effects).
-    UnbalancedIf,
+    UnbalancedIf {
+        /// Source span of the originating if operation.
+        span: SourceSpan,
+    },
     /// Non-neutral while loop.
-    NonNeutralWhile,
+    NonNeutralWhile {
+        /// Source span of the originating while operation.
+        span: SourceSpan,
+    },
     /// If-statement branches produced incompatible variable subscripts.
-    IncompatibleIfMerge,
+    IncompatibleIfMerge {
+        /// Source span of the originating if operation.
+        span: SourceSpan,
+    },
     /// Repeat loop pattern cannot be represented with linear subscripts.
-    UnsupportedRepeatPattern(String),
+    UnsupportedRepeatPattern {
+        /// Source span of the originating repeat operation.
+        span: SourceSpan,
+        /// Description of the unsupported pattern.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for LiftingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LiftingError::UnsupportedInstruction(inst) => {
-                write!(f, "unsupported instruction `{inst}` found")
+            LiftingError::UnsupportedInstruction { instruction, .. } => {
+                write!(f, "unsupported instruction `{instruction}` found")
             }
-            LiftingError::UnknownCallTarget(target) => {
+            LiftingError::UnknownCallTarget { target, .. } => {
                 write!(f, "unknown call target `{target}` found")
             }
-            LiftingError::UnbalancedIf => write!(f, "unbalanced if-statement"),
-            LiftingError::NonNeutralWhile => write!(f, "non-neutral while loop"),
-            LiftingError::IncompatibleIfMerge => {
+            LiftingError::UnbalancedIf { .. } => write!(f, "unbalanced if-statement"),
+            LiftingError::NonNeutralWhile { .. } => write!(f, "non-neutral while loop"),
+            LiftingError::IncompatibleIfMerge { .. } => {
                 write!(f, "if-statement branches produced incompatible subscripts")
             }
-            LiftingError::UnsupportedRepeatPattern(reason) => {
+            LiftingError::UnsupportedRepeatPattern { reason, .. } => {
                 write!(f, "unsupported repeat loop pattern: {reason}")
             }
         }
@@ -118,7 +143,10 @@ pub fn lift_proc(
     // Add return statement with outputs.
     if let Some(ProcSignature::Known { outputs, .. }) = sigs.get(proc_path) {
         let return_vars = stack.top_n(*outputs);
-        stmts.push(Stmt::Return(return_vars));
+        stmts.push(Stmt::Return {
+            span: SourceSpan::UNKNOWN,
+            values: return_vars,
+        });
     }
 
     Ok(stmts)
@@ -134,7 +162,7 @@ fn lift_block(
 ) -> LiftingResult<Vec<Stmt>> {
     let mut stmts = Vec::new();
     for op in block.iter() {
-        let op_stmts = lift_op(op, stack, loop_ctx, module_path, sigs)?;
+        let op_stmts = lift_op(op, op.span(), stack, loop_ctx, module_path, sigs)?;
         stmts.extend(op_stmts);
     }
     Ok(stmts)
@@ -143,20 +171,29 @@ fn lift_block(
 /// Lift a single operation to statements.
 fn lift_op(
     op: &Op,
+    op_span: SourceSpan,
     stack: &mut SymbolicStack,
     loop_ctx: &mut LoopContext,
     module_path: &str,
     sigs: &SignatureMap,
 ) -> LiftingResult<Vec<Stmt>> {
     match op {
-        Op::Inst(inst) => inst::lift_inst(inst.inner(), stack, loop_ctx, module_path, sigs),
+        Op::Inst(inst) => {
+            inst::lift_inst(inst.inner(), op_span, stack, loop_ctx, module_path, sigs)
+        }
         Op::If {
             then_blk, else_blk, ..
-        } => lift_if(then_blk, else_blk, stack, loop_ctx, module_path, sigs),
-        Op::Repeat { count, body, .. } => {
-            lift_repeat(*count as usize, body, stack, loop_ctx, module_path, sigs)
-        }
-        Op::While { body, .. } => lift_while(body, stack, loop_ctx, module_path, sigs),
+        } => lift_if(op_span, then_blk, else_blk, stack, loop_ctx, module_path, sigs),
+        Op::Repeat { count, body, .. } => lift_repeat(
+            op_span,
+            *count as usize,
+            body,
+            stack,
+            loop_ctx,
+            module_path,
+            sigs,
+        ),
+        Op::While { body, .. } => lift_while(op_span, body, stack, loop_ctx, module_path, sigs),
     }
 }
 
@@ -164,6 +201,7 @@ fn lift_op(
 ///
 /// Both branches must have the same stack effect.
 fn lift_if(
+    op_span: SourceSpan,
     then_block: &Block,
     else_block: &Block,
     stack: &mut SymbolicStack,
@@ -184,7 +222,7 @@ fn lift_if(
 
     // Verify balanced stack effects.
     if then_stack.len() != else_stack.len() {
-        return Err(LiftingError::UnbalancedIf);
+        return Err(LiftingError::UnbalancedIf { span: op_span });
     }
 
     // Merge branch stacks with Phi nodes where needed.
@@ -193,7 +231,7 @@ fn lift_if(
 
     for (then_var, else_var) in then_stack.iter().zip(else_stack.iter()) {
         if then_var.subscript != else_var.subscript {
-            return Err(LiftingError::IncompatibleIfMerge);
+            return Err(LiftingError::IncompatibleIfMerge { span: op_span });
         }
 
         if then_var.base == else_var.base && then_var.subscript == else_var.subscript {
@@ -213,6 +251,7 @@ fn lift_if(
     stack.set_stack(merged);
 
     Ok(vec![Stmt::If {
+        span: op_span,
         cond,
         then_body,
         else_body,
@@ -225,6 +264,7 @@ fn lift_if(
 /// For repeat loops, we process the body once to get the template statements,
 /// then compute appropriate subscripts for variables that escape the loop.
 fn lift_repeat(
+    op_span: SourceSpan,
     count: usize,
     body: &Block,
     stack: &mut SymbolicStack,
@@ -268,8 +308,13 @@ fn lift_repeat(
     } else {
         None
     };
-    let slot_indices =
-        compute_slot_indices(&entry_entries, &exit_entries, exit2_slots.as_deref(), count)?;
+    let slot_indices = compute_slot_indices(
+        op_span,
+        &entry_entries,
+        &exit_entries,
+        exit2_slots.as_deref(),
+        count,
+    )?;
     let produced_value_ids =
         collect_produced_value_ids(&entry_entries, &exit_entries, &body_stmts, &value_slots);
     let produced_stride = if delta > 0 { delta as i64 } else { 0 };
@@ -311,6 +356,7 @@ fn lift_repeat(
 
     let produced_slots = collect_produced_slot_ids(&entry_entries, &exit_entries);
     update_stack_after_repeat(
+        op_span,
         count,
         body,
         stack,
@@ -322,6 +368,7 @@ fn lift_repeat(
     )?;
 
     Ok(vec![Stmt::Repeat {
+        span: op_span,
         loop_var,
         loop_count: count,
         body: body_stmts,
@@ -400,7 +447,8 @@ fn transform_stmt_loop_subscripts(
     produced_stride: i64,
 ) -> Stmt {
     match stmt {
-        Stmt::Assign { dest, expr } => Stmt::Assign {
+        Stmt::Assign { span, dest, expr } => Stmt::Assign {
+            span,
             dest: transform_var_loop_subscripts(
                 dest,
                 loop_var_id,
@@ -421,11 +469,13 @@ fn transform_stmt_loop_subscripts(
             ),
         },
         Stmt::Repeat {
+            span,
             loop_var,
             loop_count,
             body,
             phis,
         } => Stmt::Repeat {
+            span,
             loop_var,
             loop_count,
             body: transform_loop_subscripts(
@@ -453,11 +503,13 @@ fn transform_stmt_loop_subscripts(
                 .collect(),
         },
         Stmt::If {
+            span,
             cond,
             then_body,
             else_body,
             phis,
         } => Stmt::If {
+            span,
             cond: transform_expr_loop_subscripts(
                 cond,
                 loop_var_id,
@@ -518,7 +570,13 @@ fn transform_stmt_loop_subscripts(
                 })
                 .collect(),
         },
-        Stmt::While { cond, body, phis } => Stmt::While {
+        Stmt::While {
+            span,
+            cond,
+            body,
+            phis,
+        } => Stmt::While {
+            span,
             cond: transform_expr_loop_subscripts(
                 cond,
                 loop_var_id,
@@ -552,8 +610,10 @@ fn transform_stmt_loop_subscripts(
                 })
                 .collect(),
         },
-        Stmt::Return(vars) => Stmt::Return(
-            vars.into_iter()
+        Stmt::Return { span, values } => Stmt::Return {
+            span,
+            values: values
+                .into_iter()
                 .map(|v| {
                     transform_var_loop_subscripts(
                         v,
@@ -566,7 +626,7 @@ fn transform_stmt_loop_subscripts(
                     )
                 })
                 .collect(),
-        ),
+        },
         other => other,
     }
 }
@@ -860,22 +920,22 @@ fn collect_defined_value_ids(stmts: &[Stmt]) -> HashSet<ValueId> {
 fn collect_defined_value_ids_stmt(stmt: &Stmt, defined: &mut HashSet<ValueId>) {
     match stmt {
         Stmt::Assign { dest, .. } => record_defined_id(dest, defined),
-        Stmt::MemLoad(load) => {
+        Stmt::MemLoad { load, .. } => {
             for v in &load.outputs {
                 record_defined_id(v, defined);
             }
         }
-        Stmt::AdvLoad(load) => {
+        Stmt::AdvLoad { load, .. } => {
             for v in &load.outputs {
                 record_defined_id(v, defined);
             }
         }
-        Stmt::LocalLoad(load) => {
+        Stmt::LocalLoad { load, .. } => {
             for v in &load.outputs {
                 record_defined_id(v, defined);
             }
         }
-        Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+        Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
             for v in &call.results {
                 record_defined_id(v, defined);
             }
@@ -885,7 +945,7 @@ fn collect_defined_value_ids_stmt(stmt: &Stmt, defined: &mut HashSet<ValueId>) {
                 record_defined_id(v, defined);
             }
         }
-        Stmt::Intrinsic(intrinsic) => {
+        Stmt::Intrinsic { intrinsic, .. } => {
             for v in &intrinsic.results {
                 record_defined_id(v, defined);
             }
@@ -922,11 +982,11 @@ fn collect_defined_value_ids_stmt(stmt: &Stmt, defined: &mut HashSet<ValueId>) {
                 collect_defined_value_ids_stmt(stmt, defined);
             }
         }
-        Stmt::MemStore(_)
-        | Stmt::AdvStore(_)
-        | Stmt::LocalStore(_)
-        | Stmt::LocalStoreW(_)
-        | Stmt::Return(_) => {}
+        Stmt::MemStore { .. }
+        | Stmt::AdvStore { .. }
+        | Stmt::LocalStore { .. }
+        | Stmt::LocalStoreW { .. }
+        | Stmt::Return { .. } => {}
     }
 }
 
@@ -939,6 +999,7 @@ fn record_defined_id(var: &Var, defined: &mut HashSet<ValueId>) {
 
 /// Compute slot indices for loop subscripts, validating linear movement.
 fn compute_slot_indices(
+    op_span: SourceSpan,
     entry_entries: &[StackEntry],
     exit_entries: &[StackEntry],
     exit2_slots: Option<&[SlotId]>,
@@ -964,9 +1025,11 @@ fn compute_slot_indices(
                     let delta1 = *exit_idx - base;
                     let delta2 = *next - *exit_idx;
                     if loop_count > 1 && delta1 != delta2 {
-                        return Err(LiftingError::UnsupportedRepeatPattern(
-                            "repeat loop permutes stack positions across iterations".to_string(),
-                        ));
+                        return Err(LiftingError::UnsupportedRepeatPattern {
+                            span: op_span,
+                            reason:
+                                "repeat loop permutes stack positions across iterations".to_string(),
+                        });
                     }
                     delta1
                 } else {
@@ -995,9 +1058,10 @@ fn compute_slot_indices(
                 let base = *exit_pos.get(&exit.slot_id).expect("exit slot");
                 *next - base
             } else if loop_count > 1 {
-                return Err(LiftingError::UnsupportedRepeatPattern(
-                    "repeat loop does not reach a steady stack layout".to_string(),
-                ));
+                return Err(LiftingError::UnsupportedRepeatPattern {
+                    span: op_span,
+                    reason: "repeat loop does not reach a steady stack layout".to_string(),
+                });
             } else {
                 0
             }
@@ -1055,6 +1119,7 @@ fn simulate_repeat_slots_from_ids(
 
 /// Update the stack after a repeat loop using slot-based simulation.
 fn update_stack_after_repeat(
+    op_span: SourceSpan,
     count: usize,
     body: &Block,
     stack: &mut SymbolicStack,
@@ -1141,15 +1206,17 @@ fn update_stack_after_repeat(
     for (idx, slot_id) in tagged_stack.slots().iter().enumerate() {
         let tag_set = tagged_stack.tags_for(slot_id);
         if tag_set.len() > 1 {
-            return Err(LiftingError::UnsupportedRepeatPattern(
-                "repeat loop merges multiple loop-carried values".to_string(),
-            ));
+            return Err(LiftingError::UnsupportedRepeatPattern {
+                span: op_span,
+                reason: "repeat loop merges multiple loop-carried values".to_string(),
+            });
         }
         let var = if let Some(tag) = tag_set.iter().next() {
             loop_carried_dests.get(tag).cloned().ok_or_else(|| {
-                LiftingError::UnsupportedRepeatPattern(
-                    "repeat loop produced unknown loop-carried value".to_string(),
-                )
+                LiftingError::UnsupportedRepeatPattern {
+                    span: op_span,
+                    reason: "repeat loop produced unknown loop-carried value".to_string(),
+                }
             })?
         } else {
             slot_vars
@@ -1198,7 +1265,7 @@ fn simulate_op_slots(
     sigs: &SignatureMap,
 ) -> LiftingResult<()> {
     match op {
-        Op::Inst(inst) => simulate_inst_slots(inst.inner(), stack, module_path, sigs),
+        Op::Inst(inst) => simulate_inst_slots(inst.inner(), op.span(), stack, module_path, sigs),
         Op::If {
             then_blk, else_blk, ..
         } => {
@@ -1207,7 +1274,7 @@ fn simulate_op_slots(
             simulate_block_slots(then_blk, &mut then_stack, module_path, sigs)?;
             simulate_block_slots(else_blk, &mut else_stack, module_path, sigs)?;
             if then_stack.slots != else_stack.slots {
-                return Err(LiftingError::UnbalancedIf);
+                return Err(LiftingError::UnbalancedIf { span: op.span() });
             }
             stack.slots = then_stack.slots;
             Ok(())
@@ -1218,15 +1285,17 @@ fn simulate_op_slots(
             }
             Ok(())
         }
-        Op::While { .. } => Err(LiftingError::UnsupportedRepeatPattern(
-            "repeat loop contains a while loop".to_string(),
-        )),
+        Op::While { .. } => Err(LiftingError::UnsupportedRepeatPattern {
+            span: op.span(),
+            reason: "repeat loop contains a while loop".to_string(),
+        }),
     }
 }
 
 /// Simulate a single instruction's stack effect for slot tracking.
 fn simulate_inst_slots(
     inst: &Instruction,
+    op_span: SourceSpan,
     stack: &mut SlotStack,
     module_path: &str,
     sigs: &SignatureMap,
@@ -1280,7 +1349,7 @@ fn simulate_inst_slots(
         Instruction::MovDn15 => stack.movdn(15),
         Instruction::Reversew => stack.reversew(),
         _ => {
-            let effect = inst::effect_for_inst(inst, module_path, sigs)?;
+            let effect = inst::effect_for_inst(inst, op_span, module_path, sigs)?;
             let (pops, pushes, required_depth) = match effect {
                 StackEffect::Known {
                     pops,
@@ -1623,7 +1692,7 @@ fn simulate_op_tags(
     sigs: &SignatureMap,
 ) -> LiftingResult<()> {
     match op {
-        Op::Inst(inst) => simulate_inst_tags(inst.inner(), stack, module_path, sigs),
+        Op::Inst(inst) => simulate_inst_tags(inst.inner(), op.span(), stack, module_path, sigs),
         Op::If {
             then_blk, else_blk, ..
         } => {
@@ -1632,9 +1701,10 @@ fn simulate_op_tags(
             simulate_block_tags(then_blk, &mut then_stack, module_path, sigs)?;
             simulate_block_tags(else_blk, &mut else_stack, module_path, sigs)?;
             if then_stack.slots != else_stack.slots || then_stack.tags != else_stack.tags {
-                return Err(LiftingError::UnsupportedRepeatPattern(
-                    "repeat loop contains if with incompatible branches".to_string(),
-                ));
+                return Err(LiftingError::UnsupportedRepeatPattern {
+                    span: op.span(),
+                    reason: "repeat loop contains if with incompatible branches".to_string(),
+                });
             }
             *stack = then_stack;
             Ok(())
@@ -1645,15 +1715,17 @@ fn simulate_op_tags(
             }
             Ok(())
         }
-        Op::While { .. } => Err(LiftingError::UnsupportedRepeatPattern(
-            "repeat loop contains a while loop".to_string(),
-        )),
+        Op::While { .. } => Err(LiftingError::UnsupportedRepeatPattern {
+            span: op.span(),
+            reason: "repeat loop contains a while loop".to_string(),
+        }),
     }
 }
 
 /// Simulate a single instruction's stack effect for tagged slot tracking.
 fn simulate_inst_tags(
     inst: &Instruction,
+    op_span: SourceSpan,
     stack: &mut TaggedSlotStack,
     module_path: &str,
     sigs: &SignatureMap,
@@ -1708,7 +1780,7 @@ fn simulate_inst_tags(
         Instruction::MovDn15 => stack.movdn(15),
         Instruction::Reversew => stack.reversew(),
         _ => {
-            let effect = inst::effect_for_inst(inst, module_path, sigs)?;
+            let effect = inst::effect_for_inst(inst, op_span, module_path, sigs)?;
             let (pops, pushes, required_depth) = match effect {
                 StackEffect::Known {
                     pops,
@@ -1748,17 +1820,19 @@ fn transform_stmt_loop_input(
     loop_depth: usize,
 ) -> Stmt {
     match stmt {
-        Stmt::Assign { dest, expr } => {
+        Stmt::Assign { span, dest, expr } => {
             let dest = transform_var_loop_input(dest, entry_value_ids, loop_depth);
             let expr = transform_expr_loop_input(expr, entry_value_ids, loop_depth);
-            Stmt::Assign { dest, expr }
+            Stmt::Assign { span, dest, expr }
         }
         Stmt::Repeat {
+            span,
             loop_var,
             loop_count,
             body,
             phis,
         } => Stmt::Repeat {
+            span,
             loop_var,
             loop_count,
             body: transform_loop_input_bases(body, entry_value_ids, loop_depth),
@@ -1772,11 +1846,13 @@ fn transform_stmt_loop_input(
                 .collect(),
         },
         Stmt::If {
+            span,
             cond,
             then_body,
             else_body,
             phis,
         } => Stmt::If {
+            span,
             cond: transform_expr_loop_input(cond, entry_value_ids, loop_depth),
             then_body: transform_loop_input_bases(then_body, entry_value_ids, loop_depth),
             else_body: transform_loop_input_bases(else_body, entry_value_ids, loop_depth),
@@ -1789,7 +1865,13 @@ fn transform_stmt_loop_input(
                 })
                 .collect(),
         },
-        Stmt::While { cond, body, phis } => Stmt::While {
+        Stmt::While {
+            span,
+            cond,
+            body,
+            phis,
+        } => Stmt::While {
+            span,
             cond: transform_expr_loop_input(cond, entry_value_ids, loop_depth),
             body: transform_loop_input_bases(body, entry_value_ids, loop_depth),
             phis: phis
@@ -1801,11 +1883,13 @@ fn transform_stmt_loop_input(
                 })
                 .collect(),
         },
-        Stmt::Return(vars) => Stmt::Return(
-            vars.into_iter()
+        Stmt::Return { span, values } => Stmt::Return {
+            span,
+            values: values
+                .into_iter()
                 .map(|v| transform_var_loop_input(v, entry_value_ids, loop_depth))
                 .collect(),
-        ),
+        },
         other => other,
     }
 }
@@ -1874,6 +1958,7 @@ fn transform_expr_loop_input(
 ///
 /// We only support stack-neutral while loops.
 fn lift_while(
+    op_span: SourceSpan,
     body: &Block,
     stack: &mut SymbolicStack,
     loop_ctx: &mut LoopContext,
@@ -1899,14 +1984,14 @@ fn lift_while(
 
     // The body should end with pushing a condition value.
     if body_stack.is_empty() {
-        return Err(LiftingError::NonNeutralWhile);
+        return Err(LiftingError::NonNeutralWhile { span: op_span });
     }
     // Pop the continuation condition.
     body_stack.pop();
 
     // Verify that the loop body is stack-neutral.
     if body_stack.len() != entry_depth {
-        return Err(LiftingError::NonNeutralWhile);
+        return Err(LiftingError::NonNeutralWhile { span: op_span });
     }
 
     let step_vars = body_stack.to_vec();
@@ -1924,6 +2009,7 @@ fn lift_while(
     stack.set_stack(phi_vars);
 
     Ok(vec![Stmt::While {
+        span: op_span,
         cond,
         body: body_stmts,
         phis,
@@ -1972,7 +2058,7 @@ mod tests {
             StackEntry::new(make_var(0, 1, 1), SlotId::new(0)),
         ];
         let exit2_slots = vec![SlotId::new(1), SlotId::new(2), SlotId::new(0)];
-        let indices = compute_slot_indices(&entry, &exit, Some(&exit2_slots), 2)
+        let indices = compute_slot_indices(SourceSpan::UNKNOWN, &entry, &exit, Some(&exit2_slots), 2)
             .expect("slot index computation should succeed");
         let entry_index = indices.get(&SlotId::new(0)).expect("entry slot");
         assert_eq!(entry_index.delta, 1);
@@ -1989,6 +2075,7 @@ mod tests {
             subscript: IndexExpr::Const(0),
         };
         let stmt = Stmt::Assign {
+            span: SourceSpan::UNKNOWN,
             dest: entry_var.clone(),
             expr: Expr::Var(entry_var.clone()),
         };
@@ -1998,7 +2085,7 @@ mod tests {
 
         let transformed = transform_loop_input_bases(vec![stmt], &entry_ids, 0);
         match &transformed[0] {
-            Stmt::Assign { dest, expr } => {
+            Stmt::Assign { dest, expr, .. } => {
                 assert!(matches!(dest.base, VarBase::LoopInput { loop_depth: 0 }));
                 match expr {
                     Expr::Var(v) => {

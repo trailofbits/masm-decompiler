@@ -5,6 +5,7 @@
 //! constructs.
 
 use miden_assembly_syntax::ast::{ImmFelt, ImmU32, Immediate};
+use miden_assembly_syntax::debuginfo::SourceSpan;
 use miden_assembly_syntax::parser::PushValue;
 
 /// Index expression used for variable subscripts.
@@ -456,33 +457,104 @@ pub struct LoopPhi {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
     /// Assignment to a variable.
-    Assign { dest: Var, expr: Expr },
+    Assign {
+        /// Source span of the originating instruction.
+        span: SourceSpan,
+        /// Destination variable.
+        dest: Var,
+        /// Assigned expression.
+        expr: Expr,
+    },
     /// Memory load operation.
-    MemLoad(MemLoad),
+    MemLoad {
+        /// Source span of the originating instruction.
+        span: SourceSpan,
+        /// Memory load description.
+        load: MemLoad,
+    },
     /// Memory store operation.
-    MemStore(MemStore),
+    MemStore {
+        /// Source span of the originating instruction.
+        span: SourceSpan,
+        /// Memory store description.
+        store: MemStore,
+    },
     /// Advice stack load.
-    AdvLoad(AdvLoad),
+    AdvLoad {
+        /// Source span of the originating instruction.
+        span: SourceSpan,
+        /// Advice stack load description.
+        load: AdvLoad,
+    },
     /// Advice stack store.
-    AdvStore(AdvStore),
+    AdvStore {
+        /// Source span of the originating instruction.
+        span: SourceSpan,
+        /// Advice stack store description.
+        store: AdvStore,
+    },
     /// Local variable load.
-    LocalLoad(LocalLoad),
+    LocalLoad {
+        /// Source span of the originating instruction.
+        span: SourceSpan,
+        /// Local variable load description.
+        load: LocalLoad,
+    },
     /// Local variable store.
-    LocalStore(LocalStore),
+    LocalStore {
+        /// Source span of the originating instruction.
+        span: SourceSpan,
+        /// Local variable store description.
+        store: LocalStore,
+    },
     /// Local word store (big-endian).
-    LocalStoreW(LocalStoreW),
+    LocalStoreW {
+        /// Source span of the originating instruction.
+        span: SourceSpan,
+        /// Local word store description.
+        store: LocalStoreW,
+    },
     /// Call to a known procedure.
-    Call(Call),
+    Call {
+        /// Source span of the originating instruction.
+        span: SourceSpan,
+        /// Call description.
+        call: Call,
+    },
     /// Exec call to a known procedure.
-    Exec(Call),
+    Exec {
+        /// Source span of the originating instruction.
+        span: SourceSpan,
+        /// Call description.
+        call: Call,
+    },
     /// Syscall to a known procedure.
-    SysCall(Call),
+    SysCall {
+        /// Source span of the originating instruction.
+        span: SourceSpan,
+        /// Call description.
+        call: Call,
+    },
     /// Dynamic call with unknown target.
-    DynCall { args: Vec<Var>, results: Vec<Var> },
+    DynCall {
+        /// Source span of the originating instruction.
+        span: SourceSpan,
+        /// Input arguments popped from the stack.
+        args: Vec<Var>,
+        /// Output results pushed onto the stack.
+        results: Vec<Var>,
+    },
     /// Named intrinsic operation.
-    Intrinsic(Intrinsic),
+    Intrinsic {
+        /// Source span of the originating instruction.
+        span: SourceSpan,
+        /// Intrinsic description.
+        intrinsic: Intrinsic,
+    },
     /// Repeat loop with a known iteration count.
     Repeat {
+        /// Source span of the originating repeat operation.
+        span: SourceSpan,
         /// Loop counter variable.
         loop_var: LoopVar,
         /// Number of iterations.
@@ -494,6 +566,8 @@ pub enum Stmt {
     },
     /// If/else conditional.
     If {
+        /// Source span of the originating if operation.
+        span: SourceSpan,
         /// Condition expression.
         cond: Expr,
         /// Then branch statements.
@@ -505,6 +579,8 @@ pub enum Stmt {
     },
     /// While loop.
     While {
+        /// Source span of the originating while operation.
+        span: SourceSpan,
         /// Condition expression.
         cond: Expr,
         /// Loop body statements.
@@ -513,5 +589,10 @@ pub enum Stmt {
         phis: Vec<LoopPhi>,
     },
     /// Return statement.
-    Return(Vec<Var>),
+    Return {
+        /// Source span of the originating instruction.
+        span: SourceSpan,
+        /// Return values.
+        values: Vec<Var>,
+    },
 }

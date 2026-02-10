@@ -67,7 +67,7 @@ fn decompile_with_custom_config() {
 #[test]
 fn decompile_module() {
     let ws = workspace_from_modules(&[(
-        "mymod",
+        "mod",
         r#"
         pub proc foo
             push.1
@@ -80,9 +80,9 @@ fn decompile_module() {
     )]);
 
     let decompiler = Decompiler::new(&ws);
-    let module = decompiler.decompile_module("mymod").unwrap();
+    let module = decompiler.decompile_module("mod").unwrap();
 
-    assert_eq!(module.module_path, "mymod");
+    assert_eq!(module.module_path, "mod");
     assert_eq!(module.procedures.len(), 2);
 
     // Check we can find procedures by name
@@ -188,7 +188,10 @@ fn decompiled_proc_return_vars() {
     let result = decompiler.decompile_proc("test::returns_two").unwrap();
 
     // Should have a Return statement with 2 variables
-    let has_return = result.stmts().iter().any(|s| matches!(s, Stmt::Return(_)));
+    let has_return = result
+        .stmts()
+        .iter()
+        .any(|s| matches!(s, Stmt::Return { .. }));
     assert!(has_return, "should have a return statement");
 
     let return_vars = result.return_vars();

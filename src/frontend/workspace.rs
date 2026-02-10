@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::path::{Path as FsPath, PathBuf as FsPathBuf};
+use std::sync::Arc;
 
 use miden_assembly_syntax::ast::path::PathBuf as MasmPathBuf;
+use miden_assembly_syntax::debuginfo::{DefaultSourceManager, SourceManager};
 
 use super::{LibraryRoot, Program};
 
@@ -9,6 +11,7 @@ use super::{LibraryRoot, Program};
 #[derive(Debug)]
 pub struct Workspace {
     roots: Vec<LibraryRoot>,
+    source_manager: Arc<dyn SourceManager>,
     modules: Vec<Program>,
     index: HashMap<String, usize>,
     pub(crate) proc_index: HashMap<String, (usize, usize)>,
@@ -16,8 +19,17 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(roots: Vec<LibraryRoot>) -> Self {
+        let source_manager: Arc<dyn SourceManager> = Arc::new(DefaultSourceManager::default());
+        Self::with_source_manager(roots, source_manager)
+    }
+
+    pub fn with_source_manager(
+        roots: Vec<LibraryRoot>,
+        source_manager: Arc<dyn SourceManager>,
+    ) -> Self {
         Self {
             roots,
+            source_manager,
             modules: Vec::new(),
             index: HashMap::new(),
             proc_index: HashMap::new(),
@@ -26,7 +38,8 @@ impl Workspace {
 
     /// Load the entry module from a file path. If already loaded, returns its index.
     pub fn load_entry(&mut self, path: &FsPath) -> Result<usize, String> {
-        let prog = Program::from_path(path, &self.roots).map_err(|e| e.to_string())?;
+        let prog = Program::from_path(path, &self.roots, self.source_manager.clone())
+            .map_err(|e| e.to_string())?;
         let key = as_str(prog.module_path()).to_string();
         if let Some(idx) = self.index.get(&key).copied() {
             return Ok(idx);
@@ -39,6 +52,9 @@ impl Workspace {
     }
 
     /// Insert a program directly (useful for in-memory tests).
+    ///
+    /// Note: `program` should be parsed using this workspace's source manager to
+    /// ensure SourceSpan lookups resolve correctly.
     pub fn add_program(&mut self, program: Program) -> usize {
         let key = as_str(program.module_path()).to_string();
         if let Some(idx) = self.index.get(&key).copied() {
@@ -90,7 +106,7 @@ impl Workspace {
             return Some(idx);
         }
         let file = find_module_file(module_path, &self.roots)?;
-        let prog = Program::from_path(&file, &self.roots).ok()?;
+        let prog = Program::from_path(&file, &self.roots, self.source_manager.clone()).ok()?;
         let key = as_str(prog.module_path()).to_string();
         let idx = self.modules.len();
         self.modules.push(prog);
@@ -112,6 +128,10 @@ impl Workspace {
 
     pub fn roots(&self) -> &[LibraryRoot] {
         &self.roots
+    }
+
+    pub fn source_manager(&self) -> Arc<dyn SourceManager> {
+        self.source_manager.clone()
     }
 }
 

@@ -123,6 +123,7 @@ impl Simplify for Stmt {
     fn simplify(self) -> SimplifyResult<Self::Output> {
         match self {
             Stmt::If {
+                span,
                 cond,
                 then_body,
                 else_body,
@@ -157,6 +158,7 @@ impl Simplify for Stmt {
                 }
                 SimplifyResult::new(
                     vec![Stmt::If {
+                        span,
                         cond,
                         then_body,
                         else_body,
@@ -166,6 +168,7 @@ impl Simplify for Stmt {
                 )
             }
             Stmt::Repeat {
+                span,
                 loop_var,
                 loop_count,
                 body,
@@ -181,6 +184,7 @@ impl Simplify for Stmt {
                 }
                 SimplifyResult::new(
                     vec![Stmt::Repeat {
+                        span,
                         loop_var,
                         loop_count,
                         body,
@@ -190,7 +194,7 @@ impl Simplify for Stmt {
                 )
             }
             // Remove self-assignments.
-            Stmt::Assign { dest, expr } => {
+            Stmt::Assign { span, dest, expr } => {
                 let dest_result = dest.simplify();
                 let expr_result = expr.simplify();
                 let changed = dest_result.changed || expr_result.changed;
@@ -203,26 +207,47 @@ impl Simplify for Stmt {
                         return SimplifyResult::changed(Vec::new());
                     }
                 }
-                SimplifyResult::new(vec![Stmt::Assign { dest, expr }], changed)
+                SimplifyResult::new(vec![Stmt::Assign { span, dest, expr }], changed)
             }
             // Simplify load and store arguments.
-            Stmt::MemLoad(load) => load.simplify().map(|l| vec![Stmt::MemLoad(l)]),
-            Stmt::MemStore(store) => store.simplify().map(|s| vec![Stmt::MemStore(s)]),
-            Stmt::AdvLoad(load) => load.simplify().map(|l| vec![Stmt::AdvLoad(l)]),
-            Stmt::AdvStore(store) => store.simplify().map(|s| vec![Stmt::AdvStore(s)]),
-            Stmt::LocalLoad(load) => load.simplify().map(|l| vec![Stmt::LocalLoad(l)]),
-            Stmt::LocalStore(store) => store.simplify().map(|s| vec![Stmt::LocalStore(s)]),
-            Stmt::LocalStoreW(store) => store.simplify().map(|s| vec![Stmt::LocalStoreW(s)]),
+            Stmt::MemLoad { span, load } => {
+                load.simplify().map(|l| vec![Stmt::MemLoad { span, load: l }])
+            }
+            Stmt::MemStore { span, store } => {
+                store.simplify().map(|s| vec![Stmt::MemStore { span, store: s }])
+            }
+            Stmt::AdvLoad { span, load } => {
+                load.simplify().map(|l| vec![Stmt::AdvLoad { span, load: l }])
+            }
+            Stmt::AdvStore { span, store } => {
+                store.simplify().map(|s| vec![Stmt::AdvStore { span, store: s }])
+            }
+            Stmt::LocalLoad { span, load } => {
+                load.simplify().map(|l| vec![Stmt::LocalLoad { span, load: l }])
+            }
+            Stmt::LocalStore { span, store } => {
+                store.simplify().map(|s| vec![Stmt::LocalStore { span, store: s }])
+            }
+            Stmt::LocalStoreW { span, store } => {
+                store.simplify().map(|s| vec![Stmt::LocalStoreW { span, store: s }])
+            }
             // Calls.
-            Stmt::Call(call) => call.simplify().map(|c| vec![Stmt::Call(c)]),
-            Stmt::Exec(call) => call.simplify().map(|c| vec![Stmt::Exec(c)]),
-            Stmt::SysCall(call) => call.simplify().map(|c| vec![Stmt::SysCall(c)]),
-            Stmt::DynCall { args, results } => {
+            Stmt::Call { span, call } => {
+                call.simplify().map(|c| vec![Stmt::Call { span, call: c }])
+            }
+            Stmt::Exec { span, call } => {
+                call.simplify().map(|c| vec![Stmt::Exec { span, call: c }])
+            }
+            Stmt::SysCall { span, call } => {
+                call.simplify().map(|c| vec![Stmt::SysCall { span, call: c }])
+            }
+            Stmt::DynCall { span, args, results } => {
                 let args_result = args.simplify();
                 let results_result = results.simplify();
                 let changed = args_result.changed || results_result.changed;
                 SimplifyResult::new(
                     vec![Stmt::DynCall {
+                        span,
                         args: args_result.value,
                         results: results_result.value,
                     }],

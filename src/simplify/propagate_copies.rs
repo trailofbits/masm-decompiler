@@ -141,7 +141,7 @@ fn propagate_block(stmts: &mut Vec<Stmt>, state: &mut CopyState) -> bool {
     let mut changed = false;
     for stmt in stmts.iter_mut() {
         match stmt {
-            Stmt::Assign { dest, expr } => {
+            Stmt::Assign { dest, expr, .. } => {
                 changed |= rewrite_expr(expr, state);
                 state.kill_var(dest);
                 if let Expr::Var(src) = expr {
@@ -152,53 +152,53 @@ fn propagate_block(stmts: &mut Vec<Stmt>, state: &mut CopyState) -> bool {
                 }
             }
 
-            Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+            Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
                 changed |= rewrite_vars(&mut call.args, state);
                 state.kill_vars(&call.results);
             }
 
-            Stmt::DynCall { args, results } => {
+            Stmt::DynCall { args, results, .. } => {
                 changed |= rewrite_vars(args, state);
                 state.kill_vars(results);
             }
 
-            Stmt::Intrinsic(intr) => {
+            Stmt::Intrinsic { intrinsic: intr, .. } => {
                 changed |= rewrite_vars(&mut intr.args, state);
                 state.kill_vars(&intr.results);
             }
 
-            Stmt::MemLoad(load) => {
+            Stmt::MemLoad { load, .. } => {
                 changed |= rewrite_vars(&mut load.address, state);
                 state.kill_vars(&load.outputs);
             }
 
-            Stmt::MemStore(store) => {
+            Stmt::MemStore { store, .. } => {
                 changed |= rewrite_vars(&mut store.address, state);
                 changed |= rewrite_vars(&mut store.values, state);
             }
 
-            Stmt::AdvLoad(load) => {
+            Stmt::AdvLoad { load, .. } => {
                 state.kill_vars(&load.outputs);
             }
 
-            Stmt::AdvStore(store) => {
+            Stmt::AdvStore { store, .. } => {
                 changed |= rewrite_vars(&mut store.values, state);
             }
 
-            Stmt::LocalLoad(load) => {
+            Stmt::LocalLoad { load, .. } => {
                 state.kill_vars(&load.outputs);
             }
 
-            Stmt::LocalStore(store) => {
+            Stmt::LocalStore { store, .. } => {
                 changed |= rewrite_vars(&mut store.values, state);
             }
 
-            Stmt::LocalStoreW(store) => {
+            Stmt::LocalStoreW { store, .. } => {
                 changed |= rewrite_vars(&mut store.values, state);
             }
 
-            Stmt::Return(vars) => {
-                changed |= rewrite_vars(vars, state);
+            Stmt::Return { values, .. } => {
+                changed |= rewrite_vars(values, state);
             }
 
             Stmt::If {
@@ -281,6 +281,9 @@ fn rewrite_expr(expr: &mut Expr, state: &CopyState) -> bool {
 mod tests {
     use super::*;
     use crate::ir::{Call, VarBase};
+    use miden_assembly_syntax::debuginfo::SourceSpan;
+
+    const TEST_SPAN: SourceSpan = SourceSpan::UNKNOWN;
 
     /// Create a variable with a fixed base and constant subscript.
     fn make_var(id: u64, sub: i64) -> Var {
@@ -314,32 +317,39 @@ mod tests {
 
         let mut code = vec![
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: v4.clone(),
                 expr: Expr::Var(v0.clone()),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: v5.clone(),
                 expr: Expr::Var(v1.clone()),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: v6.clone(),
                 expr: Expr::Var(v2.clone()),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: v7.clone(),
                 expr: Expr::Var(v3.clone()),
             },
-            Stmt::Exec(Call {
-                target: "::mod::gt".to_string(),
-                args: vec![v7.clone(), v6.clone(), v5.clone(), v4.clone()],
-                results: vec![make_var(8, 8)],
-            }),
+            Stmt::Exec {
+                span: TEST_SPAN,
+                call: Call {
+                    target: "::mod::gt".to_string(),
+                    args: vec![v7.clone(), v6.clone(), v5.clone(), v4.clone()],
+                    results: vec![make_var(8, 8)],
+                },
+            },
         ];
 
         propagate_copies(&mut code);
 
         match &code[4] {
-            Stmt::Exec(call) => {
+            Stmt::Exec { call, .. } => {
                 assert_eq!(call.args, vec![v3, v2, v1, v0]);
             }
             other => panic!("expected exec call, got {other:?}"),
@@ -355,20 +365,25 @@ mod tests {
 
         let mut code = vec![
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: v1.clone(),
                 expr: Expr::Var(v0.clone()),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: v2.clone(),
                 expr: Expr::Var(v1.clone()),
             },
-            Stmt::Return(vec![v2.clone()]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![v2.clone()],
+            },
         ];
 
         propagate_copies(&mut code);
 
         match &code[2] {
-            Stmt::Return(vars) => assert_eq!(vars, &vec![v0]),
+            Stmt::Return { values, .. } => assert_eq!(values, &vec![v0]),
             other => panic!("expected return, got {other:?}"),
         }
     }
@@ -381,16 +396,20 @@ mod tests {
 
         let mut code = vec![
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: dest.clone(),
                 expr: Expr::Var(loop_src),
             },
-            Stmt::Return(vec![dest.clone()]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![dest.clone()],
+            },
         ];
 
         propagate_copies(&mut code);
 
         match &code[1] {
-            Stmt::Return(vars) => assert_eq!(vars, &vec![dest]),
+            Stmt::Return { values, .. } => assert_eq!(values, &vec![dest]),
             other => panic!("expected return, got {other:?}"),
         }
     }

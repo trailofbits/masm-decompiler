@@ -116,6 +116,9 @@ fn eliminate_at_paths(
 mod tests {
     use super::*;
     use crate::ir::{BinOp, Constant, Expr, IndexExpr, LoopPhi, LoopVar, Var, VarBase, ValueId};
+    use miden_assembly_syntax::debuginfo::SourceSpan;
+
+    const TEST_SPAN: SourceSpan = SourceSpan::UNKNOWN;
 
     fn var_with_subscript(stack_depth: usize, sub: i64) -> Var {
         Var {
@@ -132,21 +135,26 @@ mod tests {
         // return v_1;
         let mut stmts = vec![
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(0, 0),
                 expr: Expr::Constant(Constant::Felt(1)),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(1, 1),
                 expr: Expr::Constant(Constant::Felt(2)),
             },
-            Stmt::Return(vec![var_with_subscript(1, 1)]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![var_with_subscript(1, 1)],
+            },
         ];
 
         eliminate_dead_code(&mut stmts);
 
         assert_eq!(stmts.len(), 2);
         assert!(matches!(&stmts[0], Stmt::Assign { dest, .. } if dest.stack_depth == 1));
-        assert!(matches!(&stmts[1], Stmt::Return(_)));
+        assert!(matches!(&stmts[1], Stmt::Return { .. }));
     }
 
     #[test]
@@ -156,14 +164,19 @@ mod tests {
         // return v_0;
         let mut stmts = vec![
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(0, 0),
                 expr: Expr::Constant(Constant::Felt(1)),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(0, 0),
                 expr: Expr::Constant(Constant::Felt(2)),
             },
-            Stmt::Return(vec![var_with_subscript(0, 0)]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![var_with_subscript(0, 0)],
+            },
         ];
 
         eliminate_dead_code(&mut stmts);
@@ -177,7 +190,7 @@ mod tests {
                 ..
             }
         ));
-        assert!(matches!(&stmts[1], Stmt::Return(_)));
+        assert!(matches!(&stmts[1], Stmt::Return { .. }));
     }
 
     #[test]
@@ -188,18 +201,24 @@ mod tests {
         // return v_1;
         let mut stmts = vec![
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(0, 0),
                 expr: Expr::Constant(Constant::Felt(1)),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(1, 1),
                 expr: Expr::Var(var_with_subscript(0, 0)),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(0, 0),
                 expr: Expr::Constant(Constant::Felt(2)),
             },
-            Stmt::Return(vec![var_with_subscript(1, 1)]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![var_with_subscript(1, 1)],
+            },
         ];
 
         eliminate_dead_code(&mut stmts);
@@ -210,7 +229,7 @@ mod tests {
             matches!(&stmts[0], Stmt::Assign { dest, expr: Expr::Constant(Constant::Felt(1)), .. } if dest.stack_depth == 0)
         );
         assert!(matches!(&stmts[1], Stmt::Assign { dest, .. } if dest.stack_depth == 1));
-        assert!(matches!(&stmts[2], Stmt::Return(_)));
+        assert!(matches!(&stmts[2], Stmt::Return { .. }));
     }
 
     #[test]
@@ -221,10 +240,12 @@ mod tests {
         // return v_2;
         let mut stmts = vec![
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(0, 0),
                 expr: Expr::Constant(Constant::Felt(1)),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(1, 1),
                 expr: Expr::Binary(
                     BinOp::Add,
@@ -233,10 +254,14 @@ mod tests {
                 ),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: var_with_subscript(2, 2),
                 expr: Expr::Constant(Constant::Felt(3)),
             },
-            Stmt::Return(vec![var_with_subscript(2, 2)]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![var_with_subscript(2, 2)],
+            },
         ];
 
         eliminate_dead_code(&mut stmts);
@@ -244,7 +269,7 @@ mod tests {
         // Both v_0 and v_1 should be eliminated through iteration.
         assert_eq!(stmts.len(), 2);
         assert!(matches!(&stmts[0], Stmt::Assign { dest, .. } if dest.stack_depth == 2));
-        assert!(matches!(&stmts[1], Stmt::Return(_)));
+        assert!(matches!(&stmts[1], Stmt::Return { .. }));
     }
 
     #[test]
@@ -258,24 +283,31 @@ mod tests {
         // return v_1;
         let mut stmts = vec![
             Stmt::If {
+                span: TEST_SPAN,
                 cond: Expr::True,
                 then_body: vec![
                     Stmt::Assign {
+                        span: TEST_SPAN,
                         dest: var_with_subscript(0, 0),
                         expr: Expr::Constant(Constant::Felt(1)),
                     },
                     Stmt::Assign {
+                        span: TEST_SPAN,
                         dest: var_with_subscript(1, 1),
                         expr: Expr::Constant(Constant::Felt(2)),
                     },
                 ],
                 else_body: vec![Stmt::Assign {
+                    span: TEST_SPAN,
                     dest: var_with_subscript(2, 2),
                     expr: Expr::Constant(Constant::Felt(3)),
                 }],
                 phis: Vec::new(),
             },
-            Stmt::Return(vec![var_with_subscript(1, 1)]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![var_with_subscript(1, 1)],
+            },
         ];
 
         eliminate_dead_code(&mut stmts);
@@ -324,9 +356,11 @@ mod tests {
 
         let mut stmts = vec![
             Stmt::Repeat {
+                span: TEST_SPAN,
                 loop_var,
                 loop_count: 4,
                 body: vec![Stmt::Assign {
+                    span: TEST_SPAN,
                     dest: var_in_loop.clone(),
                     expr: Expr::Constant(Constant::Felt(42)),
                 }],
@@ -340,7 +374,10 @@ mod tests {
                     step: var_in_loop.clone(),
                 }],
             },
-            Stmt::Return(vec![loop_phi_dest]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![loop_phi_dest],
+            },
         ];
 
         eliminate_dead_code(&mut stmts);
@@ -359,16 +396,19 @@ mod tests {
         // MemStore is a side effect and should be preserved.
         use crate::ir::MemStore;
 
-        let mut stmts = vec![Stmt::MemStore(MemStore {
-            address: vec![var_with_subscript(0, 0)],
-            values: vec![var_with_subscript(1, 1)],
-        })];
+        let mut stmts = vec![Stmt::MemStore {
+            span: TEST_SPAN,
+            store: MemStore {
+                address: vec![var_with_subscript(0, 0)],
+                values: vec![var_with_subscript(1, 1)],
+            },
+        }];
 
         eliminate_dead_code(&mut stmts);
 
         // Store should be preserved.
         assert_eq!(stmts.len(), 1);
-        assert!(matches!(&stmts[0], Stmt::MemStore(_)));
+        assert!(matches!(&stmts[0], Stmt::MemStore { .. }));
     }
 
     #[test]
@@ -376,17 +416,20 @@ mod tests {
         // Calls have side effects and should be preserved even if results unused.
         use crate::ir::Call;
 
-        let mut stmts = vec![Stmt::Call(Call {
-            target: "foo".to_string(),
-            args: vec![],
-            results: vec![var_with_subscript(0, 0)], // Result unused
-        })];
+        let mut stmts = vec![Stmt::Call {
+            span: TEST_SPAN,
+            call: Call {
+                target: "foo".to_string(),
+                args: vec![],
+                results: vec![var_with_subscript(0, 0)], // Result unused
+            },
+        }];
 
         eliminate_dead_code(&mut stmts);
 
         // Call should be preserved.
         assert_eq!(stmts.len(), 1);
-        assert!(matches!(&stmts[0], Stmt::Call(_)));
+        assert!(matches!(&stmts[0], Stmt::Call { .. }));
     }
 
     #[test]
@@ -399,18 +442,24 @@ mod tests {
         // return v_0;
         let mut stmts = vec![
             Stmt::If {
+                span: TEST_SPAN,
                 cond: Expr::True,
                 then_body: vec![Stmt::Assign {
+                    span: TEST_SPAN,
                     dest: var_with_subscript(0, 0),
                     expr: Expr::Constant(Constant::Felt(1)),
                 }],
                 else_body: vec![Stmt::Assign {
+                    span: TEST_SPAN,
                     dest: var_with_subscript(0, 0),
                     expr: Expr::Constant(Constant::Felt(2)),
                 }],
                 phis: Vec::new(),
             },
-            Stmt::Return(vec![var_with_subscript(0, 0)]),
+            Stmt::Return {
+                span: TEST_SPAN,
+                values: vec![var_with_subscript(0, 0)],
+            },
         ];
 
         eliminate_dead_code(&mut stmts);

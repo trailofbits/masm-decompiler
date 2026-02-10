@@ -5,7 +5,7 @@ use std::path::{Path as FsPath, PathBuf as FsPathBuf};
 use miden_assembly_syntax::{
     ModuleParser, Report,
     ast::{Module, ModuleKind, Procedure, path::PathBuf as MasmPathBuf},
-    debuginfo::DefaultSourceManager,
+    debuginfo::SourceManager,
 };
 use std::sync::Arc;
 
@@ -38,7 +38,11 @@ pub struct Program {
 }
 
 impl Program {
-    pub fn from_path(path: impl AsRef<FsPath>, roots: &[LibraryRoot]) -> Result<Self, Report> {
+    pub fn from_path(
+        path: impl AsRef<FsPath>,
+        roots: &[LibraryRoot],
+        source_manager: Arc<dyn SourceManager>,
+    ) -> Result<Self, Report> {
         let path = path.as_ref();
         // Most MASM files we decompile are library-style modules (no `begin/end` wrapper).
         // Prefer the library parser; fall back to executable if needed.
@@ -47,8 +51,6 @@ impl Program {
         let module_name =
             derive_module_path(path, roots).unwrap_or_else(|_| MasmPathBuf::absolute(Module::ROOT));
 
-        let source_manager: Arc<dyn miden_assembly_syntax::debuginfo::SourceManager> =
-            Arc::new(DefaultSourceManager::default());
         let module = match parser.parse_file(&module_name, path, source_manager.clone()) {
             Ok(m) => m,
             Err(_e) => {

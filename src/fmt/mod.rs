@@ -168,11 +168,11 @@ fn collect_var_usage(stmts: &[Stmt]) -> VarUsage {
 /// Collect variable usage data for a single statement.
 fn collect_stmt_usage(stmt: &Stmt, usage: &mut VarUsage) {
     match stmt {
-        Stmt::Assign { dest, expr } => {
+        Stmt::Assign { dest, expr, .. } => {
             usage.record_def(dest);
             collect_expr_usage(expr, usage);
         }
-        Stmt::MemLoad(load) => {
+        Stmt::MemLoad { load, .. } => {
             for v in &load.address {
                 usage.record_use(v);
             }
@@ -180,7 +180,7 @@ fn collect_stmt_usage(stmt: &Stmt, usage: &mut VarUsage) {
                 usage.record_def(v);
             }
         }
-        Stmt::MemStore(store) => {
+        Stmt::MemStore { store, .. } => {
             for v in &store.address {
                 usage.record_use(v);
             }
@@ -188,32 +188,32 @@ fn collect_stmt_usage(stmt: &Stmt, usage: &mut VarUsage) {
                 usage.record_use(v);
             }
         }
-        Stmt::AdvLoad(load) => {
+        Stmt::AdvLoad { load, .. } => {
             for v in &load.outputs {
                 usage.record_def(v);
             }
         }
-        Stmt::AdvStore(store) => {
+        Stmt::AdvStore { store, .. } => {
             for v in &store.values {
                 usage.record_use(v);
             }
         }
-        Stmt::LocalLoad(load) => {
+        Stmt::LocalLoad { load, .. } => {
             for v in &load.outputs {
                 usage.record_def(v);
             }
         }
-        Stmt::LocalStore(store) => {
+        Stmt::LocalStore { store, .. } => {
             for v in &store.values {
                 usage.record_use(v);
             }
         }
-        Stmt::LocalStoreW(store) => {
+        Stmt::LocalStoreW { store, .. } => {
             for v in &store.values {
                 usage.record_use(v);
             }
         }
-        Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+        Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
             for v in &call.args {
                 usage.record_use(v);
             }
@@ -221,7 +221,7 @@ fn collect_stmt_usage(stmt: &Stmt, usage: &mut VarUsage) {
                 usage.record_def(v);
             }
         }
-        Stmt::DynCall { args, results } => {
+        Stmt::DynCall { args, results, .. } => {
             for v in args {
                 usage.record_use(v);
             }
@@ -229,7 +229,7 @@ fn collect_stmt_usage(stmt: &Stmt, usage: &mut VarUsage) {
                 usage.record_def(v);
             }
         }
-        Stmt::Intrinsic(intrinsic) => {
+        Stmt::Intrinsic { intrinsic, .. } => {
             for v in &intrinsic.args {
                 usage.record_use(v);
             }
@@ -238,10 +238,9 @@ fn collect_stmt_usage(stmt: &Stmt, usage: &mut VarUsage) {
             }
         }
         Stmt::Repeat {
-            loop_var: _,
-            loop_count: _,
             body,
             phis,
+            ..
         } => {
             for phi in phis {
                 usage.record_def(&phi.dest);
@@ -257,6 +256,7 @@ fn collect_stmt_usage(stmt: &Stmt, usage: &mut VarUsage) {
             then_body,
             else_body,
             phis,
+            ..
         } => {
             collect_expr_usage(cond, usage);
             for phi in phis {
@@ -271,7 +271,7 @@ fn collect_stmt_usage(stmt: &Stmt, usage: &mut VarUsage) {
                 collect_stmt_usage(stmt, usage);
             }
         }
-        Stmt::While { cond, body, phis } => {
+        Stmt::While { cond, body, phis, .. } => {
             collect_expr_usage(cond, usage);
             for phi in phis {
                 usage.record_def(&phi.dest);
@@ -282,8 +282,8 @@ fn collect_stmt_usage(stmt: &Stmt, usage: &mut VarUsage) {
                 collect_stmt_usage(stmt, usage);
             }
         }
-        Stmt::Return(vars) => {
-            for v in vars {
+        Stmt::Return { values, .. } => {
+            for v in values {
                 usage.record_use(v);
             }
         }
@@ -724,10 +724,10 @@ impl CodeDisplay for DecompiledHeader {
 impl CodeDisplay for Stmt {
     fn fmt_code(&self, f: &mut CodeWriter) {
         match self {
-            Stmt::Assign { dest: dst, expr } => {
+            Stmt::Assign { dest: dst, expr, .. } => {
                 f.write_line(&format!("{} = {};", f.fmt_var(dst), fmt_expr(f, expr, 0)));
             }
-            Stmt::Return(values) => {
+            Stmt::Return { values, .. } => {
                 let vals = values
                     .iter()
                     .map(|v| f.fmt_var(v))
@@ -739,7 +739,7 @@ impl CodeDisplay for Stmt {
                     f.write_line(&format!("{} {vals};", keyword("return")));
                 }
             }
-            Stmt::MemLoad(MemLoad { address, outputs }) => {
+            Stmt::MemLoad { load: MemLoad { address, outputs }, .. } => {
                 let args = address
                     .iter()
                     .map(|v| f.fmt_var(v))
@@ -756,7 +756,7 @@ impl CodeDisplay for Stmt {
                     f.write_line(&format!("{outs} = {}({args});", function_name("mem_load")));
                 }
             }
-            Stmt::MemStore(MemStore { address, values }) => {
+            Stmt::MemStore { store: MemStore { address, values }, .. } => {
                 let args = address
                     .iter()
                     .chain(values.iter())
@@ -765,7 +765,7 @@ impl CodeDisplay for Stmt {
                     .join(", ");
                 f.write_line(&format!("{}({args});", function_name("mem_store")));
             }
-            Stmt::AdvLoad(AdvLoad { outputs }) => {
+            Stmt::AdvLoad { load: AdvLoad { outputs }, .. } => {
                 let outs = outputs
                     .iter()
                     .map(|v| f.fmt_var(v))
@@ -777,7 +777,7 @@ impl CodeDisplay for Stmt {
                     f.write_line(&format!("{outs} = {}();", function_name("adv_load")));
                 }
             }
-            Stmt::AdvStore(AdvStore { values }) => {
+            Stmt::AdvStore { store: AdvStore { values }, .. } => {
                 let args = values
                     .iter()
                     .map(|v| f.fmt_var(v))
@@ -785,7 +785,7 @@ impl CodeDisplay for Stmt {
                     .join(", ");
                 f.write_line(&format!("{}({args});", function_name("adv_store")));
             }
-            Stmt::LocalLoad(LocalLoad { index, outputs }) => {
+            Stmt::LocalLoad { load: LocalLoad { index, outputs }, .. } => {
                 let outs = outputs
                     .iter()
                     .map(|v| f.fmt_var(v))
@@ -800,7 +800,7 @@ impl CodeDisplay for Stmt {
                     ));
                 }
             }
-            Stmt::LocalStore(LocalStore { index, values }) => {
+            Stmt::LocalStore { store: LocalStore { index, values }, .. } => {
                 let args = values
                     .iter()
                     .map(|v| f.fmt_var(v))
@@ -808,7 +808,7 @@ impl CodeDisplay for Stmt {
                     .join(", ");
                 f.write_line(&format!("{}.{index}({args});", function_name("loc_store")));
             }
-            Stmt::LocalStoreW(LocalStoreW { index, values }) => {
+            Stmt::LocalStoreW { store: LocalStoreW { index, values }, .. } => {
                 let args = values
                     .iter()
                     .map(|v| f.fmt_var(v))
@@ -824,10 +824,10 @@ impl CodeDisplay for Stmt {
                     function_name("loc_storew_be")
                 ));
             }
-            Stmt::Call(call) => write_call_like("call", call, f),
-            Stmt::Exec(call) => write_call_like("exec", call, f),
-            Stmt::SysCall(call) => write_call_like("syscall", call, f),
-            Stmt::DynCall { args, results } => {
+            Stmt::Call { call, .. } => write_call_like("call", call, f),
+            Stmt::Exec { call, .. } => write_call_like("exec", call, f),
+            Stmt::SysCall { call, .. } => write_call_like("syscall", call, f),
+            Stmt::DynCall { args, results, .. } => {
                 let args = args
                     .iter()
                     .map(|v| f.fmt_var(v))
@@ -844,11 +844,10 @@ impl CodeDisplay for Stmt {
                     f.write_line(&format!("{outs} = {}({args});", function_name("dyncall")));
                 }
             }
-            Stmt::Intrinsic(Intrinsic {
-                name,
-                args,
-                results,
-            }) => {
+            Stmt::Intrinsic {
+                intrinsic: Intrinsic { name, args, results },
+                ..
+            } => {
                 let args = args
                     .iter()
                     .map(|v| f.fmt_var(v))

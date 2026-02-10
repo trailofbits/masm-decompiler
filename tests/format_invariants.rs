@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{check_names_defined_when_used, decompile_no_optimizations};
+use common::{assert_names_defined_when_used, decompile_no_optimizations};
 use masm_decompiler::fmt::assign_var_names;
 use masm_decompiler::frontend::testing::workspace_from_modules;
 use masm_decompiler::ir::{Expr, IndexExpr, Stmt, ValueId, Var, VarBase};
@@ -29,42 +29,42 @@ fn collect_printed_vars(stmts: &[Stmt]) -> Vec<Var> {
 /// Collect variables used in a single statement that appears in output.
 fn collect_stmt_vars(stmt: &Stmt, vars: &mut Vec<Var>) {
     match stmt {
-        Stmt::Assign { dest, expr } => {
+        Stmt::Assign { dest, expr, .. } => {
             vars.push(dest.clone());
             collect_expr_vars(expr, vars);
         }
-        Stmt::MemLoad(load) => {
+        Stmt::MemLoad { load, .. } => {
             vars.extend(load.address.iter().cloned());
             vars.extend(load.outputs.iter().cloned());
         }
-        Stmt::MemStore(store) => {
+        Stmt::MemStore { store, .. } => {
             vars.extend(store.address.iter().cloned());
             vars.extend(store.values.iter().cloned());
         }
-        Stmt::AdvLoad(load) => {
+        Stmt::AdvLoad { load, .. } => {
             vars.extend(load.outputs.iter().cloned());
         }
-        Stmt::AdvStore(store) => {
+        Stmt::AdvStore { store, .. } => {
             vars.extend(store.values.iter().cloned());
         }
-        Stmt::LocalLoad(load) => {
+        Stmt::LocalLoad { load, .. } => {
             vars.extend(load.outputs.iter().cloned());
         }
-        Stmt::LocalStore(store) => {
+        Stmt::LocalStore { store, .. } => {
             vars.extend(store.values.iter().cloned());
         }
-        Stmt::LocalStoreW(store) => {
+        Stmt::LocalStoreW { store, .. } => {
             vars.extend(store.values.iter().cloned());
         }
-        Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+        Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
             vars.extend(call.args.iter().cloned());
             vars.extend(call.results.iter().cloned());
         }
-        Stmt::DynCall { args, results } => {
+        Stmt::DynCall { args, results, .. } => {
             vars.extend(args.iter().cloned());
             vars.extend(results.iter().cloned());
         }
-        Stmt::Intrinsic(intrinsic) => {
+        Stmt::Intrinsic { intrinsic, .. } => {
             vars.extend(intrinsic.args.iter().cloned());
             vars.extend(intrinsic.results.iter().cloned());
         }
@@ -87,7 +87,9 @@ fn collect_stmt_vars(stmt: &Stmt, vars: &mut Vec<Var>) {
                 collect_stmt_vars(stmt, vars);
             }
         }
-        Stmt::Return(vars_out) => {
+        Stmt::Return {
+            values: vars_out, ..
+        } => {
             vars.extend(vars_out.iter().cloned());
         }
     }
@@ -280,6 +282,7 @@ fn defined_when_used_invariants() {
         ("repeat", include_str!("fixtures/repeat.masm")),
     ]);
     let procs = [
+        // u256
         "u256::wrapping_add",
         "u256::wrapping_sub",
         "u256::and",
@@ -288,6 +291,7 @@ fn defined_when_used_invariants() {
         "u256::eqz",
         "u256::mulstep",
         "u256::mulstep4",
+        // repeat
         "repeat::neutral_repeat_0",
         "repeat::producing_repeat_0",
         "repeat::producing_repeat_1",
@@ -299,12 +303,6 @@ fn defined_when_used_invariants() {
 
     for proc in procs {
         let stmts = decompile_no_optimizations(&ws, proc);
-        let errors = check_names_defined_when_used(&stmts);
-        assert!(
-            errors.is_empty(),
-            "use-before-definition in {}: {:?}",
-            proc,
-            errors
-        );
+        assert_names_defined_when_used(proc, &stmts);
     }
 }

@@ -10,8 +10,8 @@ use masm_decompiler::{
 };
 use std::collections::HashSet;
 
-/// Decompile a procedure with the default configuration (all optimizations enabled).
-pub fn decompile(ws: &Workspace, proc_name: &str, _module: &str) -> Vec<Stmt> {
+/// Decompile a procedure with optimizations enabled.
+pub fn decompile(ws: &Workspace, proc_name: &str) -> Vec<Stmt> {
     let decompiler = Decompiler::new(ws);
     decompiler
         .decompile_proc(proc_name)
@@ -21,23 +21,8 @@ pub fn decompile(ws: &Workspace, proc_name: &str, _module: &str) -> Vec<Stmt> {
         .clone()
 }
 
-/// Decompile a procedure with custom configuration.
-pub fn decompile_with_config(
-    ws: &Workspace,
-    proc_name: &str,
-    config: DecompilationConfig,
-) -> Vec<Stmt> {
-    let decompiler = Decompiler::new(ws).with_config(config);
-    decompiler
-        .decompile_proc(proc_name)
-        .expect("decompilation should succeed")
-        .body
-        .stmts
-        .clone()
-}
-
-/// Decompile a procedure without expression or copy propagation (for debugging).
-pub fn decompile_no_propagation(ws: &Workspace, proc_name: &str, _module: &str) -> Vec<Stmt> {
+/// Decompile a procedure without expression or copy propagation.
+pub fn decompile_no_propagation(ws: &Workspace, proc_name: &str) -> Vec<Stmt> {
     let config = DecompilationConfig::default().with_expression_propagation(false);
     let decompiler = Decompiler::new(ws).with_config(config);
     decompiler
@@ -48,7 +33,7 @@ pub fn decompile_no_propagation(ws: &Workspace, proc_name: &str, _module: &str) 
         .clone()
 }
 
-/// Decompile with no optimizations at all.
+/// Decompile with no optimizations.
 pub fn decompile_no_optimizations(ws: &Workspace, proc_name: &str) -> Vec<Stmt> {
     let decompiler = Decompiler::new(ws).with_config(DecompilationConfig::no_optimizations());
     decompiler
@@ -57,11 +42,6 @@ pub fn decompile_no_optimizations(ws: &Workspace, proc_name: &str) -> Vec<Stmt> 
         .body
         .stmts
         .clone()
-}
-
-// Legacy aliases for backward compatibility
-pub fn run_structure(ws: &Workspace, proc_name: &str, module: &str) -> Vec<Stmt> {
-    decompile(ws, proc_name, module)
 }
 
 /// Linear subscript expression of the form `base + step * loop_var`.
@@ -75,21 +55,16 @@ pub struct LinearIndex {
     pub loop_depth: usize,
 }
 
-/// Return the constant index value if the expression is a constant.
-pub fn const_index(expr: &IndexExpr) -> Option<i64> {
-    match expr {
-        IndexExpr::Const(value) => Some(*value),
+/// Return the constant index value if the variable subscript is a constant.
+pub fn const_index(var: &Var) -> Option<i64> {
+    match var.subscript {
+        IndexExpr::Const(value) => Some(value),
         _ => None,
     }
 }
 
-/// Return the constant index value if the variable subscript is a constant.
-pub fn var_const_index(var: &Var) -> Option<i64> {
-    const_index(&var.subscript)
-}
-
-/// Interpret an index expression as `base + step * loop_var` if possible.
-pub fn linear_index(expr: &IndexExpr) -> Option<LinearIndex> {
+/// Interpret a variable subscript as `base + step * loop_var` if possible.
+pub fn linear_index(var: &Var) -> Option<LinearIndex> {
     fn parse(expr: &IndexExpr) -> Option<(i64, Option<(usize, i64)>)> {
         match expr {
             IndexExpr::Const(value) => Some((*value, None)),
@@ -119,18 +94,13 @@ pub fn linear_index(expr: &IndexExpr) -> Option<LinearIndex> {
         }
     }
 
-    let (base, term) = parse(expr)?;
+    let (base, term) = parse(&var.subscript)?;
     let (loop_depth, step) = term?;
     Some(LinearIndex {
         base,
         step,
         loop_depth,
     })
-}
-
-/// Interpret a variable subscript as `base + step * loop_var` if possible.
-pub fn var_linear_index(var: &Var) -> Option<LinearIndex> {
-    linear_index(&var.subscript)
 }
 
 /// Collect used and defined value identifiers in structured statements.
@@ -143,10 +113,8 @@ pub fn collect_used_defined_value_ids(stmts: &[Stmt]) -> (HashSet<ValueId>, Hash
     (used, defined)
 }
 
-/// Check that every variable use is defined (or is a loop input / procedure input).
-///
-/// Returns a list of error messages for any use-before-definition cases.
-pub fn check_names_defined_when_used(stmts: &[Stmt]) -> Vec<String> {
+/// Assert that every variable use is defined (or is a loop input / procedure input).
+pub fn assert_names_defined_when_used(proc: &str, stmts: &[Stmt]) {
     let names = assign_var_names(stmts);
     let (used, defined) = collect_used_defined_value_ids(stmts);
     let input_ids: HashSet<ValueId> = used.difference(&defined).cloned().collect();
@@ -160,7 +128,12 @@ pub fn check_names_defined_when_used(stmts: &[Stmt]) -> Vec<String> {
 
     let mut errors = Vec::new();
     check_stmt_list_defined(stmts, &names, &mut defined_names, &mut errors);
-    errors
+    assert!(
+        errors.is_empty(),
+        "use-before-definition in {}: {:?}",
+        proc,
+        errors
+    );
 }
 
 /// Traverse a statement list, tracking defined variable names.
@@ -183,11 +156,11 @@ fn check_stmt_defined(
     errors: &mut Vec<String>,
 ) {
     match stmt {
-        Stmt::Assign { dest, expr } => {
+        Stmt::Assign { dest, expr, .. } => {
             check_expr_defined(expr, names, defined, errors);
             define_var(dest, names, defined);
         }
-        Stmt::MemLoad(load) => {
+        Stmt::MemLoad { load, .. } => {
             for v in &load.address {
                 check_var_defined(v, names, defined, errors);
             }
@@ -195,7 +168,7 @@ fn check_stmt_defined(
                 define_var(v, names, defined);
             }
         }
-        Stmt::MemStore(store) => {
+        Stmt::MemStore { store, .. } => {
             for v in &store.address {
                 check_var_defined(v, names, defined, errors);
             }
@@ -203,32 +176,32 @@ fn check_stmt_defined(
                 check_var_defined(v, names, defined, errors);
             }
         }
-        Stmt::AdvLoad(load) => {
+        Stmt::AdvLoad { load, .. } => {
             for v in &load.outputs {
                 define_var(v, names, defined);
             }
         }
-        Stmt::AdvStore(store) => {
+        Stmt::AdvStore { store, .. } => {
             for v in &store.values {
                 check_var_defined(v, names, defined, errors);
             }
         }
-        Stmt::LocalLoad(load) => {
+        Stmt::LocalLoad { load, .. } => {
             for v in &load.outputs {
                 define_var(v, names, defined);
             }
         }
-        Stmt::LocalStore(store) => {
+        Stmt::LocalStore { store, .. } => {
             for v in &store.values {
                 check_var_defined(v, names, defined, errors);
             }
         }
-        Stmt::LocalStoreW(store) => {
+        Stmt::LocalStoreW { store, .. } => {
             for v in &store.values {
                 check_var_defined(v, names, defined, errors);
             }
         }
-        Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+        Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
             for v in &call.args {
                 check_var_defined(v, names, defined, errors);
             }
@@ -236,7 +209,7 @@ fn check_stmt_defined(
                 define_var(v, names, defined);
             }
         }
-        Stmt::DynCall { args, results } => {
+        Stmt::DynCall { args, results, .. } => {
             for v in args {
                 check_var_defined(v, names, defined, errors);
             }
@@ -244,7 +217,7 @@ fn check_stmt_defined(
                 define_var(v, names, defined);
             }
         }
-        Stmt::Intrinsic(intrinsic) => {
+        Stmt::Intrinsic { intrinsic, .. } => {
             for v in &intrinsic.args {
                 check_var_defined(v, names, defined, errors);
             }
@@ -257,6 +230,7 @@ fn check_stmt_defined(
             loop_count: _,
             body,
             phis,
+            ..
         } => {
             for phi in phis {
                 check_var_defined(&phi.init, names, defined, errors);
@@ -278,6 +252,7 @@ fn check_stmt_defined(
             then_body,
             else_body,
             phis,
+            ..
         } => {
             check_expr_defined(cond, names, defined, errors);
             let mut then_defined = defined.clone();
@@ -290,7 +265,9 @@ fn check_stmt_defined(
                 define_var(&phi.dest, names, defined);
             }
         }
-        Stmt::While { cond, body, phis } => {
+        Stmt::While {
+            cond, body, phis, ..
+        } => {
             check_expr_defined(cond, names, defined, errors);
             for phi in phis {
                 check_var_defined(&phi.init, names, defined, errors);
@@ -307,8 +284,8 @@ fn check_stmt_defined(
                 define_var(&phi.dest, names, defined);
             }
         }
-        Stmt::Return(vars) => {
-            for v in vars {
+        Stmt::Return { values, .. } => {
+            for v in values {
                 check_var_defined(v, names, defined, errors);
             }
         }
@@ -385,11 +362,11 @@ fn record_var_id(var: &Var, ids: &mut HashSet<ValueId>) {
 /// Collect used and defined value identifiers from a statement.
 fn collect_stmt_ids(stmt: &Stmt, used: &mut HashSet<ValueId>, defined: &mut HashSet<ValueId>) {
     match stmt {
-        Stmt::Assign { dest, expr } => {
+        Stmt::Assign { dest, expr, .. } => {
             record_var_id(dest, defined);
             collect_expr_ids(expr, used);
         }
-        Stmt::MemLoad(load) => {
+        Stmt::MemLoad { load, .. } => {
             for v in &load.address {
                 record_var_id(v, used);
             }
@@ -397,7 +374,7 @@ fn collect_stmt_ids(stmt: &Stmt, used: &mut HashSet<ValueId>, defined: &mut Hash
                 record_var_id(v, defined);
             }
         }
-        Stmt::MemStore(store) => {
+        Stmt::MemStore { store, .. } => {
             for v in &store.address {
                 record_var_id(v, used);
             }
@@ -405,32 +382,32 @@ fn collect_stmt_ids(stmt: &Stmt, used: &mut HashSet<ValueId>, defined: &mut Hash
                 record_var_id(v, used);
             }
         }
-        Stmt::AdvLoad(load) => {
+        Stmt::AdvLoad { load, .. } => {
             for v in &load.outputs {
                 record_var_id(v, defined);
             }
         }
-        Stmt::AdvStore(store) => {
+        Stmt::AdvStore { store, .. } => {
             for v in &store.values {
                 record_var_id(v, used);
             }
         }
-        Stmt::LocalLoad(load) => {
+        Stmt::LocalLoad { load, .. } => {
             for v in &load.outputs {
                 record_var_id(v, defined);
             }
         }
-        Stmt::LocalStore(store) => {
+        Stmt::LocalStore { store, .. } => {
             for v in &store.values {
                 record_var_id(v, used);
             }
         }
-        Stmt::LocalStoreW(store) => {
+        Stmt::LocalStoreW { store, .. } => {
             for v in &store.values {
                 record_var_id(v, used);
             }
         }
-        Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+        Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
             for v in &call.args {
                 record_var_id(v, used);
             }
@@ -438,7 +415,7 @@ fn collect_stmt_ids(stmt: &Stmt, used: &mut HashSet<ValueId>, defined: &mut Hash
                 record_var_id(v, defined);
             }
         }
-        Stmt::DynCall { args, results } => {
+        Stmt::DynCall { args, results, .. } => {
             for v in args {
                 record_var_id(v, used);
             }
@@ -446,7 +423,7 @@ fn collect_stmt_ids(stmt: &Stmt, used: &mut HashSet<ValueId>, defined: &mut Hash
                 record_var_id(v, defined);
             }
         }
-        Stmt::Intrinsic(intrinsic) => {
+        Stmt::Intrinsic { intrinsic, .. } => {
             for v in &intrinsic.args {
                 record_var_id(v, used);
             }
@@ -469,6 +446,7 @@ fn collect_stmt_ids(stmt: &Stmt, used: &mut HashSet<ValueId>, defined: &mut Hash
             then_body,
             else_body,
             phis,
+            ..
         } => {
             collect_expr_ids(cond, used);
             for phi in phis {
@@ -483,7 +461,9 @@ fn collect_stmt_ids(stmt: &Stmt, used: &mut HashSet<ValueId>, defined: &mut Hash
                 collect_stmt_ids(stmt, used, defined);
             }
         }
-        Stmt::While { cond, body, phis } => {
+        Stmt::While {
+            cond, body, phis, ..
+        } => {
             collect_expr_ids(cond, used);
             for phi in phis {
                 record_var_id(&phi.dest, defined);
@@ -494,8 +474,8 @@ fn collect_stmt_ids(stmt: &Stmt, used: &mut HashSet<ValueId>, defined: &mut Hash
                 collect_stmt_ids(stmt, used, defined);
             }
         }
-        Stmt::Return(vars) => {
-            for v in vars {
+        Stmt::Return { values, .. } => {
+            for v in values {
                 record_var_id(v, used);
             }
         }

@@ -3,7 +3,7 @@
 mod common;
 
 use common::{
-    collect_used_defined_value_ids, decompile_no_optimizations, var_const_index, var_linear_index,
+    collect_used_defined_value_ids, const_index, decompile_no_optimizations, linear_index,
 };
 use masm_decompiler::fmt::{CodeWriter, FormattingConfig};
 use masm_decompiler::frontend::testing::workspace_from_modules;
@@ -29,7 +29,7 @@ fn input_value_ids(stmts: &[Stmt]) -> HashSet<ValueId> {
 
 /// Extract an assignment of the form `dest = var == 0`.
 fn eq_zero_assignment(stmt: &Stmt) -> Option<(Var, Var)> {
-    let Stmt::Assign { dest, expr } = stmt else {
+    let Stmt::Assign { dest, expr, .. } = stmt else {
         return None;
     };
     let Expr::Binary(BinOp::Eq, lhs, rhs) = expr else {
@@ -44,7 +44,7 @@ fn eq_zero_assignment(stmt: &Stmt) -> Option<(Var, Var)> {
 
 /// Extract an assignment of the form `dest = lhs and rhs`.
 fn and_assignment(stmt: &Stmt) -> Option<(Var, Var, Var)> {
-    let Stmt::Assign { dest, expr } = stmt else {
+    let Stmt::Assign { dest, expr, .. } = stmt else {
         return None;
     };
     let Expr::Binary(BinOp::And, lhs, rhs) = expr else {
@@ -86,7 +86,7 @@ fn u256_or_pairs_inputs_and_returns_results() {
 
     let mut or_assignments = Vec::new();
     for stmt in &structured {
-        if let Stmt::Assign { dest, expr } = stmt {
+        if let Stmt::Assign { dest, expr, .. } = stmt {
             if let Expr::Binary(BinOp::U32Or, lhs, rhs) = expr {
                 or_assignments.push((dest.clone(), lhs.as_ref().clone(), rhs.as_ref().clone()));
             }
@@ -120,8 +120,8 @@ fn u256_or_pairs_inputs_and_returns_results() {
             );
         }
 
-        let lhs_index = var_const_index(&lhs_var).expect("expected constant lhs subscript");
-        let rhs_index = var_const_index(&rhs_var).expect("expected constant rhs subscript");
+        let lhs_index = const_index(&lhs_var).expect("expected constant lhs subscript");
+        let rhs_index = const_index(&rhs_var).expect("expected constant rhs subscript");
         let mut indices = [lhs_index, rhs_index];
         indices.sort();
         assert!(
@@ -150,7 +150,7 @@ fn u256_or_pairs_inputs_and_returns_results() {
     let return_vars = structured
         .iter()
         .find_map(|stmt| match stmt {
-            Stmt::Return(vars) => Some(vars),
+            Stmt::Return { values, .. } => Some(values),
             _ => None,
         })
         .expect("expected return statement");
@@ -175,14 +175,14 @@ fn u256_or_pairs_inputs_and_returns_results() {
 #[test]
 fn u256_eqz_loop_uses_boolean_accumulator_and_returns_it() {
     let ws = workspace_from_modules(&[("u256", include_str!("fixtures/u256.masm"))]);
-    let structured = decompile_no_optimizations(&ws, "u256::eqz");
-    let output = format_output(&structured);
+    let stmts = decompile_no_optimizations(&ws, "u256::eqz");
+    let output = format_output(&stmts);
     eprintln!("Output for u256::eqz:\n{}", output);
 
-    let input_ids = input_value_ids(&structured);
+    let input_ids = input_value_ids(&stmts);
 
     let mut pre_loop_eq = None;
-    for stmt in &structured {
+    for stmt in &stmts {
         if matches!(stmt, Stmt::Repeat { .. }) {
             break;
         }
@@ -199,7 +199,7 @@ fn u256_eqz_loop_uses_boolean_accumulator_and_returns_it() {
         .expect("pre-loop eq dest should have value id");
 
     let (loop_depth, loop_count, body) =
-        find_repeat_loop(&structured).expect("expected repeat loop in u256::eqz");
+        find_repeat_loop(&stmts).expect("expected repeat loop in u256::eqz");
     assert_eq!(
         loop_count, 7,
         "u256::eqz should repeat 7 times. Output:\n{}",
@@ -221,16 +221,16 @@ fn u256_eqz_loop_uses_boolean_accumulator_and_returns_it() {
     let (loop_and_dest, loop_and_lhs, loop_and_rhs) =
         loop_and.expect("expected and inside repeat loop");
 
-    let loop_and_index = var_const_index(&loop_and_dest)
-        .expect("loop accumulator should have constant subscript");
+    let loop_and_index =
+        const_index(&loop_and_dest).expect("loop accumulator should have constant subscript");
     assert_eq!(
         loop_and_index, 7,
         "loop accumulator should be the v_7 slot. Output:\n{}",
         output
     );
 
-    let loop_eq_input_index = var_linear_index(&loop_eq_input)
-        .expect("loop eq input should be indexed by the loop counter");
+    let loop_eq_input_index =
+        linear_index(&loop_eq_input).expect("loop eq input should be indexed by the loop counter");
     assert_eq!(
         loop_eq_input.stack_depth, 6,
         "loop eq should compare the v_6 slot against zero. Output:\n{}",
@@ -259,9 +259,9 @@ fn u256_eqz_loop_uses_boolean_accumulator_and_returns_it() {
         );
     }
 
-    let (_acc_var, eq_var) = if var_const_index(&loop_and_lhs) == Some(7) {
+    let (_acc_var, eq_var) = if const_index(&loop_and_lhs) == Some(7) {
         (&loop_and_lhs, &loop_and_rhs)
-    } else if var_const_index(&loop_and_rhs) == Some(7) {
+    } else if const_index(&loop_and_rhs) == Some(7) {
         (&loop_and_rhs, &loop_and_lhs)
     } else {
         panic!(
@@ -270,7 +270,7 @@ fn u256_eqz_loop_uses_boolean_accumulator_and_returns_it() {
         );
     };
 
-    let eq_index = var_linear_index(eq_var).unwrap_or_else(|| {
+    let eq_index = linear_index(eq_var).unwrap_or_else(|| {
         panic!(
             "loop and should combine against v_(6 - i). Output:\n{}",
             output
@@ -300,7 +300,7 @@ fn u256_eqz_loop_uses_boolean_accumulator_and_returns_it() {
         .base
         .value_id()
         .expect("loop and dest should have value id");
-    let repeat_phis = structured
+    let repeat_phis = stmts
         .iter()
         .find_map(|stmt| match stmt {
             Stmt::Repeat { phis, .. } => Some(phis),
@@ -309,7 +309,7 @@ fn u256_eqz_loop_uses_boolean_accumulator_and_returns_it() {
         .expect("expected repeat loop in u256::eqz");
     let acc_phi = repeat_phis
         .iter()
-        .find(|phi| var_const_index(&phi.dest) == Some(7))
+        .find(|phi| const_index(&phi.dest) == Some(7))
         .expect("expected accumulator loop phi for v_7");
     let acc_phi_id = acc_phi
         .dest
@@ -383,16 +383,16 @@ fn u256_eqz_loop_uses_boolean_accumulator_and_returns_it() {
         panic!("loop and does not use the eq result");
     };
     assert_eq!(
-        var_const_index(accumulator_operand),
+        const_index(accumulator_operand),
         Some(7),
         "loop and should combine against the accumulator slot (v_7). Output:\n{}",
         output
     );
 
-    let return_vars = structured
+    let return_vars = stmts
         .iter()
         .find_map(|stmt| match stmt {
-            Stmt::Return(vars) => Some(vars),
+            Stmt::Return { values, .. } => Some(values),
             _ => None,
         })
         .expect("expected return statement");

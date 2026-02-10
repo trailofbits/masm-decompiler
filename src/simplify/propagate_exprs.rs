@@ -114,7 +114,7 @@ fn propagate_one_pass(code: &mut Vec<Stmt>) -> bool {
     // we try to propagate each definition to its uses before the next redefinition.
     for def_idx in 0..code.len() {
         let (var_key, def_expr) = match &code[def_idx] {
-            Stmt::Assign { dest, expr } => (VarKey::from_var(dest), expr.clone()),
+            Stmt::Assign { dest, expr, .. } => (VarKey::from_var(dest), expr.clone()),
             _ => continue,
         };
 
@@ -192,7 +192,7 @@ fn can_propagate_into(
     current_path: Vec<usize>,
 ) -> Option<Vec<usize>> {
     match stmt {
-        Stmt::Assign { dest, expr } => {
+        Stmt::Assign { dest, expr, .. } => {
             // Can propagate if:
             // 1. This assignment uses the variable
             // 2. The variable appears exactly once
@@ -217,6 +217,7 @@ fn can_propagate_into(
             then_body,
             else_body,
             phis,
+            ..
         } => {
             // Can propagate into condition if variable is used there.
             let cond_uses = count_var_in_expr(cond, var_key);
@@ -284,7 +285,7 @@ fn can_propagate_into(
             None
         }
 
-        Stmt::While { cond, body, phis } => {
+        Stmt::While { cond, body, phis, .. } => {
             // Similar to Repeat - don't propagate into while loops.
             let loop_defs = collect_defined_vars_in_block(body);
             let phi_defs = collect_defined_vars_in_phis(phis);
@@ -308,19 +309,19 @@ fn can_propagate_into(
         }
 
         // These statements can't receive expression propagation.
-        Stmt::Return(_)
-        | Stmt::MemLoad(_)
-        | Stmt::MemStore(_)
-        | Stmt::AdvLoad(_)
-        | Stmt::AdvStore(_)
-        | Stmt::LocalLoad(_)
-        | Stmt::LocalStore(_)
-        | Stmt::LocalStoreW(_)
-        | Stmt::Call(_)
-        | Stmt::Exec(_)
-        | Stmt::SysCall(_)
+        Stmt::Return { .. }
+        | Stmt::MemLoad { .. }
+        | Stmt::MemStore { .. }
+        | Stmt::AdvLoad { .. }
+        | Stmt::AdvStore { .. }
+        | Stmt::LocalLoad { .. }
+        | Stmt::LocalStore { .. }
+        | Stmt::LocalStoreW { .. }
+        | Stmt::Call { .. }
+        | Stmt::Exec { .. }
+        | Stmt::SysCall { .. }
         | Stmt::DynCall { .. }
-        | Stmt::Intrinsic(_) => None,
+        | Stmt::Intrinsic { .. } => None,
     }
 }
 
@@ -380,18 +381,18 @@ fn is_propagation_barrier(stmt: &Stmt, var_index: &VarKey, used_vars: &HashSet<V
         }
 
         // Side-effecting statements are barriers.
-        Stmt::MemLoad(_)
-        | Stmt::MemStore(_)
-        | Stmt::AdvLoad(_)
-        | Stmt::AdvStore(_)
-        | Stmt::LocalLoad(_)
-        | Stmt::LocalStore(_)
-        | Stmt::LocalStoreW(_)
-        | Stmt::Call(_)
-        | Stmt::Exec(_)
-        | Stmt::SysCall(_)
+        Stmt::MemLoad { .. }
+        | Stmt::MemStore { .. }
+        | Stmt::AdvLoad { .. }
+        | Stmt::AdvStore { .. }
+        | Stmt::LocalLoad { .. }
+        | Stmt::LocalStore { .. }
+        | Stmt::LocalStoreW { .. }
+        | Stmt::Call { .. }
+        | Stmt::Exec { .. }
+        | Stmt::SysCall { .. }
         | Stmt::DynCall { .. }
-        | Stmt::Intrinsic(_) => true,
+        | Stmt::Intrinsic { .. } => true,
 
         _ => false,
     }
@@ -537,22 +538,22 @@ fn collect_defined_vars(stmt: &Stmt, defs: &mut HashSet<VarKey>) {
                 defs.insert(VarKey::from_var(&phi.dest));
             }
         }
-        Stmt::MemLoad(load) => {
+        Stmt::MemLoad { load, .. } => {
             for v in &load.outputs {
                 defs.insert(VarKey::from_var(v));
             }
         }
-        Stmt::AdvLoad(load) => {
+        Stmt::AdvLoad { load, .. } => {
             for v in &load.outputs {
                 defs.insert(VarKey::from_var(v));
             }
         }
-        Stmt::LocalLoad(load) => {
+        Stmt::LocalLoad { load, .. } => {
             for v in &load.outputs {
                 defs.insert(VarKey::from_var(v));
             }
         }
-        Stmt::Call(call) | Stmt::Exec(call) | Stmt::SysCall(call) => {
+        Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
             for v in &call.results {
                 defs.insert(VarKey::from_var(v));
             }
@@ -562,7 +563,7 @@ fn collect_defined_vars(stmt: &Stmt, defs: &mut HashSet<VarKey>) {
                 defs.insert(VarKey::from_var(v));
             }
         }
-        Stmt::Intrinsic(intr) => {
+        Stmt::Intrinsic { intrinsic: intr, .. } => {
             for v in &intr.results {
                 defs.insert(VarKey::from_var(v));
             }
@@ -655,6 +656,9 @@ impl ExprProperties {
 mod tests {
     use super::*;
     use crate::ir::{BinOp, Constant, IndexExpr, LoopVar, Var, VarBase, ValueId};
+    use miden_assembly_syntax::debuginfo::SourceSpan;
+
+    const TEST_SPAN: SourceSpan = SourceSpan::UNKNOWN;
 
     fn make_var(stack_depth: usize) -> Var {
         Var {
@@ -675,10 +679,12 @@ mod tests {
         // -> should become v_1 = 1 + 2
         let mut code = vec![
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: make_var(0),
                 expr: make_const(1),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: make_var(1),
                 expr: Expr::Binary(
                     BinOp::Add,
@@ -715,13 +721,16 @@ mod tests {
         // -> v_0 = 1 should NOT be propagated into the loop
         let mut code = vec![
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: make_var(0),
                 expr: make_const(1),
             },
             Stmt::Repeat {
+                span: TEST_SPAN,
                 loop_var: LoopVar::new(0),
                 loop_count: 4,
                 body: vec![Stmt::Assign {
+                    span: TEST_SPAN,
                     dest: make_var(0),
                     expr: Expr::Binary(
                         BinOp::Add,
@@ -748,13 +757,16 @@ mod tests {
         // -> v_0 should be propagated into v_2's expression
         let mut code = vec![
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: make_var(0),
                 expr: make_const(1),
             },
             Stmt::Repeat {
+                span: TEST_SPAN,
                 loop_var: LoopVar::new(0),
                 loop_count: 4,
                 body: vec![Stmt::Assign {
+                    span: TEST_SPAN,
                     dest: make_var(1),
                     expr: Expr::Binary(
                         BinOp::Add,
@@ -765,6 +777,7 @@ mod tests {
                 phis: Vec::new(),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: make_var(2),
                 expr: Expr::Binary(
                     BinOp::Add,
@@ -800,10 +813,12 @@ mod tests {
         // -> result: v_6 = v_7 == v_8
         let mut code = vec![
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: make_var(6),
                 expr: Expr::Var(make_var(7)),
             },
             Stmt::Assign {
+                span: TEST_SPAN,
                 dest: make_var(6),
                 expr: Expr::Binary(
                     BinOp::Eq,

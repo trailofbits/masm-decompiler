@@ -1,20 +1,17 @@
 mod common;
 
 use common::decompile;
-use masm_decompiler::{frontend::testing::workspace_from_modules, ir::Stmt};
+use masm_decompiler::frontend::testing::workspace_from_modules;
 
 fn assert_fixture_proc(module_path: &str, source: &str, proc_name: &str) {
     let ws = workspace_from_modules(&[(module_path, source)]);
     let proc_name = proc_name.strip_prefix("r#").unwrap_or(proc_name);
     let fq = format!("{module_path}::{proc_name}");
-    let structured = decompile(&ws, &fq, module_path);
+    let stmts = decompile(&ws, &fq);
     assert!(
-        !structured.is_empty(),
+        !stmts.is_empty(),
         "decompile of {fq} produced no statements"
     );
-    let _ = structured
-        .iter()
-        .any(|s| matches!(s, Stmt::Assign { .. } | Stmt::Return(_)));
 }
 
 macro_rules! fixture_module {
@@ -26,11 +23,4 @@ macro_rules! fixture_module {
     };
 }
 
-fixture_module!(
-    word,
-    "word",
-    include_str!("fixtures/word.masm"),
-    [
-        testz,
-    ]
-);
+fixture_module!(word, "word", include_str!("fixtures/word.masm"), [testz,]);
