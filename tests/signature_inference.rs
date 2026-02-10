@@ -99,7 +99,7 @@ fn infers_call_chain() {
         (
             "leaf",
             r#"
-            proc leaf
+            proc callee
                 drop
                 push.1
             end
@@ -108,17 +108,18 @@ fn infers_call_chain() {
         (
             "mid",
             r#"
-            use leaf::leaf
-            proc mid
-                exec.leaf::leaf
-                exec.leaf::leaf
+            use leaf::callee
+
+            proc caller
+                exec.leaf::callee
+                exec.callee
             end
             "#,
         ),
     ]);
     let cg = CallGraph::from(&ws);
     let sigs = infer_signatures(&ws, &cg);
-    let mid = sigs.get("mid::mid").expect("sig");
+    let mid = sigs.get("mid::caller").expect("sig");
     match mid {
         ProcSignature::Known {
             inputs, outputs, ..
@@ -397,14 +398,20 @@ fn instructions_with_effect(
     }
     let tail_len = max_len.saturating_sub(1);
     if net > 0 {
-        return (producing_instruction_strategy(), prop::collection::vec(neutral_instruction_strategy(), 0..=tail_len))
+        return (
+            producing_instruction_strategy(),
+            prop::collection::vec(neutral_instruction_strategy(), 0..=tail_len),
+        )
             .prop_map(|(head, mut tail)| {
                 tail.insert(0, head);
                 tail
             })
             .boxed();
     }
-    (consuming_instruction_strategy(), prop::collection::vec(neutral_instruction_strategy(), 0..=tail_len))
+    (
+        consuming_instruction_strategy(),
+        prop::collection::vec(neutral_instruction_strategy(), 0..=tail_len),
+    )
         .prop_map(|(head, mut tail)| {
             tail.insert(0, head);
             tail
