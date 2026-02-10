@@ -6,7 +6,9 @@ pub mod ir;
 pub mod lift;
 pub mod signature;
 pub mod simplify;
+pub mod symbol;
 
 // Re-export key types for convenient access
 pub use decompile::{DecompilationConfig, DecompilationError, DecompilationResult, Decompiler};
 pub use frontend::Program;
+pub use symbol::path::SymbolPath;

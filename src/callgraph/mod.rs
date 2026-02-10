@@ -1,14 +1,18 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-use miden_assembly_syntax::ast::{
-    InvocationTarget, Invoke, InvokeKind, path::PathBuf as MasmPathBuf,
+use miden_assembly_syntax::{
+    ast::{Invoke, InvokeKind, path::PathBuf as MasmPathBuf},
+    debuginfo::DefaultSourceManager,
 };
 
 use crate::frontend::{Program, Workspace};
+use crate::symbol::path::SymbolPath;
+use crate::symbol::resolution::{SymbolResolver, create_resolver};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallTarget {
-    Direct(String),
+    Direct(SymbolPath),
     Opaque,
 }
 
@@ -20,33 +24,34 @@ pub struct CallEdge {
 
 #[derive(Debug, Clone)]
 pub struct ProcNode {
-    pub name: String,
-    pub module_path: MasmPathBuf,
+    pub name: SymbolPath,
+    pub module_path: SymbolPath,
     pub edges: Vec<CallEdge>,
 }
 
 #[derive(Debug, Default)]
 pub struct CallGraph {
     pub nodes: Vec<ProcNode>,
-    pub name_to_id: HashMap<String, usize>,
+    pub name_to_id: HashMap<SymbolPath, usize>,
 }
 
 impl From<&Program> for CallGraph {
     fn from(program: &Program) -> Self {
         let mut graph = CallGraph::default();
 
+        let resolver = create_resolver(program.module(), Arc::new(DefaultSourceManager::default()));
         for (idx, proc) in program.procedures().enumerate() {
             let module_path = program.module_path().clone();
             let module_path_str = <MasmPathBuf as AsRef<str>>::as_ref(&module_path);
-            let name = format!("{}::{}", module_path_str, proc.name().as_str());
+            let name = SymbolPath::from_module_path_and_name(module_path_str, proc.name().as_str());
             let edges = proc
                 .invoked()
-                .map(|invoke| edge_from_invoke(invoke, program))
+                .map(|invoke| edge_from_invoke(invoke, &resolver))
                 .collect();
             graph.name_to_id.insert(name.clone(), idx);
             graph.nodes.push(ProcNode {
                 name,
-                module_path,
+                module_path: SymbolPath::new(module_path_str),
                 edges,
             });
         }
@@ -61,17 +66,19 @@ impl From<&Workspace> for CallGraph {
         for prog in ws.modules() {
             let module_path = prog.module_path().clone();
             let module_path_str = <MasmPathBuf as AsRef<str>>::as_ref(&module_path);
+            let resolver = create_resolver(prog.module(), ws.source_manager());
             for proc in prog.procedures() {
-                let name = format!("{}::{}", module_path_str, proc.name().as_str());
+                let name =
+                    SymbolPath::from_module_path_and_name(module_path_str, proc.name().as_str());
                 let idx = graph.nodes.len();
                 graph.name_to_id.insert(name.clone(), idx);
                 let edges = proc
                     .invoked()
-                    .map(|invoke| edge_from_invoke(invoke, prog))
+                    .map(|invoke| edge_from_invoke(invoke, &resolver))
                     .collect();
                 graph.nodes.push(ProcNode {
                     name,
-                    module_path: module_path.clone(),
+                    module_path: SymbolPath::new(module_path_str),
                     edges,
                 });
             }
@@ -88,18 +95,13 @@ impl CallGraph {
     }
 }
 
-fn edge_from_invoke(invoke: &Invoke, program: &Program) -> CallEdge {
+fn edge_from_invoke(invoke: &Invoke, resolver: &SymbolResolver<'_>) -> CallEdge {
     CallEdge {
         kind: invoke.kind,
-        target: match &invoke.target {
-            InvocationTarget::Symbol(name) => CallTarget::Direct(format!(
-                "{}::{}",
-                <MasmPathBuf as AsRef<str>>::as_ref(program.module_path()),
-                name.as_str()
-            )),
-            InvocationTarget::Path(path) => CallTarget::Direct(path.to_string()),
-            InvocationTarget::MastRoot(_) => CallTarget::Opaque,
-        },
+        target: resolver
+            .resolve_target(&invoke.target)
+            .map(CallTarget::Direct)
+            .unwrap_or(CallTarget::Opaque),
     }
 }
 
@@ -110,7 +112,7 @@ pub trait EdgeTargetString {
 impl EdgeTargetString for CallEdge {
     fn target_string(&self) -> String {
         match &self.target {
-            CallTarget::Direct(s) => s.clone(),
+            CallTarget::Direct(s) => s.to_string(),
             CallTarget::Opaque => "unknown".to_string(),
         }
     }

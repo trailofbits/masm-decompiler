@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::signature::StackEffect;
+use crate::symbol::path::SymbolPath;
 
 /// A procedures signature, as determined during signature inference.
 ///
@@ -123,7 +124,7 @@ impl Provenance {
 }
 
 /// A map from proc names to signatures
-pub type SignatureMap = HashMap<String, ProcSignature>;
+pub type SignatureMap = HashMap<SymbolPath, ProcSignature>;
 
 /// Symbolic stack to track stack slot provenance.
 ///

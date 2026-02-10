@@ -13,6 +13,8 @@ use crate::{
     lift::{self, LiftingError},
     signature::{ProcSignature, SignatureMap, infer_signatures},
     simplify,
+    symbol::path::SymbolPath,
+    symbol::resolution::create_resolver,
 };
 
 /// Configuration for the decompilation pipeline.
@@ -293,21 +295,20 @@ impl<'a> Decompiler<'a> {
 
     /// Decompile a single procedure by fully-qualified name.
     pub fn decompile_proc(&self, fq_name: &str) -> DecompilationResult<DecompiledProc> {
+        let proc_path = SymbolPath::new(fq_name);
         // Find the procedure in the workspace
-        let proc = self
+        let (program, proc) = self
             .workspace
-            .lookup_proc(fq_name)
+            .lookup_proc_entry(&proc_path)
             .ok_or_else(|| DecompilationError::ProcedureNotFound(fq_name.to_string()))?;
 
         // Extract module path from fq_name
-        let module_path = fq_name
-            .rsplit_once("::")
-            .map(|(m, _)| m.to_string())
-            .unwrap_or_default();
+        let module_path = proc_path.module_path().unwrap_or("").to_string();
 
         // Lift directly from AST to structured IR
         debug!("lifting procedure `{}`", fq_name);
-        let mut stmts = lift::lift_proc(proc, fq_name, &module_path, &self.signatures)?;
+        let resolver = create_resolver(program.module(), self.workspace.source_manager());
+        let mut stmts = lift::lift_proc(proc, &proc_path, &resolver, &self.signatures)?;
 
         if self.config.expression_propagation {
             debug!("propagating expressions in `{}`", fq_name);
@@ -324,7 +325,7 @@ impl<'a> Decompiler<'a> {
             simplify::simplify_statements(&mut stmts);
         }
 
-        let signature = self.signatures.get(fq_name).cloned();
+        let signature = self.signatures.get(&proc_path).cloned();
         let body = DecompiledBody::new(stmts);
 
         Ok(DecompiledProc {

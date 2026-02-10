@@ -6,6 +6,8 @@ use miden_assembly_syntax::ast::path::PathBuf as MasmPathBuf;
 use miden_assembly_syntax::debuginfo::{DefaultSourceManager, SourceManager};
 
 use super::{LibraryRoot, Program};
+use crate::symbol::path::SymbolPath;
+use crate::symbol::resolution::create_resolver;
 
 /// In-memory collection of parsed modules plus the search roots used to resolve them.
 #[derive(Debug)]
@@ -13,8 +15,8 @@ pub struct Workspace {
     roots: Vec<LibraryRoot>,
     source_manager: Arc<dyn SourceManager>,
     modules: Vec<Program>,
-    index: HashMap<String, usize>,
-    pub(crate) proc_index: HashMap<String, (usize, usize)>,
+    index: HashMap<SymbolPath, usize>,
+    pub(crate) proc_index: HashMap<SymbolPath, (usize, usize)>,
 }
 
 impl Workspace {
@@ -40,7 +42,7 @@ impl Workspace {
     pub fn load_entry(&mut self, path: &FsPath) -> Result<usize, String> {
         let prog = Program::from_path(path, &self.roots, self.source_manager.clone())
             .map_err(|e| e.to_string())?;
-        let key = as_str(prog.module_path()).to_string();
+        let key = SymbolPath::new(as_str(prog.module_path()).to_string());
         if let Some(idx) = self.index.get(&key).copied() {
             return Ok(idx);
         }
@@ -56,7 +58,7 @@ impl Workspace {
     /// Note: `program` should be parsed using this workspace's source manager to
     /// ensure SourceSpan lookups resolve correctly.
     pub fn add_program(&mut self, program: Program) -> usize {
-        let key = as_str(program.module_path()).to_string();
+        let key = SymbolPath::new(as_str(program.module_path()).to_string());
         if let Some(idx) = self.index.get(&key).copied() {
             return idx;
         }
@@ -74,15 +76,22 @@ impl Workspace {
             changed = false;
             let mut to_load = Vec::new();
             for prog in self.modules.iter() {
-                let current_module = as_str(prog.module_path()).to_string();
+                let current_module = SymbolPath::new(as_str(prog.module_path()).to_string());
+                let resolver = create_resolver(prog.module(), self.source_manager());
                 for proc in prog.procedures() {
                     for invoke in proc.invoked() {
-                        if let Some(module_path) =
-                            invocation_module_path(&invoke.target, &current_module)
-                        {
-                            if !self.index.contains_key(&module_path) {
-                                to_load.push(module_path);
-                            }
+                        let Some(target_path) = resolver.resolve_target(&invoke.target) else {
+                            continue;
+                        };
+                        let Some(module_path) = target_path.module_path() else {
+                            continue;
+                        };
+                        let module_path = SymbolPath::new(module_path);
+                        if module_path.as_str() == current_module.as_str() {
+                            continue;
+                        }
+                        if !self.index.contains_key(&module_path) {
+                            to_load.push(module_path);
                         }
                     }
                 }
@@ -91,7 +100,7 @@ impl Workspace {
                 if self.index.contains_key(&module_path) {
                     continue;
                 }
-                if let Some(idx) = self.load_module_by_path(&module_path) {
+                if let Some(idx) = self.load_module_by_path(module_path.as_str()) {
                     let _ = idx;
                     changed = true;
                 }
@@ -102,12 +111,13 @@ impl Workspace {
     /// Load a module by its absolute MASM path (e.g., `std::math::u64`) if it exists on disk.
     /// Returns `None` if no matching file could be found.
     pub fn load_module_by_path(&mut self, module_path: &str) -> Option<usize> {
-        if let Some(idx) = self.index.get(module_path).copied() {
+        let key = SymbolPath::new(module_path);
+        if let Some(idx) = self.index.get(&key).copied() {
             return Some(idx);
         }
-        let file = find_module_file(module_path, &self.roots)?;
+        let file = find_module_file(key.as_str(), &self.roots)?;
         let prog = Program::from_path(&file, &self.roots, self.source_manager.clone()).ok()?;
-        let key = as_str(prog.module_path()).to_string();
+        let key = SymbolPath::new(as_str(prog.module_path()).to_string());
         let idx = self.modules.len();
         self.modules.push(prog);
         self.index.insert(key, idx);
@@ -119,11 +129,24 @@ impl Workspace {
         self.modules.iter()
     }
 
-    pub fn lookup_proc(&self, name: &str) -> Option<&miden_assembly_syntax::ast::Procedure> {
+    pub fn lookup_module(&self, module_path: &SymbolPath) -> Option<&Program> {
+        let idx = self.index.get(module_path).copied()?;
+        self.modules.get(idx)
+    }
+
+    pub fn lookup_proc_entry(
+        &self,
+        name: &SymbolPath,
+    ) -> Option<(&Program, &miden_assembly_syntax::ast::Procedure)> {
         let (m_idx, p_idx) = self.proc_index.get(name).copied()?;
-        self.modules
-            .get(m_idx)
-            .and_then(|m| m.procedures().nth(p_idx))
+        let program = self.modules.get(m_idx)?;
+        let proc = program.procedures().nth(p_idx)?;
+        Some((program, proc))
+    }
+
+    pub fn lookup_proc(&self, name: &str) -> Option<&miden_assembly_syntax::ast::Procedure> {
+        let key = SymbolPath::new(name);
+        self.lookup_proc_entry(&key).map(|(_, proc)| proc)
     }
 
     pub fn roots(&self) -> &[LibraryRoot] {
@@ -185,28 +208,8 @@ pub fn find_module_file(module_path: &str, roots: &[LibraryRoot]) -> Option<FsPa
     None
 }
 
-fn invocation_module_path(
-    target: &miden_assembly_syntax::ast::InvocationTarget,
-    current: &str,
-) -> Option<String> {
-    use miden_assembly_syntax::ast::InvocationTarget::*;
-    match target {
-        MastRoot(_) => None,
-        Symbol(_) => None, // local to current module
-        Path(path) => {
-            let parent = path.parent()?;
-            let module = parent.to_string();
-            if module == current {
-                None
-            } else {
-                Some(module)
-            }
-        }
-    }
-}
-
-fn proc_fq_name(module_path: &str, proc_name: &str) -> String {
-    format!("{module_path}::{proc_name}")
+fn proc_fq_name(module_path: &str, proc_name: &str) -> SymbolPath {
+    SymbolPath::from_module_path_and_name(module_path, proc_name)
 }
 
 impl Workspace {

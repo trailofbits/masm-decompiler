@@ -1,6 +1,8 @@
 use log::debug;
 use miden_assembly_syntax::ast::{Block, Instruction, InvocationTarget, Op, Procedure};
 
+use crate::symbol::path::SymbolPath;
+use crate::symbol::resolution::WorkspaceSymbolResolver;
 use crate::{callgraph::CallGraph, frontend::Workspace};
 
 use super::{ProcSignature, SignatureMap, domain::ProvenanceStack, effects::StackEffect};
@@ -11,9 +13,8 @@ pub fn infer_signatures(workspace: &Workspace, callgraph: &CallGraph) -> Signatu
     // Iterate over call graph nodes in bottom up order, starting with
     // call-graph leaves.
     for node in callgraph.iter() {
-        if let Some(proc) = workspace.lookup_proc(&node.name) {
-            let module_path = node.module_path.as_ref();
-            let analysis = Analysis::new(module_path, &signatures);
+        if let Some(proc) = workspace.lookup_proc(node.name.as_str()) {
+            let analysis = Analysis::new(&node.module_path, workspace, &signatures);
             let signature = analysis.visit_proc(proc);
             if let ProcSignature::Known {
                 inputs, outputs, ..
@@ -48,13 +49,19 @@ impl OpResult {
 struct Analysis<'a> {
     signatures: &'a SignatureMap,
     /// Fully-qualified path to the analyzed module
-    module_path: &'a str,
+    module_path: SymbolPath,
+    resolver: &'a dyn WorkspaceSymbolResolver,
 }
 
 impl<'a> Analysis<'a> {
-    pub fn new(module_path: &'a str, signatures: &'a SignatureMap) -> Self {
+    pub fn new(
+        module_path: &SymbolPath,
+        resolver: &'a dyn WorkspaceSymbolResolver,
+        signatures: &'a SignatureMap,
+    ) -> Self {
         Analysis {
-            module_path,
+            module_path: module_path.clone(),
+            resolver,
             signatures,
         }
     }
@@ -111,10 +118,9 @@ impl<'a> Analysis<'a> {
     }
 
     fn visit_call(&self, target: &InvocationTarget, stack: &mut ProvenanceStack) -> OpResult {
-        let callee = match target {
-            InvocationTarget::Symbol(ident) => format!("{}::{}", self.module_path, ident.as_str()),
-            InvocationTarget::Path(path) => path.to_string(),
-            InvocationTarget::MastRoot(_) => return OpResult::Unknown,
+        let callee = match self.resolver.resolve_target(&self.module_path, target) {
+            Some(path) => path,
+            None => return OpResult::Unknown,
         };
         // If the callee signature is not found, this procedure is part
         // of an SCC. In this case we bail and return unknown.

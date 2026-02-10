@@ -14,6 +14,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::ir::{Expr, IfPhi, IndexExpr, LoopPhi, LoopVar, Stmt, ValueId, Var, VarBase};
 use crate::signature::{ProcSignature, SignatureMap, StackEffect};
+use crate::symbol::path::SymbolPath;
+use crate::symbol::resolution::SymbolResolver;
 
 pub use stack::SymbolicStack;
 use stack::{SlotId, StackEntry};
@@ -126,8 +128,8 @@ impl LoopContext {
 /// processes the procedure body, and appends a return statement.
 pub fn lift_proc(
     proc: &Procedure,
-    proc_path: &str,
-    module_path: &str,
+    proc_path: &SymbolPath,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<Vec<Stmt>> {
     let mut stack = SymbolicStack::new();
@@ -138,7 +140,7 @@ pub fn lift_proc(
         stack.ensure_depth(*inputs);
     }
 
-    let mut stmts = lift_block(proc.body(), &mut stack, &mut loop_ctx, module_path, sigs)?;
+    let mut stmts = lift_block(proc.body(), &mut stack, &mut loop_ctx, resolver, sigs)?;
 
     // Add return statement with outputs.
     if let Some(ProcSignature::Known { outputs, .. }) = sigs.get(proc_path) {
@@ -157,12 +159,12 @@ fn lift_block(
     block: &Block,
     stack: &mut SymbolicStack,
     loop_ctx: &mut LoopContext,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<Vec<Stmt>> {
     let mut stmts = Vec::new();
     for op in block.iter() {
-        let op_stmts = lift_op(op, op.span(), stack, loop_ctx, module_path, sigs)?;
+        let op_stmts = lift_op(op, op.span(), stack, loop_ctx, resolver, sigs)?;
         stmts.extend(op_stmts);
     }
     Ok(stmts)
@@ -174,26 +176,24 @@ fn lift_op(
     op_span: SourceSpan,
     stack: &mut SymbolicStack,
     loop_ctx: &mut LoopContext,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<Vec<Stmt>> {
     match op {
-        Op::Inst(inst) => {
-            inst::lift_inst(inst.inner(), op_span, stack, loop_ctx, module_path, sigs)
-        }
+        Op::Inst(inst) => inst::lift_inst(inst.inner(), op_span, stack, loop_ctx, resolver, sigs),
         Op::If {
             then_blk, else_blk, ..
-        } => lift_if(op_span, then_blk, else_blk, stack, loop_ctx, module_path, sigs),
+        } => lift_if(op_span, then_blk, else_blk, stack, loop_ctx, resolver, sigs),
         Op::Repeat { count, body, .. } => lift_repeat(
             op_span,
             *count as usize,
             body,
             stack,
             loop_ctx,
-            module_path,
+            resolver,
             sigs,
         ),
-        Op::While { body, .. } => lift_while(op_span, body, stack, loop_ctx, module_path, sigs),
+        Op::While { body, .. } => lift_while(op_span, body, stack, loop_ctx, resolver, sigs),
     }
 }
 
@@ -206,7 +206,7 @@ fn lift_if(
     else_block: &Block,
     stack: &mut SymbolicStack,
     loop_ctx: &mut LoopContext,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<Vec<Stmt>> {
     // Pop condition from stack.
@@ -217,8 +217,8 @@ fn lift_if(
     let mut then_stack = stack.clone();
     let mut else_stack = stack.clone();
 
-    let then_body = lift_block(then_block, &mut then_stack, loop_ctx, module_path, sigs)?;
-    let else_body = lift_block(else_block, &mut else_stack, loop_ctx, module_path, sigs)?;
+    let then_body = lift_block(then_block, &mut then_stack, loop_ctx, resolver, sigs)?;
+    let else_body = lift_block(else_block, &mut else_stack, loop_ctx, resolver, sigs)?;
 
     // Verify balanced stack effects.
     if then_stack.len() != else_stack.len() {
@@ -269,7 +269,7 @@ fn lift_repeat(
     body: &Block,
     stack: &mut SymbolicStack,
     loop_ctx: &mut LoopContext,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<Vec<Stmt>> {
     let entry_depth = stack.len();
@@ -284,7 +284,7 @@ fn lift_repeat(
     loop_ctx.enter(loop_var, entry_depth);
 
     // Process body once to get template and determine stack effect.
-    let body_stmts = lift_block(body, stack, loop_ctx, module_path, sigs)?;
+    let body_stmts = lift_block(body, stack, loop_ctx, resolver, sigs)?;
 
     // Exit loop context.
     loop_ctx.exit();
@@ -299,12 +299,7 @@ fn lift_repeat(
     let loop_depth = loop_var.loop_depth;
     let value_slots = stack.value_slots();
     let exit2_slots = if count > 1 {
-        Some(simulate_repeat_slots(
-            body,
-            &exit_entries,
-            module_path,
-            sigs,
-        )?)
+        Some(simulate_repeat_slots(body, &exit_entries, resolver, sigs)?)
     } else {
         None
     };
@@ -363,7 +358,7 @@ fn lift_repeat(
         &exit_entries,
         &loop_carried_dests,
         &produced_slots,
-        module_path,
+        resolver,
         sigs,
     )?;
 
@@ -1027,8 +1022,8 @@ fn compute_slot_indices(
                     if loop_count > 1 && delta1 != delta2 {
                         return Err(LiftingError::UnsupportedRepeatPattern {
                             span: op_span,
-                            reason:
-                                "repeat loop permutes stack positions across iterations".to_string(),
+                            reason: "repeat loop permutes stack positions across iterations"
+                                .to_string(),
                         });
                     }
                     delta1
@@ -1095,25 +1090,25 @@ fn slot_positions_from_ids(ids: &[SlotId]) -> HashMap<SlotId, i64> {
 fn simulate_repeat_slots(
     body: &Block,
     entry_entries: &[StackEntry],
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<Vec<SlotId>> {
     let entry_slots = entry_entries
         .iter()
         .map(|entry| entry.slot_id)
         .collect::<Vec<_>>();
-    simulate_repeat_slots_from_ids(body, &entry_slots, module_path, sigs)
+    simulate_repeat_slots_from_ids(body, &entry_slots, resolver, sigs)
 }
 
 /// Simulate the stack slot layout after one iteration using slot identifiers.
 fn simulate_repeat_slots_from_ids(
     body: &Block,
     entry_slots: &[SlotId],
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<Vec<SlotId>> {
     let mut stack = SlotStack::new(entry_slots);
-    simulate_block_slots(body, &mut stack, module_path, sigs)?;
+    simulate_block_slots(body, &mut stack, resolver, sigs)?;
     Ok(stack.into_slots())
 }
 
@@ -1126,7 +1121,7 @@ fn update_stack_after_repeat(
     exit_entries: &[StackEntry],
     loop_carried_dests: &HashMap<SlotId, Var>,
     produced_slots: &HashSet<SlotId>,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<()> {
     if count <= 1 {
@@ -1186,7 +1181,7 @@ fn update_stack_after_repeat(
             iter,
             tagged_stack.state_snapshot()
         );
-        simulate_block_tags(body, &mut tagged_stack, module_path, sigs)?;
+        simulate_block_tags(body, &mut tagged_stack, resolver, sigs)?;
         trace!(
             "state snapshot after repeat tag simulation iteration {}: {}",
             iter,
@@ -1248,11 +1243,11 @@ fn update_stack_after_repeat(
 fn simulate_block_slots(
     block: &Block,
     stack: &mut SlotStack,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<()> {
     for op in block.iter() {
-        simulate_op_slots(op, stack, module_path, sigs)?;
+        simulate_op_slots(op, stack, resolver, sigs)?;
     }
     Ok(())
 }
@@ -1261,18 +1256,18 @@ fn simulate_block_slots(
 fn simulate_op_slots(
     op: &Op,
     stack: &mut SlotStack,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<()> {
     match op {
-        Op::Inst(inst) => simulate_inst_slots(inst.inner(), op.span(), stack, module_path, sigs),
+        Op::Inst(inst) => simulate_inst_slots(inst.inner(), op.span(), stack, resolver, sigs),
         Op::If {
             then_blk, else_blk, ..
         } => {
             let mut then_stack = stack.clone();
             let mut else_stack = stack.clone();
-            simulate_block_slots(then_blk, &mut then_stack, module_path, sigs)?;
-            simulate_block_slots(else_blk, &mut else_stack, module_path, sigs)?;
+            simulate_block_slots(then_blk, &mut then_stack, resolver, sigs)?;
+            simulate_block_slots(else_blk, &mut else_stack, resolver, sigs)?;
             if then_stack.slots != else_stack.slots {
                 return Err(LiftingError::UnbalancedIf { span: op.span() });
             }
@@ -1281,7 +1276,7 @@ fn simulate_op_slots(
         }
         Op::Repeat { count, body, .. } => {
             for _ in 0..*count {
-                simulate_block_slots(body, stack, module_path, sigs)?;
+                simulate_block_slots(body, stack, resolver, sigs)?;
             }
             Ok(())
         }
@@ -1297,7 +1292,7 @@ fn simulate_inst_slots(
     inst: &Instruction,
     op_span: SourceSpan,
     stack: &mut SlotStack,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<()> {
     match inst {
@@ -1349,7 +1344,7 @@ fn simulate_inst_slots(
         Instruction::MovDn15 => stack.movdn(15),
         Instruction::Reversew => stack.reversew(),
         _ => {
-            let effect = inst::effect_for_inst(inst, op_span, module_path, sigs)?;
+            let effect = inst::effect_for_inst(inst, op_span, resolver, sigs)?;
             let (pops, pushes, required_depth) = match effect {
                 StackEffect::Known {
                     pops,
@@ -1667,7 +1662,7 @@ impl TaggedSlotStack {
 fn simulate_block_tags(
     block: &Block,
     stack: &mut TaggedSlotStack,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<()> {
     trace!(
@@ -1675,7 +1670,7 @@ fn simulate_block_tags(
         stack.state_snapshot()
     );
     for op in block.iter() {
-        simulate_op_tags(op, stack, module_path, sigs)?;
+        simulate_op_tags(op, stack, resolver, sigs)?;
     }
     trace!(
         "finished repeat tag simulation for block: {}",
@@ -1688,18 +1683,18 @@ fn simulate_block_tags(
 fn simulate_op_tags(
     op: &Op,
     stack: &mut TaggedSlotStack,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<()> {
     match op {
-        Op::Inst(inst) => simulate_inst_tags(inst.inner(), op.span(), stack, module_path, sigs),
+        Op::Inst(inst) => simulate_inst_tags(inst.inner(), op.span(), stack, resolver, sigs),
         Op::If {
             then_blk, else_blk, ..
         } => {
             let mut then_stack = stack.clone();
             let mut else_stack = stack.clone();
-            simulate_block_tags(then_blk, &mut then_stack, module_path, sigs)?;
-            simulate_block_tags(else_blk, &mut else_stack, module_path, sigs)?;
+            simulate_block_tags(then_blk, &mut then_stack, resolver, sigs)?;
+            simulate_block_tags(else_blk, &mut else_stack, resolver, sigs)?;
             if then_stack.slots != else_stack.slots || then_stack.tags != else_stack.tags {
                 return Err(LiftingError::UnsupportedRepeatPattern {
                     span: op.span(),
@@ -1711,7 +1706,7 @@ fn simulate_op_tags(
         }
         Op::Repeat { count, body, .. } => {
             for _ in 0..*count {
-                simulate_block_tags(body, stack, module_path, sigs)?;
+                simulate_block_tags(body, stack, resolver, sigs)?;
             }
             Ok(())
         }
@@ -1727,7 +1722,7 @@ fn simulate_inst_tags(
     inst: &Instruction,
     op_span: SourceSpan,
     stack: &mut TaggedSlotStack,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<()> {
     let before = stack.state_snapshot();
@@ -1780,7 +1775,7 @@ fn simulate_inst_tags(
         Instruction::MovDn15 => stack.movdn(15),
         Instruction::Reversew => stack.reversew(),
         _ => {
-            let effect = inst::effect_for_inst(inst, op_span, module_path, sigs)?;
+            let effect = inst::effect_for_inst(inst, op_span, resolver, sigs)?;
             let (pops, pushes, required_depth) = match effect {
                 StackEffect::Known {
                     pops,
@@ -1962,7 +1957,7 @@ fn lift_while(
     body: &Block,
     stack: &mut SymbolicStack,
     loop_ctx: &mut LoopContext,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<Vec<Stmt>> {
     // Pop initial condition.
@@ -1980,7 +1975,7 @@ fn lift_while(
 
     let mut body_stack = stack.clone();
     body_stack.set_stack(phi_vars.clone());
-    let body_stmts = lift_block(body, &mut body_stack, loop_ctx, module_path, sigs)?;
+    let body_stmts = lift_block(body, &mut body_stack, loop_ctx, resolver, sigs)?;
 
     // The body should end with pushing a condition value.
     if body_stack.is_empty() {
@@ -2058,8 +2053,9 @@ mod tests {
             StackEntry::new(make_var(0, 1, 1), SlotId::new(0)),
         ];
         let exit2_slots = vec![SlotId::new(1), SlotId::new(2), SlotId::new(0)];
-        let indices = compute_slot_indices(SourceSpan::UNKNOWN, &entry, &exit, Some(&exit2_slots), 2)
-            .expect("slot index computation should succeed");
+        let indices =
+            compute_slot_indices(SourceSpan::UNKNOWN, &entry, &exit, Some(&exit2_slots), 2)
+                .expect("slot index computation should succeed");
         let entry_index = indices.get(&SlotId::new(0)).expect("entry slot");
         assert_eq!(entry_index.delta, 1);
         let produced_index = indices.get(&SlotId::new(1)).expect("produced slot");

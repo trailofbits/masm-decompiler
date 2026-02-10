@@ -8,6 +8,8 @@ use crate::ir::{
     MemStore, Stmt, UnOp, Var,
 };
 use crate::signature::{SignatureMap, StackEffect};
+use crate::symbol::path::SymbolPath;
+use crate::symbol::resolution::SymbolResolver;
 
 use super::stack::SymbolicStack;
 use super::{LiftingError, LiftingResult, LoopContext};
@@ -18,14 +20,14 @@ pub(super) fn lift_inst(
     span: SourceSpan,
     stack: &mut SymbolicStack,
     _loop_ctx: &mut LoopContext,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<Vec<Stmt>> {
     // Try each instruction category in turn.
-    if let Some(stmts) = lift_call_inst(inst, span, module_path, sigs, stack)? {
+    if let Some(stmts) = lift_call_inst(inst, span, resolver, sigs, stack)? {
         return Ok(stmts);
     }
-    if let Some(stmts) = lift_u32_inst(inst, span, module_path, sigs, stack)? {
+    if let Some(stmts) = lift_u32_inst(inst, span, resolver, sigs, stack)? {
         return Ok(stmts);
     }
     if let Some(stmts) = lift_arith_inst(inst, span, stack)? {
@@ -34,16 +36,16 @@ pub(super) fn lift_inst(
     if let Some(stmts) = lift_stack_inst(inst, span, stack)? {
         return Ok(stmts);
     }
-    if let Some(stmts) = lift_mem_inst(inst, span, module_path, sigs, stack)? {
+    if let Some(stmts) = lift_mem_inst(inst, span, resolver, sigs, stack)? {
         return Ok(stmts);
     }
-    if let Some(stmts) = lift_local_inst(inst, span, module_path, sigs, stack)? {
+    if let Some(stmts) = lift_local_inst(inst, span, resolver, sigs, stack)? {
         return Ok(stmts);
     }
-    if let Some(stmts) = lift_adv_inst(inst, span, module_path, sigs, stack)? {
+    if let Some(stmts) = lift_adv_inst(inst, span, resolver, sigs, stack)? {
         return Ok(stmts);
     }
-    if let Some(stmts) = lift_intrinsic_inst(inst, span, module_path, sigs, stack)? {
+    if let Some(stmts) = lift_intrinsic_inst(inst, span, resolver, sigs, stack)? {
         return Ok(stmts);
     }
     if let Some(stmts) = lift_push_inst(inst, span, stack)? {
@@ -59,23 +61,23 @@ pub(super) fn lift_inst(
 fn lift_call_inst(
     inst: &Instruction,
     span: SourceSpan,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
     stack: &mut SymbolicStack,
 ) -> LiftingResult<Option<Vec<Stmt>>> {
     let stmts = match inst {
         Instruction::Exec(t) => {
-            vec![lift_call_like(t, span, module_path, sigs, stack, |call| {
+            vec![lift_call_like(t, span, resolver, sigs, stack, |call| {
                 Stmt::Exec { span, call }
             })?]
         }
         Instruction::Call(t) => {
-            vec![lift_call_like(t, span, module_path, sigs, stack, |call| {
+            vec![lift_call_like(t, span, resolver, sigs, stack, |call| {
                 Stmt::Call { span, call }
             })?]
         }
         Instruction::SysCall(t) => {
-            vec![lift_call_like(t, span, module_path, sigs, stack, |call| {
+            vec![lift_call_like(t, span, resolver, sigs, stack, |call| {
                 Stmt::SysCall { span, call }
             })?]
         }
@@ -129,7 +131,7 @@ fn lift_arith_inst(
 fn lift_u32_inst(
     inst: &Instruction,
     span: SourceSpan,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
     stack: &mut SymbolicStack,
 ) -> LiftingResult<Option<Vec<Stmt>>> {
@@ -158,54 +160,19 @@ fn lift_u32_inst(
         Instruction::U32Clo => lift_unop(span, UnOp::U32Clo, stack),
         Instruction::U32Cto => lift_unop(span, UnOp::U32Cto, stack),
         Instruction::U32OverflowingAdd => {
-            return lift_u32_intrinsic(
-                inst,
-                span,
-                "u32overflowing_add",
-                module_path,
-                sigs,
-                stack,
-            );
+            return lift_u32_intrinsic(inst, span, "u32overflowing_add", resolver, sigs, stack);
         }
         Instruction::U32OverflowingAdd3 => {
-            return lift_u32_intrinsic(
-                inst,
-                span,
-                "u32overflowing_add3",
-                module_path,
-                sigs,
-                stack,
-            );
+            return lift_u32_intrinsic(inst, span, "u32overflowing_add3", resolver, sigs, stack);
         }
         Instruction::U32OverflowingSub => {
-            return lift_u32_intrinsic(
-                inst,
-                span,
-                "u32overflowing_sub",
-                module_path,
-                sigs,
-                stack,
-            );
+            return lift_u32_intrinsic(inst, span, "u32overflowing_sub", resolver, sigs, stack);
         }
         Instruction::U32OverflowingMul => {
-            return lift_u32_intrinsic(
-                inst,
-                span,
-                "u32overflowing_mul",
-                module_path,
-                sigs,
-                stack,
-            );
+            return lift_u32_intrinsic(inst, span, "u32overflowing_mul", resolver, sigs, stack);
         }
         Instruction::U32OverflowingMadd => {
-            return lift_u32_intrinsic(
-                inst,
-                span,
-                "u32overflowing_madd",
-                module_path,
-                sigs,
-                stack,
-            );
+            return lift_u32_intrinsic(inst, span, "u32overflowing_madd", resolver, sigs, stack);
         }
         Instruction::U32Split => {
             return Ok(Some(vec![lift_u32split(span, stack)]));
@@ -462,11 +429,11 @@ fn lift_u32_intrinsic(
     inst: &Instruction,
     span: SourceSpan,
     name: &str,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
     stack: &mut SymbolicStack,
 ) -> LiftingResult<Option<Vec<Stmt>>> {
-    let effect = effect_for_inst(inst, span, module_path, sigs)?;
+    let effect = effect_for_inst(inst, span, resolver, sigs)?;
     let (args, results) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
     Ok(Some(vec![Stmt::Intrinsic {
         span,
@@ -496,13 +463,13 @@ fn lift_u32_assert2(span: SourceSpan, name: &str, stack: &mut SymbolicStack) -> 
 fn lift_mem_inst(
     inst: &Instruction,
     span: SourceSpan,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
     stack: &mut SymbolicStack,
 ) -> LiftingResult<Option<Vec<Stmt>>> {
     match inst {
         Instruction::MemLoad => {
-            let effect = effect_for_inst(inst, span, module_path, sigs)?;
+            let effect = effect_for_inst(inst, span, resolver, sigs)?;
             let (popped, pushed) =
                 stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
             Ok(Some(vec![Stmt::MemLoad {
@@ -514,7 +481,7 @@ fn lift_mem_inst(
             }]))
         }
         Instruction::MemLoadImm(imm) => {
-            let effect = effect_for_inst(inst, span, module_path, sigs)?;
+            let effect = effect_for_inst(inst, span, resolver, sigs)?;
             let (_, pushed) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
             let (addr_var, assign) = assign_from_u32_immediate(span, imm, stack);
             Ok(Some(vec![
@@ -529,7 +496,7 @@ fn lift_mem_inst(
             ]))
         }
         Instruction::MemStore => {
-            let effect = effect_for_inst(inst, span, module_path, sigs)?;
+            let effect = effect_for_inst(inst, span, resolver, sigs)?;
             let (mut popped, _) = stack.apply(effect.pops(), 0, effect.required_depth());
             if popped.is_empty() {
                 return Err(LiftingError::UnsupportedInstruction {
@@ -547,7 +514,7 @@ fn lift_mem_inst(
             }]))
         }
         Instruction::MemStoreImm(imm) => {
-            let effect = effect_for_inst(inst, span, module_path, sigs)?;
+            let effect = effect_for_inst(inst, span, resolver, sigs)?;
             let (popped, _) = stack.apply(effect.pops(), 0, effect.required_depth());
             let (addr_var, assign) = assign_from_u32_immediate(span, imm, stack);
             Ok(Some(vec![
@@ -569,13 +536,13 @@ fn lift_mem_inst(
 fn lift_local_inst(
     inst: &Instruction,
     span: SourceSpan,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
     stack: &mut SymbolicStack,
 ) -> LiftingResult<Option<Vec<Stmt>>> {
     match inst {
         Instruction::LocLoad(idx) => {
-            let effect = effect_for_inst(inst, span, module_path, sigs)?;
+            let effect = effect_for_inst(inst, span, resolver, sigs)?;
             let (_, pushed) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
             Ok(Some(vec![Stmt::LocalLoad {
                 span,
@@ -586,7 +553,7 @@ fn lift_local_inst(
             }]))
         }
         Instruction::LocStore(idx) => {
-            let effect = effect_for_inst(inst, span, module_path, sigs)?;
+            let effect = effect_for_inst(inst, span, resolver, sigs)?;
             let (popped, _) = stack.apply(effect.pops(), 0, effect.required_depth());
             Ok(Some(vec![Stmt::LocalStore {
                 span,
@@ -615,13 +582,13 @@ fn lift_local_inst(
 fn lift_adv_inst(
     inst: &Instruction,
     span: SourceSpan,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
     stack: &mut SymbolicStack,
 ) -> LiftingResult<Option<Vec<Stmt>>> {
     match inst {
         Instruction::AdvLoadW => {
-            let effect = effect_for_inst(inst, span, module_path, sigs)?;
+            let effect = effect_for_inst(inst, span, resolver, sigs)?;
             let (_, pushed) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
             Ok(Some(vec![Stmt::AdvLoad {
                 span,
@@ -662,7 +629,7 @@ fn lift_adv_inst(
 fn lift_intrinsic_inst(
     inst: &Instruction,
     span: SourceSpan,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
     stack: &mut SymbolicStack,
 ) -> LiftingResult<Option<Vec<Stmt>>> {
@@ -686,11 +653,15 @@ fn lift_intrinsic_inst(
         Instruction::Trace(kind) => format!("trace_{kind}"),
         _ => return Ok(None),
     };
-    let effect = effect_for_inst(inst, span, module_path, sigs)?;
+    let effect = effect_for_inst(inst, span, resolver, sigs)?;
     let (args, results) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
     Ok(Some(vec![Stmt::Intrinsic {
         span,
-        intrinsic: Intrinsic { name, args, results },
+        intrinsic: Intrinsic {
+            name,
+            args,
+            results,
+        },
     }]))
 }
 
@@ -716,12 +687,12 @@ fn lift_push_inst(
 pub(crate) fn effect_for_inst(
     inst: &Instruction,
     span: SourceSpan,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<StackEffect> {
     match inst {
         Instruction::Exec(t) | Instruction::Call(t) | Instruction::SysCall(t) => {
-            call_effect(t, span, module_path, sigs)
+            call_effect(t, span, resolver, sigs)
         }
         _ => {
             let effect = StackEffect::from(inst);
@@ -739,7 +710,7 @@ pub(crate) fn effect_for_inst(
 fn lift_call_like<F>(
     target: &InvocationTarget,
     span: SourceSpan,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
     stack: &mut SymbolicStack,
     ctor: F,
@@ -747,15 +718,14 @@ fn lift_call_like<F>(
 where
     F: Fn(Call) -> Stmt,
 {
-    let effect = call_effect(target, span, module_path, sigs)?;
+    let effect = call_effect(target, span, resolver, sigs)?;
     let (args, results) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
-    let name = call_name(target, module_path)
-        .ok_or_else(|| LiftingError::UnknownCallTarget {
-            span,
-            target: format!("{target}"),
-        })?;
+    let name = call_name(target, resolver).ok_or_else(|| LiftingError::UnknownCallTarget {
+        span,
+        target: format!("{target}"),
+    })?;
     Ok(ctor(Call {
-        target: name,
+        target: name.to_string(),
         args,
         results,
     }))
@@ -965,33 +935,31 @@ fn assign_from_u32_immediate(
 fn call_effect(
     target: &InvocationTarget,
     span: SourceSpan,
-    module_path: &str,
+    resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<StackEffect> {
-    let callee = call_name(target, module_path)
-        .ok_or_else(|| LiftingError::UnknownCallTarget {
-            span,
-            target: format!("{target}"),
-        })?;
+    let callee = call_name(target, resolver).ok_or_else(|| LiftingError::UnknownCallTarget {
+        span,
+        target: format!("{target}"),
+    })?;
     let signature = sigs
         .get(&callee)
         .ok_or_else(|| LiftingError::UnknownCallTarget {
             span,
-            target: callee.clone(),
+            target: callee.to_string(),
         })?;
     let effect: StackEffect = signature.into();
     match effect {
         StackEffect::Known { .. } => Ok(effect),
-        StackEffect::Unknown => Err(LiftingError::UnknownCallTarget { span, target: callee }),
+        StackEffect::Unknown => Err(LiftingError::UnknownCallTarget {
+            span,
+            target: callee.to_string(),
+        }),
     }
 }
 
-fn call_name(target: &InvocationTarget, module_path: &str) -> Option<String> {
-    match target {
-        InvocationTarget::Symbol(ident) => Some(format!("{module_path}::{}", ident.as_str())),
-        InvocationTarget::Path(path) => Some(path.to_string()),
-        InvocationTarget::MastRoot(_) => None,
-    }
+fn call_name(target: &InvocationTarget, resolver: &SymbolResolver<'_>) -> Option<SymbolPath> {
+    resolver.resolve_target(target)
 }
 
 // Extension trait for StackEffect to get individual fields.
@@ -1040,7 +1008,12 @@ mod tests {
         let stmt = lift_u32split(SourceSpan::UNKNOWN, &mut stack);
         let (lo, hi) = match stmt {
             Stmt::Intrinsic {
-                intrinsic: Intrinsic { name, args, results },
+                intrinsic:
+                    Intrinsic {
+                        name,
+                        args,
+                        results,
+                    },
                 ..
             } => {
                 assert_eq!(name, "u32split");
