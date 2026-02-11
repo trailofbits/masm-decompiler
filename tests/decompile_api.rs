@@ -2,6 +2,7 @@
 
 use masm_decompiler::{
     decompile::{DecompilationConfig, Decompiler},
+    fmt::{CodeWriter, FormattingConfig},
     frontend::testing::workspace_from_modules,
     ir::Stmt,
 };
@@ -215,6 +216,7 @@ fn decompiler_accessors() {
     // Test that accessors work
     assert!(!decompiler.callgraph().nodes.is_empty());
     assert!(!decompiler.signatures().is_empty());
+    assert!(!decompiler.type_summaries().is_empty());
     assert!(decompiler.workspace().modules().next().is_some());
 
     // Default config has all optimizations enabled
@@ -243,4 +245,68 @@ fn decompiler_with_config() {
     // Should still be able to decompile
     let result = decompiler.decompile_proc("test::foo").unwrap();
     assert!(!result.stmts().is_empty());
+}
+
+#[test]
+fn formatter_prints_typed_signatures() {
+    let ws = workspace_from_modules(&[(
+        "typed",
+        r#"
+        pub proc typed_header
+            dup.2
+            if.true
+                nop
+            else
+                nop
+            end
+            mem_load
+            drop
+            dup.0
+            push.1
+            add
+            swap.1
+            drop
+            dup.1
+            push.1
+            eq
+            swap.2
+            drop
+            swap.1
+        end
+
+        pub proc sink
+            drop
+        end
+
+        pub proc unknown_out
+            adv_push.1
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let typed_header = decompiler.decompile_proc("typed::typed_header").unwrap();
+    let sink = decompiler.decompile_proc("typed::sink").unwrap();
+    let unknown_out = decompiler.decompile_proc("typed::unknown_out").unwrap();
+
+    let mut writer = CodeWriter::with_config(FormattingConfig::new().with_color(false));
+    writer.write(&typed_header);
+    let typed_output = writer.finish();
+    let typed_first_line = typed_output.lines().next().unwrap_or_default();
+    assert_eq!(
+        typed_first_line,
+        "proc typed_header(v_0: Bool, v_1: Felt, v_2: Address) -> (Bool, Felt) {"
+    );
+
+    let mut writer = CodeWriter::with_config(FormattingConfig::new().with_color(false));
+    writer.write(&sink);
+    let sink_output = writer.finish();
+    let sink_first_line = sink_output.lines().next().unwrap_or_default();
+    assert_eq!(sink_first_line, "proc sink(v_0: Felt) {");
+
+    let mut writer = CodeWriter::with_config(FormattingConfig::new().with_color(false));
+    writer.write(&unknown_out);
+    let unknown_out_output = writer.finish();
+    let unknown_out_first_line = unknown_out_output.lines().next().unwrap_or_default();
+    assert_eq!(unknown_out_first_line, "proc unknown_out() -> Felt {");
 }

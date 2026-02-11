@@ -7,6 +7,7 @@ pub mod lift;
 pub mod signature;
 pub mod simplify;
 pub mod symbol;
+pub mod types;
 
 // Re-export key types for convenient access
 pub use decompile::{DecompilationConfig, DecompilationError, DecompilationResult, Decompiler};

@@ -7,14 +7,18 @@ use std::collections::HashMap;
 
 use crate::{
     callgraph::CallGraph,
-    fmt::{CodeWriter, assign_var_names},
+    fmt::{assign_var_names, CodeWriter},
     frontend::Workspace,
     ir::{Stmt, Var},
     lift::{self, LiftingError},
-    signature::{ProcSignature, SignatureMap, infer_signatures},
+    signature::{infer_signatures, ProcSignature, SignatureMap},
     simplify,
     symbol::path::SymbolPath,
     symbol::resolution::create_resolver,
+    types::{
+        infer_type_summaries, InferredType, TypeDiagnosticsMap, TypeRequirement, TypeSummary,
+        TypeSummaryMap,
+    },
 };
 
 /// Configuration for the decompilation pipeline.
@@ -126,6 +130,10 @@ pub struct DecompiledHeader {
     pub inputs: usize,
     /// Number of output values.
     pub outputs: usize,
+    /// Input parameter types by position.
+    pub input_types: Vec<TypeRequirement>,
+    /// Return value types by position.
+    pub output_types: Vec<InferredType>,
 }
 
 /// A structured procedure body.
@@ -161,6 +169,8 @@ pub struct DecompiledProc {
     pub module_path: String,
     /// Inferred procedure signature, if available.
     pub signature: Option<ProcSignature>,
+    /// Inferred procedure type summary, if available.
+    pub type_summary: Option<TypeSummary>,
     /// The decompiled procedure body.
     pub body: DecompiledBody,
 }
@@ -206,12 +216,56 @@ impl DecompiledProc {
             .unwrap_or(&self.name)
             .to_string();
 
+        let inputs = self.inputs().unwrap_or(0);
+        let outputs = self.outputs().unwrap_or(0);
+        let (input_types, output_types) = self
+            .type_summary
+            .as_ref()
+            .map(|summary| {
+                (
+                    normalized_input_types(&summary.inputs, inputs),
+                    normalized_output_types(&summary.outputs, outputs),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    vec![TypeRequirement::Unknown; inputs],
+                    vec![InferredType::Unknown; outputs],
+                )
+            });
+
         DecompiledHeader {
             name,
-            inputs: self.inputs().unwrap_or(0),
-            outputs: self.outputs().unwrap_or(0),
+            inputs,
+            outputs,
+            input_types,
+            output_types,
         }
     }
+}
+
+/// Normalize inferred input types to exactly match the known input arity.
+fn normalized_input_types(types: &[TypeRequirement], expected_len: usize) -> Vec<TypeRequirement> {
+    let mut normalized = vec![TypeRequirement::Unknown; expected_len];
+    for (display_idx, slot) in normalized.iter_mut().enumerate() {
+        let summary_idx = expected_len.saturating_sub(1).saturating_sub(display_idx);
+        if let Some(ty) = types.get(summary_idx) {
+            *slot = *ty;
+        }
+    }
+    normalized
+}
+
+/// Normalize inferred output types to exactly match the known output arity.
+fn normalized_output_types(types: &[InferredType], expected_len: usize) -> Vec<InferredType> {
+    let mut normalized = vec![InferredType::Unknown; expected_len];
+    for (display_idx, slot) in normalized.iter_mut().enumerate() {
+        let summary_idx = expected_len.saturating_sub(1).saturating_sub(display_idx);
+        if let Some(ty) = types.get(summary_idx) {
+            *slot = *ty;
+        }
+    }
+    normalized
 }
 
 impl std::fmt::Display for DecompiledProc {
@@ -251,6 +305,8 @@ pub struct Decompiler<'a> {
     workspace: &'a Workspace,
     callgraph: CallGraph,
     signatures: SignatureMap,
+    type_summaries: TypeSummaryMap,
+    type_diagnostics: TypeDiagnosticsMap,
     config: DecompilationConfig,
 }
 
@@ -259,10 +315,14 @@ impl<'a> Decompiler<'a> {
     pub fn new(workspace: &'a Workspace) -> Self {
         let callgraph = CallGraph::from(workspace);
         let signatures = infer_signatures(workspace, &callgraph);
+        let (type_summaries, type_diagnostics) =
+            infer_type_summaries(workspace, &callgraph, &signatures);
         Self {
             workspace,
             callgraph,
             signatures,
+            type_summaries,
+            type_diagnostics,
             config: DecompilationConfig::default(),
         }
     }
@@ -291,6 +351,16 @@ impl<'a> Decompiler<'a> {
     /// Returns a reference to the inferred signatures.
     pub fn signatures(&self) -> &SignatureMap {
         &self.signatures
+    }
+
+    /// Returns a reference to inferred procedure type summaries.
+    pub fn type_summaries(&self) -> &TypeSummaryMap {
+        &self.type_summaries
+    }
+
+    /// Returns a reference to type diagnostics grouped by procedure.
+    pub fn type_diagnostics(&self) -> &TypeDiagnosticsMap {
+        &self.type_diagnostics
     }
 
     /// Decompile a single procedure by fully-qualified name.
@@ -326,12 +396,14 @@ impl<'a> Decompiler<'a> {
         }
 
         let signature = self.signatures.get(&proc_path).cloned();
+        let type_summary = self.type_summaries.get(&proc_path).cloned();
         let body = DecompiledBody::new(stmts);
 
         Ok(DecompiledProc {
             name: fq_name.to_string(),
             module_path,
             signature,
+            type_summary,
             body,
         })
     }

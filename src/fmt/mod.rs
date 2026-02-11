@@ -6,6 +6,7 @@ use crate::{
         AdvLoad, AdvStore, BinOp, Call, Constant, Expr, IndexExpr, Intrinsic, LocalLoad,
         LocalStore, LocalStoreW, LoopVar, MemLoad, MemStore, Stmt, UnOp, ValueId, Var, VarBase,
     },
+    types::{InferredType, TypeRequirement},
 };
 use std::collections::{HashMap, HashSet};
 use yansi::Paint;
@@ -237,11 +238,7 @@ fn collect_stmt_usage(stmt: &Stmt, usage: &mut VarUsage) {
                 usage.record_def(v);
             }
         }
-        Stmt::Repeat {
-            body,
-            phis,
-            ..
-        } => {
+        Stmt::Repeat { body, phis, .. } => {
             for phi in phis {
                 usage.record_def(&phi.dest);
                 usage.record_use(&phi.init);
@@ -271,7 +268,9 @@ fn collect_stmt_usage(stmt: &Stmt, usage: &mut VarUsage) {
                 collect_stmt_usage(stmt, usage);
             }
         }
-        Stmt::While { cond, body, phis, .. } => {
+        Stmt::While {
+            cond, body, phis, ..
+        } => {
             collect_expr_usage(cond, usage);
             for phi in phis {
                 usage.record_def(&phi.dest);
@@ -401,9 +400,15 @@ fn collect_phi_alias_names_stmt(stmt: &Stmt, aliases: &mut HashMap<Var, String>)
         Stmt::Repeat { body, phis, .. } => {
             for phi in phis {
                 let base = base_name_for_var(&phi.init);
-                aliases.entry(phi.init.clone()).or_insert_with(|| base.clone());
-                aliases.entry(phi.dest.clone()).or_insert_with(|| base.clone());
-                aliases.entry(phi.step.clone()).or_insert_with(|| base.clone());
+                aliases
+                    .entry(phi.init.clone())
+                    .or_insert_with(|| base.clone());
+                aliases
+                    .entry(phi.dest.clone())
+                    .or_insert_with(|| base.clone());
+                aliases
+                    .entry(phi.step.clone())
+                    .or_insert_with(|| base.clone());
             }
             for stmt in body {
                 collect_phi_alias_names_stmt(stmt, aliases);
@@ -660,13 +665,11 @@ impl CodeWriter {
                     _ => format!("{lhs} + {}", self.fmt_index_expr(b)),
                 }
             }
-            IndexExpr::Mul(a, b) => {
-                match (&**a, &**b) {
-                    (IndexExpr::Const(1), rhs) => self.fmt_index_expr(rhs),
-                    (lhs, IndexExpr::Const(1)) => self.fmt_index_expr(lhs),
-                    _ => format!("{} * {}", self.fmt_index_expr(a), self.fmt_index_expr(b)),
-                }
-            }
+            IndexExpr::Mul(a, b) => match (&**a, &**b) {
+                (IndexExpr::Const(1), rhs) => self.fmt_index_expr(rhs),
+                (lhs, IndexExpr::Const(1)) => self.fmt_index_expr(lhs),
+                _ => format!("{} * {}", self.fmt_index_expr(a), self.fmt_index_expr(b)),
+            },
         }
     }
 }
@@ -694,17 +697,40 @@ impl CodeDisplay for DecompiledHeader {
         let mut args = Vec::new();
         for i in 0..self.inputs {
             let v = Var::new(ValueId::from(i as u64), i);
-            args.push(f.fmt_var(&v));
+            let ty = self
+                .input_types
+                .get(i)
+                .copied()
+                .unwrap_or(TypeRequirement::Unknown);
+            args.push(format!(
+                "{}: {}",
+                f.fmt_var(&v),
+                type_name(type_requirement_for_display(ty))
+            ));
         }
         let arg_list = args.join(", ");
 
         // Build return type list
         let ret_list = match self.outputs {
             0 => String::new(),
-            1 => format!(" -> {}", type_name("Felt")),
+            1 => {
+                let ty = self
+                    .output_types
+                    .first()
+                    .copied()
+                    .unwrap_or(InferredType::Unknown);
+                format!(" -> {}", type_name(inferred_type_for_display(ty)))
+            }
             n => {
                 let types = (0..n)
-                    .map(|_| type_name("Felt"))
+                    .map(|idx| {
+                        let ty = self
+                            .output_types
+                            .get(idx)
+                            .copied()
+                            .unwrap_or(InferredType::Unknown);
+                        type_name(inferred_type_for_display(ty))
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(" -> ({})", types)
@@ -721,10 +747,36 @@ impl CodeDisplay for DecompiledHeader {
     }
 }
 
+/// Convert an input type requirement to its formatter display string.
+///
+/// Unknown requirements are rendered as `Felt`.
+fn type_requirement_for_display(requirement: TypeRequirement) -> &'static str {
+    match requirement {
+        TypeRequirement::Unknown | TypeRequirement::Felt => "Felt",
+        TypeRequirement::Bool => "Bool",
+        TypeRequirement::U32 => "U32",
+        TypeRequirement::Address => "Address",
+    }
+}
+
+/// Convert an inferred output type to its formatter display string.
+///
+/// Unknown inferred outputs are rendered as `Felt`.
+fn inferred_type_for_display(ty: InferredType) -> &'static str {
+    match ty {
+        InferredType::Unknown | InferredType::Felt => "Felt",
+        InferredType::Bool => "Bool",
+        InferredType::U32 => "U32",
+        InferredType::Address => "Address",
+    }
+}
+
 impl CodeDisplay for Stmt {
     fn fmt_code(&self, f: &mut CodeWriter) {
         match self {
-            Stmt::Assign { dest: dst, expr, .. } => {
+            Stmt::Assign {
+                dest: dst, expr, ..
+            } => {
                 f.write_line(&format!("{} = {};", f.fmt_var(dst), fmt_expr(f, expr, 0)));
             }
             Stmt::Return { values, .. } => {
@@ -739,7 +791,10 @@ impl CodeDisplay for Stmt {
                     f.write_line(&format!("{} {vals};", keyword("return")));
                 }
             }
-            Stmt::MemLoad { load: MemLoad { address, outputs }, .. } => {
+            Stmt::MemLoad {
+                load: MemLoad { address, outputs },
+                ..
+            } => {
                 let args = address
                     .iter()
                     .map(|v| f.fmt_var(v))
@@ -756,7 +811,10 @@ impl CodeDisplay for Stmt {
                     f.write_line(&format!("{outs} = {}({args});", function_name("mem_load")));
                 }
             }
-            Stmt::MemStore { store: MemStore { address, values }, .. } => {
+            Stmt::MemStore {
+                store: MemStore { address, values },
+                ..
+            } => {
                 let args = address
                     .iter()
                     .chain(values.iter())
@@ -765,7 +823,10 @@ impl CodeDisplay for Stmt {
                     .join(", ");
                 f.write_line(&format!("{}({args});", function_name("mem_store")));
             }
-            Stmt::AdvLoad { load: AdvLoad { outputs }, .. } => {
+            Stmt::AdvLoad {
+                load: AdvLoad { outputs },
+                ..
+            } => {
                 let outs = outputs
                     .iter()
                     .map(|v| f.fmt_var(v))
@@ -777,7 +838,10 @@ impl CodeDisplay for Stmt {
                     f.write_line(&format!("{outs} = {}();", function_name("adv_load")));
                 }
             }
-            Stmt::AdvStore { store: AdvStore { values }, .. } => {
+            Stmt::AdvStore {
+                store: AdvStore { values },
+                ..
+            } => {
                 let args = values
                     .iter()
                     .map(|v| f.fmt_var(v))
@@ -785,7 +849,10 @@ impl CodeDisplay for Stmt {
                     .join(", ");
                 f.write_line(&format!("{}({args});", function_name("adv_store")));
             }
-            Stmt::LocalLoad { load: LocalLoad { index, outputs }, .. } => {
+            Stmt::LocalLoad {
+                load: LocalLoad { index, outputs },
+                ..
+            } => {
                 let outs = outputs
                     .iter()
                     .map(|v| f.fmt_var(v))
@@ -800,7 +867,10 @@ impl CodeDisplay for Stmt {
                     ));
                 }
             }
-            Stmt::LocalStore { store: LocalStore { index, values }, .. } => {
+            Stmt::LocalStore {
+                store: LocalStore { index, values },
+                ..
+            } => {
                 let args = values
                     .iter()
                     .map(|v| f.fmt_var(v))
@@ -808,7 +878,10 @@ impl CodeDisplay for Stmt {
                     .join(", ");
                 f.write_line(&format!("{}.{index}({args});", function_name("loc_store")));
             }
-            Stmt::LocalStoreW { store: LocalStoreW { index, values }, .. } => {
+            Stmt::LocalStoreW {
+                store: LocalStoreW { index, values },
+                ..
+            } => {
                 let args = values
                     .iter()
                     .map(|v| f.fmt_var(v))
@@ -819,10 +892,7 @@ impl CodeDisplay for Stmt {
                 } else {
                     format!("{index}, {args}")
                 };
-                f.write_line(&format!(
-                    "{}({args});",
-                    function_name("loc_storew_be")
-                ));
+                f.write_line(&format!("{}({args});", function_name("loc_storew_be")));
             }
             Stmt::Call { call, .. } => write_call_like("call", call, f),
             Stmt::Exec { call, .. } => write_call_like("exec", call, f),
@@ -845,7 +915,12 @@ impl CodeDisplay for Stmt {
                 }
             }
             Stmt::Intrinsic {
-                intrinsic: Intrinsic { name, args, results },
+                intrinsic:
+                    Intrinsic {
+                        name,
+                        args,
+                        results,
+                    },
                 ..
             } => {
                 let args = args
@@ -934,32 +1009,30 @@ fn fmt_expr(f: &CodeWriter, expr: &Expr, parent_prec: u8) -> String {
         Expr::False => keyword("false"),
         Expr::Var(v) => f.fmt_var(v),
         Expr::Constant(c) => fmt_constant(c),
-        Expr::Unary(op, inner) => {
-            match op {
-                UnOp::Not => {
-                    let inner_str = fmt_expr(f, inner, 5);
-                    format!("!{inner_str}")
-                }
-                UnOp::Neg => {
-                    let inner_str = fmt_expr(f, inner, 5);
-                    format!("-{inner_str}")
-                }
-                UnOp::U32Clz => format!("clz_u32({})", fmt_expr(f, inner, 0)),
-                UnOp::U32Ctz => format!("ctz_u32({})", fmt_expr(f, inner, 0)),
-                UnOp::U32Clo => format!("clo_u32({})", fmt_expr(f, inner, 0)),
-                UnOp::U32Cto => format!("cto_u32({})", fmt_expr(f, inner, 0)),
-                UnOp::Pow2 => {
-                    let prec = 11;
-                    let inner_str = fmt_expr(f, inner, prec);
-                    let expr_str = format!("2 ^ {inner_str}");
-                    if prec < parent_prec {
-                        format!("({expr_str})")
-                    } else {
-                        expr_str
-                    }
+        Expr::Unary(op, inner) => match op {
+            UnOp::Not => {
+                let inner_str = fmt_expr(f, inner, 5);
+                format!("!{inner_str}")
+            }
+            UnOp::Neg => {
+                let inner_str = fmt_expr(f, inner, 5);
+                format!("-{inner_str}")
+            }
+            UnOp::U32Clz => format!("clz_u32({})", fmt_expr(f, inner, 0)),
+            UnOp::U32Ctz => format!("ctz_u32({})", fmt_expr(f, inner, 0)),
+            UnOp::U32Clo => format!("clo_u32({})", fmt_expr(f, inner, 0)),
+            UnOp::U32Cto => format!("cto_u32({})", fmt_expr(f, inner, 0)),
+            UnOp::Pow2 => {
+                let prec = 11;
+                let inner_str = fmt_expr(f, inner, prec);
+                let expr_str = format!("2 ^ {inner_str}");
+                if prec < parent_prec {
+                    format!("({expr_str})")
+                } else {
+                    expr_str
                 }
             }
-        }
+        },
         Expr::Ternary {
             cond,
             then_expr,
