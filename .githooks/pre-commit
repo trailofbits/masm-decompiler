@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-commit: cargo was not found in PATH" >&2
+  exit 1
+fi
+
+# Track exactly what was staged before running format/lint fixes.
+staged_files=()
+while IFS= read -r -d '' file; do
+  staged_files+=("$file")
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+if [ "${#staged_files[@]}" -eq 0 ]; then
+  echo "pre-commit: no staged files to check; skipping."
+  exit 0
+fi
+
+# Partially staged files are unsafe with auto-fixes because re-staging would
+# include previously unstaged hunks.
+partially_staged=()
+for file in "${staged_files[@]}"; do
+  if ! git diff --quiet -- "$file"; then
+    partially_staged+=("$file")
+  fi
+done
+
+if [ "${#partially_staged[@]}" -gt 0 ]; then
+  echo "pre-commit: partially staged files are not supported with auto-fixes:" >&2
+  printf '  - %s\n' "${partially_staged[@]}" >&2
+  echo "pre-commit: stage or stash remaining hunks, then retry." >&2
+  exit 1
+fi
+
+echo "pre-commit: running cargo fmt --all"
+cargo fmt --all
+
+echo "pre-commit: running cargo clippy --fix --all-targets --all-features"
+cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features
+
+echo "pre-commit: re-staging files updated by fmt/clippy"
+git add -- "${staged_files[@]}"
