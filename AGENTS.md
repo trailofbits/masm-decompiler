@@ -66,14 +66,14 @@ The decompiler supports logging that can be enabled using the `RUST_LOG`
 environment variable. To run the decompiler on a file, use the command
 
 ```sh
-target/debug/masm-decompiler --no-color path/to/file.masm
+cargo run -- --no-color path/to/file.masm
 ```
 
 Note the `--no-color` flag which can be used to disable color output. To
 decompile individual procedures, use the `--procedure` argument.
 
 ```sh
-target/debug/masm-decompiler --no-color --procedure proc_name path/to/file.masm
+cargo run -- --no-color --procedure proc_name path/to/file.masm
 ```
 
 Finally, use the `--no-dce`, `--no-propagation`, and `--no-simplification` to
