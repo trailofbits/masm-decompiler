@@ -255,6 +255,8 @@ impl<'a> ProcTypeAnalyzer<'a> {
     fn intrinsic_result_type(&self, name: &str) -> InferredType {
         if name.starts_with("u32") {
             InferredType::U32
+        } else if name.starts_with("locaddr.") {
+            InferredType::Address
         } else {
             InferredType::Unknown
         }
@@ -317,6 +319,8 @@ impl<'a> ProcTypeAnalyzer<'a> {
             BinOp::U32And
             | BinOp::U32Or
             | BinOp::U32Xor
+            | BinOp::U32Shl
+            | BinOp::U32Shr
             | BinOp::U32WrappingAdd
             | BinOp::U32WrappingSub
             | BinOp::U32WrappingMul => InferredType::U32,
@@ -456,6 +460,8 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     BinOp::U32And
                     | BinOp::U32Or
                     | BinOp::U32Xor
+                    | BinOp::U32Shl
+                    | BinOp::U32Shr
                     | BinOp::U32Lt
                     | BinOp::U32Lte
                     | BinOp::U32Gt

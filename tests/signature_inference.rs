@@ -92,6 +92,39 @@ fn infers_produce_only() {
 }
 
 #[test]
+fn infers_word_memory_and_stack_op_signatures() {
+    let ws = workspace_from_modules(&[(
+        "word_mem_stack_ops",
+        include_str!("fixtures/word_mem_stack_ops.masm"),
+    )]);
+    let cg = CallGraph::from(&ws);
+    let sigs = infer_signatures(&ws, &cg);
+
+    for proc_name in [
+        "word_mem_stack_ops::uses_movupw",
+        "word_mem_stack_ops::uses_loc_loadw_be",
+        "word_mem_stack_ops::uses_loc_loadw_le",
+        "word_mem_stack_ops::uses_loc_load_and_store",
+        "word_mem_stack_ops::uses_mem_loadw_and_storew_be",
+        "word_mem_stack_ops::uses_mem_loadw_and_storew_le",
+        "word_mem_stack_ops::uses_mem_load_and_store",
+        "word_mem_stack_ops::uses_swapdw",
+        "word_mem_stack_ops::uses_locaddr",
+        "word_mem_stack_ops::uses_u32wrapping_add3",
+        "word_mem_stack_ops::uses_u32shift_imm",
+        "word_mem_stack_ops::uses_u32shift_binary",
+    ] {
+        let sig = sigs
+            .get(proc_name)
+            .unwrap_or_else(|| panic!("missing {proc_name}"));
+        assert!(
+            !matches!(sig, ProcSignature::Unknown),
+            "expected known signature for {proc_name}"
+        );
+    }
+}
+
+#[test]
 fn infers_call_chain() {
     // mid calls leaf twice, and leaf consumes 1 and produces 1. The second call
     // reuses the first result, so mid consumes 1 input and produces 1 output.

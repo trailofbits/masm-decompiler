@@ -137,6 +137,8 @@ impl From<&Instruction> for StackEffect {
                 | U32WrappingAddImm(_)
                 | U32WrappingSubImm(_)
                 | U32WrappingMulImm(_)
+                | U32ShlImm(_)
+                | U32ShrImm(_)
         );
         if unary {
             return StackEffect::known(1, 1);

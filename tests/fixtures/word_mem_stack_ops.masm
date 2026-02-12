@@ -1,0 +1,100 @@
+#! Fixture coverage for word memory, stack-word permutations, locaddr, and
+#! u32 wrapping add-3 support in the decompiler pipeline.
+
+proc uses_movupw
+    push.1.2.3.4.5.6.7.8.9.10.11.12
+    movupw.2
+    dropw
+end
+
+@locals(8)
+proc uses_loc_loadw_be
+    push.10.11.12.13
+    loc_storew_be.0
+    dropw
+
+    push.0.0.0.0
+    loc_loadw_be.0
+end
+
+@locals(8)
+proc uses_loc_loadw_le
+    push.10.11.12.13
+    loc_storew_le.0
+    dropw
+
+    push.0.0.0.0
+    loc_loadw_le.0
+end
+
+@locals(8)
+proc uses_loc_load_and_store
+    push.9
+    loc_store.0
+    loc_load.0
+end
+
+proc uses_mem_loadw_and_storew_be
+    push.16
+    push.1.2.3.4
+    mem_storew_be
+    dropw
+
+    push.16
+    push.0.0.0.0
+    mem_loadw_be
+end
+
+proc uses_mem_loadw_and_storew_le
+    push.32
+    push.1.2.3.4
+    mem_storew_le
+    dropw
+
+    push.32
+    push.0.0.0.0
+    mem_loadw_le
+end
+
+proc uses_mem_load_and_store
+    push.16
+    push.7
+    mem_store
+
+    push.16
+    mem_load
+end
+
+proc uses_swapdw
+    push.1.2.3.4.5.6.7.8.9.10.11.12.13.14.15.16
+    swapdw
+end
+
+@locals(8)
+proc uses_locaddr
+    push.21.22.23.24
+    locaddr.0
+    mem_storew_be
+    dropw
+
+    push.0.0.0.0
+    loc_loadw_be.0
+end
+
+proc uses_u32wrapping_add3
+    push.1.2.3
+    u32wrapping_add3
+end
+
+proc uses_u32shift_imm
+    push.2147483648
+    u32shr.31
+    u32shl.1
+end
+
+proc uses_u32shift_binary
+    push.1.3
+    u32shl
+    push.1
+    u32shr
+end

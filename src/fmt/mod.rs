@@ -3,8 +3,9 @@
 use crate::{
     decompile::{DecompiledHeader, DecompiledProc},
     ir::{
-        AdvLoad, AdvStore, BinOp, Call, Constant, Expr, IndexExpr, Intrinsic, LocalLoad,
-        LocalStore, LocalStoreW, LoopVar, MemLoad, MemStore, Stmt, UnOp, ValueId, Var, VarBase,
+        AdvLoad, AdvStore, BinOp, Call, Constant, Expr, IndexExpr, Intrinsic, LocalAccessKind,
+        LocalLoad, LocalStore, LocalStoreW, LoopVar, MemAccessKind, MemLoad, MemStore, Stmt, UnOp,
+        ValueId, Var, VarBase,
     },
     types::{InferredType, TypeRequirement},
 };
@@ -800,10 +801,15 @@ impl CodeDisplay for Stmt {
                 }
             }
             Stmt::MemLoad {
-                load: MemLoad { address, outputs },
+                load:
+                    MemLoad {
+                        kind,
+                        address,
+                        outputs,
+                    },
                 ..
             } => {
-                let args = address
+                let addr = address
                     .iter()
                     .map(|v| f.fmt_var(v))
                     .collect::<Vec<_>>()
@@ -813,23 +819,44 @@ impl CodeDisplay for Stmt {
                     .map(|v| f.fmt_var(v))
                     .collect::<Vec<_>>()
                     .join(", ");
-                if outs.is_empty() {
-                    f.write_line(&format!("{}({args});", function_name("mem_load")));
-                } else {
-                    f.write_line(&format!("{outs} = {}({args});", function_name("mem_load")));
+                let access = mem_access_name(*kind);
+                match kind {
+                    MemAccessKind::Element => {
+                        f.write_line(&format!("{outs} = {access}[{addr}];"));
+                    }
+                    MemAccessKind::WordBe | MemAccessKind::WordLe => {
+                        f.write_line(&format!("({outs}) = {access}[{addr}];"));
+                    }
                 }
             }
             Stmt::MemStore {
-                store: MemStore { address, values },
+                store:
+                    MemStore {
+                        kind,
+                        address,
+                        values,
+                    },
                 ..
             } => {
-                let args = address
+                let addr = address
                     .iter()
-                    .chain(values.iter())
                     .map(|v| f.fmt_var(v))
                     .collect::<Vec<_>>()
                     .join(", ");
-                f.write_line(&format!("{}({args});", function_name("mem_store")));
+                let vals = values
+                    .iter()
+                    .map(|v| f.fmt_var(v))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let access = mem_access_name(*kind);
+                match kind {
+                    MemAccessKind::Element => {
+                        f.write_line(&format!("{access}[{addr}] = {vals};"));
+                    }
+                    MemAccessKind::WordBe | MemAccessKind::WordLe => {
+                        f.write_line(&format!("{access}[{addr}] = ({vals});"));
+                    }
+                }
             }
             Stmt::AdvLoad {
                 load: AdvLoad { outputs },
@@ -858,7 +885,12 @@ impl CodeDisplay for Stmt {
                 f.write_line(&format!("{}({args});", function_name("adv_store")));
             }
             Stmt::LocalLoad {
-                load: LocalLoad { index, outputs },
+                load:
+                    LocalLoad {
+                        kind,
+                        index,
+                        outputs,
+                    },
                 ..
             } => {
                 let outs = outputs
@@ -866,41 +898,43 @@ impl CodeDisplay for Stmt {
                     .map(|v| f.fmt_var(v))
                     .collect::<Vec<_>>()
                     .join(", ");
-                if outs.is_empty() {
-                    f.write_line(&format!("{}.{index}();", function_name("loc_load")));
-                } else {
-                    f.write_line(&format!(
-                        "{outs} = {}.{index}();",
-                        function_name("loc_load")
-                    ));
+                let access = local_access_name(*kind);
+                match kind {
+                    LocalAccessKind::Element => {
+                        f.write_line(&format!("{outs} = {access}[{index}];"));
+                    }
+                    LocalAccessKind::WordBe | LocalAccessKind::WordLe => {
+                        f.write_line(&format!("({outs}) = {access}[{index}];"));
+                    }
                 }
             }
             Stmt::LocalStore {
                 store: LocalStore { index, values },
                 ..
             } => {
-                let args = values
+                let vals = values
                     .iter()
                     .map(|v| f.fmt_var(v))
                     .collect::<Vec<_>>()
                     .join(", ");
-                f.write_line(&format!("{}.{index}({args});", function_name("loc_store")));
+                f.write_line(&format!("locals[{index}] = {vals};"));
             }
             Stmt::LocalStoreW {
-                store: LocalStoreW { index, values },
+                store:
+                    LocalStoreW {
+                        kind,
+                        index,
+                        values,
+                    },
                 ..
             } => {
-                let args = values
+                let vals = values
                     .iter()
                     .map(|v| f.fmt_var(v))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let args = if args.is_empty() {
-                    index.to_string()
-                } else {
-                    format!("{index}, {args}")
-                };
-                f.write_line(&format!("{}({args});", function_name("loc_storew_be")));
+                let access = local_access_name(*kind);
+                f.write_line(&format!("{access}[{index}] = ({vals});"));
             }
             Stmt::Call { call, .. } => write_call_like("call", call, f),
             Stmt::Exec { call, .. } => write_call_like("exec", call, f),
@@ -941,6 +975,17 @@ impl CodeDisplay for Stmt {
                     .map(|v| f.fmt_var(v))
                     .collect::<Vec<_>>()
                     .join(", ");
+                if args.is_empty() {
+                    if let Some(index) = name.strip_prefix("locaddr.") {
+                        let call = format!("{}({index})", function_name("locaddr"));
+                        if outs.is_empty() {
+                            f.write_line(&format!("{call};"));
+                        } else {
+                            f.write_line(&format!("{outs} = {call};"));
+                        }
+                        return;
+                    }
+                }
                 if outs.is_empty() {
                     f.write_line(&format!("{}({args});", function_name(name)));
                 } else {
@@ -1108,6 +1153,8 @@ fn fmt_expr(f: &CodeWriter, expr: &Expr, parent_prec: u8) -> String {
                 BinOp::U32And => (7, "and_u32"),
                 BinOp::U32Or => (6, "or_u32"),
                 BinOp::U32Xor => (6, "xor_u32"),
+                BinOp::U32Shl => (8, "<<_u32"),
+                BinOp::U32Shr => (8, ">>_u32"),
                 BinOp::U32Lt => (4, "<_u32"),
                 BinOp::U32Lte => (4, "<=_u32"),
                 BinOp::U32Gt => (4, ">_u32"),
@@ -1125,6 +1172,24 @@ fn fmt_expr(f: &CodeWriter, expr: &Expr, parent_prec: u8) -> String {
                 expr_str
             }
         }
+    }
+}
+
+/// Return the formatter access path for a memory access kind.
+fn mem_access_name(kind: MemAccessKind) -> &'static str {
+    match kind {
+        MemAccessKind::Element => "memory",
+        MemAccessKind::WordBe => "memory.be",
+        MemAccessKind::WordLe => "memory.le",
+    }
+}
+
+/// Return the formatter access path for a local access kind.
+fn local_access_name(kind: LocalAccessKind) -> &'static str {
+    match kind {
+        LocalAccessKind::Element => "locals",
+        LocalAccessKind::WordBe => "locals.be",
+        LocalAccessKind::WordLe => "locals.le",
     }
 }
 

@@ -4,7 +4,7 @@
 //! The IR is structured (no CFG), with explicit `If`, `While`, and `Repeat`
 //! constructs.
 
-use miden_assembly_syntax::ast::{ImmFelt, ImmU32, Immediate};
+use miden_assembly_syntax::ast::{ImmFelt, ImmU8, ImmU32, Immediate};
 use miden_assembly_syntax::debuginfo::SourceSpan;
 use miden_assembly_syntax::parser::PushValue;
 
@@ -206,6 +206,8 @@ pub enum BinOp {
     U32And,
     U32Or,
     U32Xor,
+    U32Shl,
+    U32Shr,
     U32Lt,
     U32Lte,
     U32Gt,
@@ -354,9 +356,20 @@ impl From<&ImmU32> for Expr {
     }
 }
 
+impl From<&ImmU8> for Expr {
+    fn from(imm: &ImmU8) -> Self {
+        match imm {
+            Immediate::Value(span) => Expr::Constant(Constant::Felt(u64::from(*span.inner()))),
+            Immediate::Constant(id) => Expr::Constant(Constant::Defined(id.to_string())),
+        }
+    }
+}
+
 /// Memory load operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemLoad {
+    /// Memory access shape and byte order.
+    pub kind: MemAccessKind,
     /// Address operands for the load.
     pub address: Vec<Var>,
     /// Output variables produced by the load.
@@ -366,6 +379,8 @@ pub struct MemLoad {
 /// Memory store operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemStore {
+    /// Memory access shape and byte order.
+    pub kind: MemAccessKind,
     /// Address operands for the store.
     pub address: Vec<Var>,
     /// Values written by the store.
@@ -389,10 +404,34 @@ pub struct AdvStore {
 /// Local variable load.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalLoad {
+    /// Local load shape and byte order.
+    pub kind: LocalAccessKind,
     /// Local variable index.
     pub index: u16,
     /// Output variables produced by the load.
     pub outputs: Vec<Var>,
+}
+
+/// Memory access shape and byte order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemAccessKind {
+    /// Scalar element access (`mem_load` / `mem_store`).
+    Element,
+    /// Word access in big-endian order (`mem_loadw_be` / `mem_storew_be`).
+    WordBe,
+    /// Word access in little-endian order (`mem_loadw_le` / `mem_storew_le`).
+    WordLe,
+}
+
+/// Local-memory access shape and byte order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalAccessKind {
+    /// Scalar element access (`loc_load.i`).
+    Element,
+    /// Word access in big-endian order (`loc_loadw_be.i`).
+    WordBe,
+    /// Word access in little-endian order (`loc_loadw_le.i`).
+    WordLe,
 }
 
 /// Local variable store.
@@ -404,9 +443,11 @@ pub struct LocalStore {
     pub values: Vec<Var>,
 }
 
-/// Local word store operation (big-endian).
+/// Local word store operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalStoreW {
+    /// Local access shape and byte order.
+    pub kind: LocalAccessKind,
     /// Local variable index.
     pub index: u16,
     /// Word values written to the local (top of stack first).
@@ -514,7 +555,7 @@ pub enum Stmt {
         /// Local variable store description.
         store: LocalStore,
     },
-    /// Local word store (big-endian).
+    /// Local word store.
     LocalStoreW {
         /// Source span of the originating instruction.
         span: SourceSpan,

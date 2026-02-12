@@ -394,11 +394,12 @@ mod tests {
     #[test]
     fn test_preserve_stores() {
         // MemStore is a side effect and should be preserved.
-        use crate::ir::MemStore;
+        use crate::ir::{MemAccessKind, MemStore};
 
         let mut stmts = vec![Stmt::MemStore {
             span: TEST_SPAN,
             store: MemStore {
+                kind: MemAccessKind::Element,
                 address: vec![var_with_subscript(0, 0)],
                 values: vec![var_with_subscript(1, 1)],
             },

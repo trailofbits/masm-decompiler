@@ -284,6 +284,7 @@ impl Simplify for LocalLoad {
 
     fn simplify(self) -> SimplifyResult<Self::Output> {
         self.outputs.simplify().map(|outputs| LocalLoad {
+            kind: self.kind,
             index: self.index,
             outputs,
         })
@@ -306,6 +307,7 @@ impl Simplify for LocalStoreW {
 
     fn simplify(self) -> SimplifyResult<Self::Output> {
         self.values.simplify().map(|values| LocalStoreW {
+            kind: self.kind,
             index: self.index,
             values,
         })
@@ -320,6 +322,7 @@ impl Simplify for MemLoad {
         let outputs_result = self.outputs.simplify();
         SimplifyResult::new(
             MemLoad {
+                kind: self.kind,
                 address: address_result.value,
                 outputs: outputs_result.value,
             },
@@ -336,6 +339,7 @@ impl Simplify for MemStore {
         let values_result = self.values.simplify();
         SimplifyResult::new(
             MemStore {
+                kind: self.kind,
                 address: address_result.value,
                 values: values_result.value,
             },

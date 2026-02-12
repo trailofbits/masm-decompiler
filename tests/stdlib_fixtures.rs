@@ -24,3 +24,22 @@ macro_rules! fixture_module {
 }
 
 fixture_module!(word, "word", include_str!("fixtures/word.masm"), [testz,]);
+fixture_module!(
+    word_mem_stack_ops,
+    "word_mem_stack_ops",
+    include_str!("fixtures/word_mem_stack_ops.masm"),
+    [
+        uses_movupw,
+        uses_loc_loadw_be,
+        uses_loc_loadw_le,
+        uses_loc_load_and_store,
+        uses_mem_loadw_and_storew_be,
+        uses_mem_loadw_and_storew_le,
+        uses_mem_load_and_store,
+        uses_swapdw,
+        uses_locaddr,
+        uses_u32wrapping_add3,
+        uses_u32shift_imm,
+        uses_u32shift_binary,
+    ]
+);

@@ -365,3 +365,43 @@ fn accepts_boolean_arguments_for_and_operator() {
         "boolean arguments to and should satisfy Bool requirements: {diagnostics:?}"
     );
 }
+
+#[test]
+fn infers_locaddr_output_as_address() {
+    let ws = workspace_from_modules(&[(
+        "locaddr_types",
+        r#"
+        pub proc returns_locaddr
+            locaddr.0
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("locaddr_types::returns_locaddr"))
+        .expect("returns_locaddr summary");
+    assert_eq!(summary.outputs, vec![InferredType::Address]);
+}
+
+#[test]
+fn infers_u32shift_outputs_as_u32() {
+    let ws = workspace_from_modules(&[(
+        "u32_shift_types",
+        r#"
+        pub proc shifts
+            push.1
+            u32shl.1
+            u32shr.1
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("u32_shift_types::shifts"))
+        .expect("shifts summary");
+    assert_eq!(summary.outputs, vec![InferredType::U32]);
+}

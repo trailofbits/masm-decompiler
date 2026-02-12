@@ -1,11 +1,13 @@
 //! Instruction-level lifting from MASM to IR statements.
 
-use miden_assembly_syntax::ast::{ImmFelt, ImmU32, Immediate, Instruction, InvocationTarget};
+use miden_assembly_syntax::ast::{
+    ImmFelt, ImmU8, ImmU32, Immediate, Instruction, InvocationTarget,
+};
 use miden_assembly_syntax::debuginfo::SourceSpan;
 
 use crate::ir::{
-    AdvLoad, BinOp, Call, Constant, Expr, Intrinsic, LocalLoad, LocalStore, LocalStoreW, MemLoad,
-    MemStore, Stmt, UnOp, Var,
+    AdvLoad, BinOp, Call, Constant, Expr, Intrinsic, LocalAccessKind, LocalLoad, LocalStore,
+    LocalStoreW, MemAccessKind, MemLoad, MemStore, Stmt, UnOp, Var,
 };
 use crate::signature::{SignatureMap, StackEffect};
 use crate::symbol::path::SymbolPath;
@@ -140,6 +142,10 @@ fn lift_u32_inst(
         Instruction::U32And => lift_binop(span, BinOp::U32And, stack),
         Instruction::U32Or => lift_binop(span, BinOp::U32Or, stack),
         Instruction::U32Xor => lift_binop(span, BinOp::U32Xor, stack),
+        Instruction::U32Shl => lift_binop(span, BinOp::U32Shl, stack),
+        Instruction::U32Shr => lift_binop(span, BinOp::U32Shr, stack),
+        Instruction::U32ShlImm(imm) => lift_binop_u8_imm(span, BinOp::U32Shl, imm, stack),
+        Instruction::U32ShrImm(imm) => lift_binop_u8_imm(span, BinOp::U32Shr, imm, stack),
         Instruction::U32Lt => lift_binop(span, BinOp::U32Lt, stack),
         Instruction::U32Lte => lift_binop(span, BinOp::U32Lte, stack),
         Instruction::U32Gt => lift_binop(span, BinOp::U32Gt, stack),
@@ -165,6 +171,9 @@ fn lift_u32_inst(
         }
         Instruction::U32OverflowingAdd3 => {
             return lift_u32_intrinsic(inst, span, "u32overflowing_add3", resolver, sigs, stack);
+        }
+        Instruction::U32WrappingAdd3 => {
+            return lift_u32_intrinsic(inst, span, "u32wrapping_add3", resolver, sigs, stack);
         }
         Instruction::U32OverflowingSub => {
             return lift_u32_intrinsic(inst, span, "u32overflowing_sub", resolver, sigs, stack);
@@ -305,6 +314,10 @@ fn lift_stack_inst(
             stack.swapw(3);
             Ok(Some(Vec::new()))
         }
+        Instruction::SwapDw => {
+            stack.swapdw();
+            Ok(Some(Vec::new()))
+        }
         Instruction::MovUp2 => {
             stack.movup(2);
             Ok(Some(Vec::new()))
@@ -359,6 +372,14 @@ fn lift_stack_inst(
         }
         Instruction::MovUp15 => {
             stack.movup(15);
+            Ok(Some(Vec::new()))
+        }
+        Instruction::MovUpW2 => {
+            stack.movupw(2);
+            Ok(Some(Vec::new()))
+        }
+        Instruction::MovUpW3 => {
+            stack.movupw(3);
             Ok(Some(Vec::new()))
         }
         Instruction::MovDn2 => {
@@ -476,6 +497,7 @@ fn lift_mem_inst(
             Ok(Some(vec![Stmt::MemLoad {
                 span,
                 load: MemLoad {
+                    kind: MemAccessKind::Element,
                     address: popped,
                     outputs: pushed,
                 },
@@ -490,6 +512,79 @@ fn lift_mem_inst(
                 Stmt::MemLoad {
                     span,
                     load: MemLoad {
+                        kind: MemAccessKind::Element,
+                        address: vec![addr_var],
+                        outputs: pushed,
+                    },
+                },
+            ]))
+        }
+        Instruction::MemLoadWBe => {
+            let effect = effect_for_inst(inst, span, resolver, sigs)?;
+            let (popped, pushed) =
+                stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+            if popped.is_empty() {
+                return Err(LiftingError::UnsupportedInstruction {
+                    span,
+                    instruction: inst.clone(),
+                });
+            }
+            let address = popped[0].clone();
+            Ok(Some(vec![Stmt::MemLoad {
+                span,
+                load: MemLoad {
+                    kind: MemAccessKind::WordBe,
+                    address: vec![address],
+                    outputs: pushed,
+                },
+            }]))
+        }
+        Instruction::MemLoadWBeImm(imm) => {
+            let effect = effect_for_inst(inst, span, resolver, sigs)?;
+            let (_, pushed) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+            let (addr_var, assign) = assign_from_u32_immediate(span, imm, stack);
+            Ok(Some(vec![
+                assign,
+                Stmt::MemLoad {
+                    span,
+                    load: MemLoad {
+                        kind: MemAccessKind::WordBe,
+                        address: vec![addr_var],
+                        outputs: pushed,
+                    },
+                },
+            ]))
+        }
+        Instruction::MemLoadWLe => {
+            let effect = effect_for_inst(inst, span, resolver, sigs)?;
+            let (popped, pushed) =
+                stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+            if popped.is_empty() {
+                return Err(LiftingError::UnsupportedInstruction {
+                    span,
+                    instruction: inst.clone(),
+                });
+            }
+            let address = popped[0].clone();
+            Ok(Some(vec![Stmt::MemLoad {
+                span,
+                load: MemLoad {
+                    kind: MemAccessKind::WordLe,
+                    address: vec![address],
+                    outputs: pushed,
+                },
+            }]))
+        }
+        Instruction::MemLoadWLeImm(imm) => {
+            let effect = effect_for_inst(inst, span, resolver, sigs)?;
+            let (_, pushed) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+            let (addr_var, assign) = assign_from_u32_immediate(span, imm, stack);
+            Ok(Some(vec![
+                assign,
+                Stmt::MemLoad {
+                    span,
+                    load: MemLoad {
+                        kind: MemAccessKind::WordLe,
                         address: vec![addr_var],
                         outputs: pushed,
                     },
@@ -509,6 +604,7 @@ fn lift_mem_inst(
             Ok(Some(vec![Stmt::MemStore {
                 span,
                 store: MemStore {
+                    kind: MemAccessKind::Element,
                     address: vec![address],
                     values: popped,
                 },
@@ -523,8 +619,83 @@ fn lift_mem_inst(
                 Stmt::MemStore {
                     span,
                     store: MemStore {
+                        kind: MemAccessKind::Element,
                         address: vec![addr_var],
                         values: popped,
+                    },
+                },
+            ]))
+        }
+        Instruction::MemStoreWBe => {
+            let effect = effect_for_inst(inst, span, resolver, sigs)?;
+            let (popped, _) = stack.apply(effect.pops(), 0, effect.required_depth());
+            if popped.is_empty() {
+                return Err(LiftingError::UnsupportedInstruction {
+                    span,
+                    instruction: inst.clone(),
+                });
+            }
+            let address = popped[0].clone();
+            let values = stack.top_n(4);
+            Ok(Some(vec![Stmt::MemStore {
+                span,
+                store: MemStore {
+                    kind: MemAccessKind::WordBe,
+                    address: vec![address],
+                    values,
+                },
+            }]))
+        }
+        Instruction::MemStoreWBeImm(imm) => {
+            let effect = effect_for_inst(inst, span, resolver, sigs)?;
+            let (_, _) = stack.apply(effect.pops(), 0, effect.required_depth());
+            let values = stack.top_n(4);
+            let (addr_var, assign) = assign_from_u32_immediate(span, imm, stack);
+            Ok(Some(vec![
+                assign,
+                Stmt::MemStore {
+                    span,
+                    store: MemStore {
+                        kind: MemAccessKind::WordBe,
+                        address: vec![addr_var],
+                        values,
+                    },
+                },
+            ]))
+        }
+        Instruction::MemStoreWLe => {
+            let effect = effect_for_inst(inst, span, resolver, sigs)?;
+            let (popped, _) = stack.apply(effect.pops(), 0, effect.required_depth());
+            if popped.is_empty() {
+                return Err(LiftingError::UnsupportedInstruction {
+                    span,
+                    instruction: inst.clone(),
+                });
+            }
+            let address = popped[0].clone();
+            let values = stack.top_n(4);
+            Ok(Some(vec![Stmt::MemStore {
+                span,
+                store: MemStore {
+                    kind: MemAccessKind::WordLe,
+                    address: vec![address],
+                    values,
+                },
+            }]))
+        }
+        Instruction::MemStoreWLeImm(imm) => {
+            let effect = effect_for_inst(inst, span, resolver, sigs)?;
+            let (_, _) = stack.apply(effect.pops(), 0, effect.required_depth());
+            let values = stack.top_n(4);
+            let (addr_var, assign) = assign_from_u32_immediate(span, imm, stack);
+            Ok(Some(vec![
+                assign,
+                Stmt::MemStore {
+                    span,
+                    store: MemStore {
+                        kind: MemAccessKind::WordLe,
+                        address: vec![addr_var],
+                        values,
                     },
                 },
             ]))
@@ -548,6 +719,31 @@ fn lift_local_inst(
             Ok(Some(vec![Stmt::LocalLoad {
                 span,
                 load: LocalLoad {
+                    kind: LocalAccessKind::Element,
+                    index: idx.expect_value(),
+                    outputs: pushed,
+                },
+            }]))
+        }
+        Instruction::LocLoadWBe(idx) => {
+            let effect = effect_for_inst(inst, span, resolver, sigs)?;
+            let (_, pushed) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+            Ok(Some(vec![Stmt::LocalLoad {
+                span,
+                load: LocalLoad {
+                    kind: LocalAccessKind::WordBe,
+                    index: idx.expect_value(),
+                    outputs: pushed,
+                },
+            }]))
+        }
+        Instruction::LocLoadWLe(idx) => {
+            let effect = effect_for_inst(inst, span, resolver, sigs)?;
+            let (_, pushed) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+            Ok(Some(vec![Stmt::LocalLoad {
+                span,
+                load: LocalLoad {
+                    kind: LocalAccessKind::WordLe,
                     index: idx.expect_value(),
                     outputs: pushed,
                 },
@@ -570,6 +766,19 @@ fn lift_local_inst(
             Ok(Some(vec![Stmt::LocalStoreW {
                 span,
                 store: LocalStoreW {
+                    kind: LocalAccessKind::WordBe,
+                    index: idx.expect_value(),
+                    values,
+                },
+            }]))
+        }
+        Instruction::LocStoreWLe(idx) => {
+            stack.ensure_depth(4);
+            let values = stack.top_n(4);
+            Ok(Some(vec![Stmt::LocalStoreW {
+                span,
+                store: LocalStoreW {
+                    kind: LocalAccessKind::WordLe,
                     index: idx.expect_value(),
                     values,
                 },
@@ -677,6 +886,17 @@ fn lift_push_inst(
             let dest = stack.push_fresh();
             let expr: Expr = imm.into();
             Ok(Some(vec![Stmt::Assign { span, dest, expr }]))
+        }
+        Instruction::Locaddr(index) => {
+            let (_, pushed) = stack.apply(0, 1, 0);
+            Ok(Some(vec![Stmt::Intrinsic {
+                span,
+                intrinsic: Intrinsic {
+                    name: format!("locaddr.{}", index.expect_value()),
+                    args: Vec::new(),
+                    results: pushed,
+                },
+            }]))
         }
         _ => Ok(None),
     }
@@ -788,6 +1008,18 @@ fn lift_binop_u32_imm(
     imm: &ImmU32,
     stack: &mut SymbolicStack,
 ) -> Stmt {
+    stack.ensure_depth(1);
+    let a = stack.pop_entry();
+    let dest = stack.push_fresh_with_slot_like(a.slot_id, &a.var);
+    let rhs: Expr = imm.into();
+    Stmt::Assign {
+        span,
+        dest,
+        expr: Expr::Binary(op, Box::new(Expr::Var(a.var)), Box::new(rhs)),
+    }
+}
+
+fn lift_binop_u8_imm(span: SourceSpan, op: BinOp, imm: &ImmU8, stack: &mut SymbolicStack) -> Stmt {
     stack.ensure_depth(1);
     let a = stack.pop_entry();
     let dest = stack.push_fresh_with_slot_like(a.slot_id, &a.var);

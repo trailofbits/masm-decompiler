@@ -411,6 +411,20 @@ impl SymbolicStack {
         self.stack.swap(len - 3, len - 2);
     }
 
+    /// Swap the first two words with the next two words.
+    ///
+    /// This models `swapdw`, which transforms `[D, C, B, A, ...]` into
+    /// `[B, A, D, C, ...]`.
+    pub fn swapdw(&mut self) {
+        let len = self.stack.len();
+        if len < 16 {
+            return;
+        }
+        for i in 0..8 {
+            self.stack.swap(len - 16 + i, len - 8 + i);
+        }
+    }
+
     /// Move the element at the given depth to the top.
     pub fn movup(&mut self, depth: usize) {
         let len = self.stack.len();
@@ -419,6 +433,30 @@ impl SymbolicStack {
             if let Some(entry) = self.stack.remove(idx) {
                 self.stack.push_back(entry);
             }
+        }
+    }
+
+    /// Move the word at the given 1-based word depth to the top word.
+    ///
+    /// Valid indices in MASM are 2 and 3 (matching `movupw.2`/`movupw.3`).
+    pub fn movupw(&mut self, word_index: usize) {
+        if word_index < 1 {
+            return;
+        }
+        let len = self.stack.len();
+        let offset = word_index.saturating_mul(4);
+        if offset + 4 > len {
+            return;
+        }
+        let start = len - offset - 4;
+        let mut moved = Vec::with_capacity(4);
+        for _ in 0..4 {
+            if let Some(entry) = self.stack.remove(start) {
+                moved.push(entry);
+            }
+        }
+        for entry in moved {
+            self.stack.push_back(entry);
         }
     }
 
@@ -504,6 +542,43 @@ mod tests {
         stack.swap(1);
         assert_eq!(stack.peek(0).unwrap().stack_depth, 0);
         assert_eq!(stack.peek(1).unwrap().stack_depth, 1);
+    }
+
+    #[test]
+    fn test_movupw_two() {
+        let mut stack = SymbolicStack::new();
+        stack.ensure_depth(12);
+
+        let top_before = stack.top_n(4);
+        let moved_before = [
+            stack.peek(8).cloned().expect("word top element"),
+            stack.peek(9).cloned().expect("word element 1"),
+            stack.peek(10).cloned().expect("word element 2"),
+            stack.peek(11).cloned().expect("word bottom element"),
+        ];
+
+        stack.movupw(2);
+        let top_after = stack.top_n(4);
+        assert_eq!(top_after, moved_before);
+        assert_ne!(top_after, top_before);
+    }
+
+    #[test]
+    fn test_swapdw() {
+        let mut stack = SymbolicStack::new();
+        stack.ensure_depth(16);
+
+        let before_top = stack.top_n(16);
+        stack.swapdw();
+        let after_top = stack.top_n(16);
+
+        let expected = before_top
+            .iter()
+            .skip(8)
+            .cloned()
+            .chain(before_top.iter().take(8).cloned())
+            .collect::<Vec<_>>();
+        assert_eq!(after_top, expected);
     }
 
     #[test]
