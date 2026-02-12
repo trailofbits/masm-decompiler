@@ -3,9 +3,9 @@
 use std::path::{Path as FsPath, PathBuf as FsPathBuf};
 
 use miden_assembly_syntax::{
-    ModuleParser, Report,
-    ast::{Module, ModuleKind, Procedure, path::PathBuf as MasmPathBuf},
+    ast::{path::PathBuf as MasmPathBuf, Module, ModuleKind, Procedure},
     debuginfo::SourceManager,
+    ModuleParser, Report,
 };
 use std::sync::Arc;
 
@@ -105,14 +105,16 @@ pub fn derive_module_path(
     file_path: &FsPath,
     roots: &[LibraryRoot],
 ) -> Result<MasmPathBuf, String> {
-    let file_name = file_path
+    let normalized_file_path = normalize_path_for_matching(file_path)?;
+    let file_name = normalized_file_path
         .file_name()
         .and_then(|f| f.to_str())
         .ok_or_else(|| "module path derivation failed: missing file name".to_string())?;
     let is_mod = file_name == "mod.masm";
 
     for root in roots {
-        if let Ok(rel) = file_path.strip_prefix(&root.path) {
+        let normalized_root_path = normalize_path_for_matching(&root.path)?;
+        if let Ok(rel) = normalized_file_path.strip_prefix(&normalized_root_path) {
             let mut comps: Vec<String> = Vec::new();
             if !root.namespace.is_empty() {
                 comps.push(root.namespace.clone());
@@ -147,4 +149,46 @@ pub fn derive_module_path(
     }
 
     Err("module path derivation failed: file not under any library root".to_string())
+}
+
+/// Normalize a filesystem path for prefix matching during module-path derivation.
+///
+/// Relative paths are made absolute against the process working directory.
+fn normalize_path_for_matching(path: &FsPath) -> Result<FsPathBuf, String> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    Ok(cwd.join(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ensure module-path derivation works when the file path is relative and root is absolute.
+    #[test]
+    fn derive_module_path_relative_file_absolute_root() {
+        let cwd = std::env::current_dir().expect("current dir");
+        let roots = vec![LibraryRoot::new("", cwd)];
+        let path = FsPath::new("examples/stdlib/pcs/fri/helper.masm");
+        let module_path = derive_module_path(path, &roots).expect("module path");
+        assert_eq!(
+            module_path.to_string(),
+            "examples::stdlib::pcs::fri::helper"
+        );
+    }
+
+    /// Ensure module-path derivation works when the file path is absolute and root is relative.
+    #[test]
+    fn derive_module_path_absolute_file_relative_root() {
+        let cwd = std::env::current_dir().expect("current dir");
+        let roots = vec![LibraryRoot::new("", FsPathBuf::from("."))];
+        let path = cwd.join("examples/stdlib/pcs/fri/helper.masm");
+        let module_path = derive_module_path(path.as_path(), &roots).expect("module path");
+        assert_eq!(
+            module_path.to_string(),
+            "examples::stdlib::pcs::fri::helper"
+        );
+    }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path as FsPath, PathBuf as FsPathBuf};
 use std::sync::Arc;
 
@@ -74,28 +74,7 @@ impl Workspace {
         let mut changed = true;
         while changed {
             changed = false;
-            let mut to_load = Vec::new();
-            for prog in self.modules.iter() {
-                let current_module = SymbolPath::new(as_str(prog.module_path()).to_string());
-                let resolver = create_resolver(prog.module(), self.source_manager());
-                for proc in prog.procedures() {
-                    for invoke in proc.invoked() {
-                        let Some(target_path) = resolver.resolve_target(&invoke.target) else {
-                            continue;
-                        };
-                        let Some(module_path) = target_path.module_path() else {
-                            continue;
-                        };
-                        let module_path = SymbolPath::new(module_path);
-                        if module_path.as_str() == current_module.as_str() {
-                            continue;
-                        }
-                        if !self.index.contains_key(&module_path) {
-                            to_load.push(module_path);
-                        }
-                    }
-                }
-            }
+            let to_load = self.collect_unloaded_dependency_modules();
             for module_path in to_load {
                 if self.index.contains_key(&module_path) {
                     continue;
@@ -106,6 +85,14 @@ impl Workspace {
                 }
             }
         }
+    }
+
+    /// Return unresolved module dependencies referenced by loaded modules.
+    ///
+    /// These are fully-qualified module paths seen in invocation targets that
+    /// cannot currently be resolved to loaded modules.
+    pub fn unresolved_module_paths(&self) -> Vec<SymbolPath> {
+        self.collect_unloaded_dependency_modules()
     }
 
     /// Load a module by its absolute MASM path (e.g., `std::math::u64`) if it exists on disk.
@@ -155,6 +142,35 @@ impl Workspace {
 
     pub fn source_manager(&self) -> Arc<dyn SourceManager> {
         self.source_manager.clone()
+    }
+
+    /// Collect referenced module paths that are not currently loaded in the workspace.
+    fn collect_unloaded_dependency_modules(&self) -> Vec<SymbolPath> {
+        let mut missing = HashSet::new();
+        for prog in &self.modules {
+            let current_module = SymbolPath::new(as_str(prog.module_path()).to_string());
+            let resolver = create_resolver(prog.module(), self.source_manager());
+            for proc in prog.procedures() {
+                for invoke in proc.invoked() {
+                    let Some(target_path) = resolver.resolve_target(&invoke.target) else {
+                        continue;
+                    };
+                    let Some(module_path) = target_path.module_path() else {
+                        continue;
+                    };
+                    let module_path = SymbolPath::new(module_path);
+                    if module_path.as_str() == current_module.as_str() {
+                        continue;
+                    }
+                    if !self.index.contains_key(&module_path) {
+                        missing.insert(module_path);
+                    }
+                }
+            }
+        }
+        let mut missing: Vec<_> = missing.into_iter().collect();
+        missing.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        missing
     }
 }
 
@@ -221,5 +237,58 @@ impl Workspace {
                 self.proc_index.insert(name, (module_idx, proc_idx));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frontend::testing::workspace_from_modules;
+
+    /// Ensure unresolved module reporting includes external modules that are not loaded.
+    #[test]
+    fn unresolved_module_paths_reports_missing_import_module() {
+        let ws = workspace_from_modules(&[(
+            "entry",
+            r#"
+            use std::stark::random_coin
+
+            proc caller
+                exec.random_coin::reseed
+            end
+            "#,
+        )]);
+
+        assert_eq!(
+            ws.unresolved_module_paths(),
+            vec![SymbolPath::new("std::stark::random_coin")]
+        );
+    }
+
+    /// Ensure unresolved module reporting excludes modules present in the workspace.
+    #[test]
+    fn unresolved_module_paths_ignores_loaded_import_module() {
+        let ws = workspace_from_modules(&[
+            (
+                "entry",
+                r#"
+                use std::stark::random_coin
+
+                proc caller
+                    exec.random_coin::reseed
+                end
+                "#,
+            ),
+            (
+                "std::stark::random_coin",
+                r#"
+                proc reseed
+                    drop
+                end
+                "#,
+            ),
+        ]);
+
+        assert!(ws.unresolved_module_paths().is_empty());
     }
 }

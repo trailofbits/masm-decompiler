@@ -7,7 +7,7 @@ use miden_assembly_syntax::debuginfo::SourceSpan;
 use crate::ir::{BinOp, Constant, Expr, Stmt, UnOp, ValueId, Var};
 use crate::symbol::path::SymbolPath;
 
-use super::domain::{check_compatibility, Compatibility, InferredType, TypeRequirement, VarKey};
+use super::domain::{Compatibility, InferredType, TypeRequirement, VarKey, check_compatibility};
 use super::summary::{TypeDiagnostic, TypeSummary, TypeSummaryMap};
 
 /// Maximum number of fixed-point iterations for local type inference.
@@ -306,6 +306,9 @@ impl<'a> ProcTypeAnalyzer<'a> {
             | BinOp::Lte
             | BinOp::Gt
             | BinOp::Gte
+            | BinOp::And
+            | BinOp::Or
+            | BinOp::Xor
             | BinOp::U32Lt
             | BinOp::U32Lte
             | BinOp::U32Gt
@@ -319,10 +322,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
             BinOp::Add
             | BinOp::Sub
             | BinOp::Mul
-            | BinOp::Div
-            | BinOp::And
-            | BinOp::Or
-            | BinOp::Xor => InferredType::Felt,
+            | BinOp::Div => InferredType::Felt,
         }
     }
 
@@ -468,13 +468,14 @@ impl<'a> ProcTypeAnalyzer<'a> {
                         changed |= self.require_u32_expr(lhs);
                         changed |= self.require_u32_expr(rhs);
                     }
+                    BinOp::And | BinOp::Or | BinOp::Xor => {
+                        changed |= self.require_bool_expr(lhs);
+                        changed |= self.require_bool_expr(rhs);
+                    }
                     BinOp::Add
                     | BinOp::Sub
                     | BinOp::Mul
                     | BinOp::Div
-                    | BinOp::And
-                    | BinOp::Or
-                    | BinOp::Xor
                     | BinOp::Eq
                     | BinOp::Neq
                     | BinOp::Lt
@@ -721,7 +722,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                             arg,
                             TypeRequirement::U32,
                             *span,
-                            "u32 intrinsic argument is not guaranteed U32",
+                            "u32 instruction argument is not guaranteed U32",
                         );
                     }
                 }

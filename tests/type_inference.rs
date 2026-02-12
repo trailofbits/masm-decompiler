@@ -28,6 +28,11 @@ fn setup_decompiler() -> Decompiler<'static> {
             end
         end
 
+        pub proc needs_and_bool
+            and
+            drop
+        end
+
         pub proc needs_felt
             push.1
             add
@@ -48,6 +53,20 @@ fn setup_decompiler() -> Decompiler<'static> {
         pub proc caller_bad_bool
             push.2
             exec.needs_bool
+        end
+
+        pub proc caller_ok_and_bool
+            push.1.1
+            eq
+            push.2.2
+            eq
+            exec.needs_and_bool
+        end
+
+        pub proc caller_bad_and_bool
+            push.1
+            push.2
+            exec.needs_and_bool
         end
 
         pub proc caller_unknown_bool
@@ -108,6 +127,30 @@ fn setup_decompiler() -> Decompiler<'static> {
             eq
         end
 
+        pub proc out_and
+            push.1.1
+            eq
+            push.2.2
+            eq
+            and
+        end
+
+        pub proc out_or
+            push.1.1
+            eq
+            push.2.2
+            eq
+            or
+        end
+
+        pub proc out_xor
+            push.1.1
+            eq
+            push.2.2
+            eq
+            xor
+        end
+
         pub proc caller_out_ok
             exec.out_mixed
             if.true
@@ -160,6 +203,14 @@ fn infers_expected_input_requirements() {
         .get(&SymbolPath::new("typecheck::needs_address"))
         .expect("needs_address summary");
     assert_eq!(needs_address.inputs, vec![TypeRequirement::Address]);
+
+    let needs_and_bool = summaries
+        .get(&SymbolPath::new("typecheck::needs_and_bool"))
+        .expect("needs_and_bool summary");
+    assert_eq!(
+        needs_and_bool.inputs,
+        vec![TypeRequirement::Bool, TypeRequirement::Bool]
+    );
 }
 
 #[test]
@@ -180,6 +231,20 @@ fn reports_call_argument_type_mismatches() {
     assert!(bad_addr
         .iter()
         .any(|diag| diag.arg_index == Some(0) && diag.expected == Some(TypeRequirement::Address)));
+
+    let bad_and = diagnostics_for(&decompiler, "typecheck::caller_bad_and_bool");
+    assert!(
+        bad_and
+            .iter()
+            .any(|diag| diag.arg_index == Some(0) && diag.expected == Some(TypeRequirement::Bool)),
+        "expected arg 0 Bool mismatch, got: {bad_and:?}"
+    );
+    assert!(
+        bad_and
+            .iter()
+            .any(|diag| diag.arg_index == Some(1) && diag.expected == Some(TypeRequirement::Bool)),
+        "expected arg 1 Bool mismatch, got: {bad_and:?}"
+    );
 }
 
 #[test]
@@ -261,5 +326,36 @@ fn maps_call_results_to_output_types_by_position() {
         bad.iter()
             .any(|diag| diag.message.contains("if-condition is not guaranteed Bool")),
         "expected Bool condition mismatch, got: {bad:?}"
+    );
+}
+
+#[test]
+fn infers_boolean_operator_outputs_as_bool() {
+    let decompiler = setup_decompiler();
+    let summaries = decompiler.type_summaries();
+
+    let out_and = summaries
+        .get(&SymbolPath::new("typecheck::out_and"))
+        .expect("out_and summary");
+    assert_eq!(out_and.outputs, vec![InferredType::Bool]);
+
+    let out_or = summaries
+        .get(&SymbolPath::new("typecheck::out_or"))
+        .expect("out_or summary");
+    assert_eq!(out_or.outputs, vec![InferredType::Bool]);
+
+    let out_xor = summaries
+        .get(&SymbolPath::new("typecheck::out_xor"))
+        .expect("out_xor summary");
+    assert_eq!(out_xor.outputs, vec![InferredType::Bool]);
+}
+
+#[test]
+fn accepts_boolean_arguments_for_and_operator() {
+    let decompiler = setup_decompiler();
+    let diagnostics = diagnostics_for(&decompiler, "typecheck::caller_ok_and_bool");
+    assert!(
+        diagnostics.is_empty(),
+        "boolean arguments to and should satisfy Bool requirements: {diagnostics:?}"
     );
 }

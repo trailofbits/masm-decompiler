@@ -1,7 +1,8 @@
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use log::{error, info};
+use log::{error, info, warn};
 use masm_decompiler::{
     decompile::{DecompilationConfig, Decompiler},
     frontend::{LibraryRoot, Workspace},
@@ -59,14 +60,17 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<(), String> {
-    let mut roots = cli.libraries.clone();
-    // Always include the workspace root (empty namespace)
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    roots.push(LibraryRoot::new("", cwd));
+    let entry_path = normalize_cli_path(&cli.input, &cwd);
+
+    let mut roots = normalize_library_roots(&cli.libraries, &cwd);
+    // Always include the workspace root (empty namespace).
+    roots.push(LibraryRoot::new("", normalize_cli_path(&cwd, &cwd)));
 
     let mut workspace = Workspace::new(roots);
-    workspace.load_entry(&cli.input)?;
+    workspace.load_entry(&entry_path)?;
     workspace.load_dependencies();
+    emit_unresolved_dependency_warnings(&workspace);
     let proc_count: usize = workspace.modules().map(|m| m.procedures().count()).sum();
 
     // Build config from CLI flags
@@ -80,7 +84,7 @@ fn run(cli: Cli) -> Result<(), String> {
 
     info!(
         "Loaded {proc_count} procedures from `{}`",
-        cli.input.to_string_lossy()
+        entry_path.to_string_lossy()
     );
     info!(
         "{}-node call graph generated",
@@ -122,4 +126,87 @@ fn parse_library_spec(spec: &str) -> Result<LibraryRoot, String> {
     }
     let pb = PathBuf::from(path);
     Ok(LibraryRoot::new(ns, pb))
+}
+
+/// Normalize a CLI path for stable path matching.
+///
+/// Relative paths are made absolute against `cwd`; existing paths are
+/// canonicalized to remove redundant components and symlink indirections.
+fn normalize_cli_path(path: &Path, cwd: &Path) -> PathBuf {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    std::fs::canonicalize(&abs).unwrap_or(abs)
+}
+
+/// Normalize user-provided library roots.
+fn normalize_library_roots(roots: &[LibraryRoot], cwd: &Path) -> Vec<LibraryRoot> {
+    roots
+        .iter()
+        .map(|root| LibraryRoot::new(&root.namespace, normalize_cli_path(&root.path, cwd)))
+        .collect()
+}
+
+/// Emit warnings for external modules that were referenced but could not be loaded.
+fn emit_unresolved_dependency_warnings(workspace: &Workspace) {
+    let unresolved = workspace.unresolved_module_paths();
+    if unresolved.is_empty() {
+        return;
+    }
+
+    let rendered_modules = unresolved
+        .iter()
+        .map(|module| module.as_str().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    warn!(
+        "Unable to load {} referenced module(s): {rendered_modules}",
+        unresolved.len()
+    );
+
+    let configured_namespaces = workspace
+        .roots()
+        .iter()
+        .filter(|root| !root.namespace.is_empty())
+        .map(|root| root.namespace.as_str())
+        .collect::<HashSet<_>>();
+
+    let rendered_roots = workspace
+        .roots()
+        .iter()
+        .map(format_library_root)
+        .collect::<Vec<_>>()
+        .join(", ");
+    warn!("Configured library roots: {rendered_roots}");
+
+    let mut seen_namespaces = HashSet::new();
+    for module in unresolved {
+        let Some(namespace) = module.segments().next() else {
+            continue;
+        };
+        if !seen_namespaces.insert(namespace.to_string()) {
+            continue;
+        }
+
+        if configured_namespaces.contains(namespace) {
+            warn!(
+                "Namespace `{namespace}` is configured, but some referenced modules were not found under its roots"
+            );
+        } else {
+            warn!(
+                "No library root configured for namespace `{namespace}`. Add `--library {namespace}:<path>`"
+            );
+        }
+    }
+}
+
+/// Render a library root for diagnostics.
+fn format_library_root(root: &LibraryRoot) -> String {
+    if root.namespace.is_empty() {
+        format!("<default>:{}", root.path.display())
+    } else {
+        format!("{}:{}", root.namespace, root.path.display())
+    }
 }
