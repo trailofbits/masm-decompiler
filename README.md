@@ -53,3 +53,20 @@ proc eqz(v_0: Felt, v_1: Felt, v_2: Felt, v_3: Felt, v_4: Felt, v_5: Felt, v_6: 
 
 See the [`ARCHITECTURE.md`](ARCHITECTURE.md) file for an overview of the design and architecture of
 the decompiler.
+
+## Git hooks
+
+This repository includes a pre-commit hook in `.githooks/pre-commit` that runs:
+
+- `cargo fmt --all`
+- `cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features`
+
+Activate repository hooks locally with:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+The hook supports unstaged changes in unrelated files, but intentionally
+rejects partially staged files because auto-fixes would otherwise stage
+previously unstaged hunks.
