@@ -939,12 +939,8 @@ fn lift_call_like<F>(
 where
     F: Fn(Call) -> Stmt,
 {
-    let effect = call_effect(target, span, resolver, sigs)?;
+    let (name, effect) = resolve_call_target_and_effect(target, span, resolver, sigs)?;
     let (args, results) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
-    let name = call_name(target, resolver).ok_or_else(|| LiftingError::UnknownCallTarget {
-        span,
-        target: format!("{target}"),
-    })?;
     Ok(ctor(Call {
         target: name.to_string(),
         args,
@@ -1194,28 +1190,48 @@ fn call_effect(
     resolver: &SymbolResolver<'_>,
     sigs: &SignatureMap,
 ) -> LiftingResult<StackEffect> {
-    let callee = call_name(target, resolver).ok_or_else(|| LiftingError::UnknownCallTarget {
+    let (_, effect) = resolve_call_target_and_effect(target, span, resolver, sigs)?;
+    Ok(effect)
+}
+
+/// Resolve a call target and compute its stack effect from the inferred signature map.
+fn resolve_call_target_and_effect(
+    target: &InvocationTarget,
+    span: SourceSpan,
+    resolver: &SymbolResolver<'_>,
+    sigs: &SignatureMap,
+) -> LiftingResult<(SymbolPath, StackEffect)> {
+    let callee = resolve_call_target(target, span, resolver)?;
+    let signature = sigs.get(&callee).ok_or_else(|| LiftingError::MissingSignature {
         span,
-        target: format!("{target}"),
+        callee: callee.clone(),
     })?;
-    let signature = sigs
-        .get(&callee)
-        .ok_or_else(|| LiftingError::UnknownCallTarget {
-            span,
-            target: callee.to_string(),
-        })?;
     let effect: StackEffect = signature.into();
     match effect {
-        StackEffect::Known { .. } => Ok(effect),
-        StackEffect::Unknown => Err(LiftingError::UnknownCallTarget {
-            span,
-            target: callee.to_string(),
-        }),
+        StackEffect::Known { .. } => Ok((callee, effect)),
+        StackEffect::Unknown => Err(LiftingError::UnknownSignature { span, callee }),
     }
 }
 
-fn call_name(target: &InvocationTarget, resolver: &SymbolResolver<'_>) -> Option<SymbolPath> {
-    resolver.resolve_target(target).ok().flatten()
+/// Resolve a call target to a concrete procedure path.
+fn resolve_call_target(
+    target: &InvocationTarget,
+    span: SourceSpan,
+    resolver: &SymbolResolver<'_>,
+) -> LiftingResult<SymbolPath> {
+    match resolver.resolve_target(target) {
+        Ok(Some(callee)) => Ok(callee),
+        Ok(None) => Err(LiftingError::UnresolvedCallTarget {
+            span,
+            target: format!("{target}"),
+            reason: None,
+        }),
+        Err(err) => Err(LiftingError::UnresolvedCallTarget {
+            span,
+            target: format!("{target}"),
+            reason: Some(err.to_string()),
+        }),
+    }
 }
 
 // Extension trait for StackEffect to get individual fields.

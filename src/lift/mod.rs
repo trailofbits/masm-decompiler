@@ -30,12 +30,28 @@ pub enum LiftingError {
         /// The instruction which could not be lifted.
         instruction: Instruction,
     },
-    /// Call to procedure with unknown signature.
-    UnknownCallTarget {
+    /// Call target could not be resolved to a concrete procedure path.
+    UnresolvedCallTarget {
         /// Source span of the call instruction.
         span: SourceSpan,
-        /// The unresolved call target.
+        /// The unresolved call target as written in source.
         target: String,
+        /// Optional resolver error details.
+        reason: Option<String>,
+    },
+    /// Call target was resolved, but no inferred signature entry exists.
+    MissingSignature {
+        /// Source span of the call instruction.
+        span: SourceSpan,
+        /// Fully-qualified callee path.
+        callee: SymbolPath,
+    },
+    /// Call target was resolved, but signature inference produced `Unknown`.
+    UnknownSignature {
+        /// Source span of the call instruction.
+        span: SourceSpan,
+        /// Fully-qualified callee path.
+        callee: SymbolPath,
     },
     /// Unbalanced if-statement (branches have different stack effects).
     UnbalancedIf {
@@ -67,8 +83,18 @@ impl std::fmt::Display for LiftingError {
             LiftingError::UnsupportedInstruction { instruction, .. } => {
                 write!(f, "unsupported instruction `{instruction}` found")
             }
-            LiftingError::UnknownCallTarget { target, .. } => {
-                write!(f, "unknown call target `{target}` found")
+            LiftingError::UnresolvedCallTarget { target, reason, .. } => {
+                if let Some(reason) = reason {
+                    write!(f, "failed to resolve call target `{target}`: {reason}")
+                } else {
+                    write!(f, "failed to resolve call target `{target}`")
+                }
+            }
+            LiftingError::MissingSignature { callee, .. } => {
+                write!(f, "missing inferred signature for call target `{callee}`")
+            }
+            LiftingError::UnknownSignature { callee, .. } => {
+                write!(f, "call target `{callee}` has unknown inferred signature")
             }
             LiftingError::UnbalancedIf { .. } => write!(f, "unbalanced if-statement"),
             LiftingError::NonNeutralWhile { .. } => write!(f, "non-neutral while loop"),
