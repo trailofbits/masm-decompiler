@@ -16,9 +16,9 @@ hand-written MASM (like the Miden stdlib) for a few different reasons.
   condition may occupy a different stack slot in each iteration.
 - Branches in conditional statements may have different stack effects, which
   makes stack tracking and signature inference challenging.
- - Repeat loops may permute stack positions across iterations; we only support
-   repeats whose slot movements are linear in the loop counter. Repeat loops with
-   non-linear permutations (e.g., alternating swaps) are rejected as unsupported.
+- Repeat loops may permute stack positions across iterations; we only support
+  repeats whose slot movements are linear in the loop counter. Repeat loops with
+  non-linear permutations (e.g., alternating swaps) are rejected as unsupported.
 
 ## Architecture
 
@@ -35,7 +35,7 @@ statically. This means that
 
 The decompiler implements the following analysis passes.
 
-1. **Call graph generation.** (`src/callgraph`). Recursively generate a call
+1. **Call graph generation.** (`src/callgraph`) Recursively generate a call
    graph by resolving referenced symbols to the corresponding procedure
    definitions. These may be either local (same module) or remote (in a
    transitively imported module). This relies on a robust symbol resolver that can
@@ -43,7 +43,7 @@ The decompiler implements the following analysis passes.
    recursion through dynamic calls, and these are not supported, the generated call
    graph cannot contain cycles.
 
-2. **Signature inference.** (`src/signature`). We visit each transitively called
+2. **Signature inference.** (`src/signature`) We visit each transitively called
    procedure in DFS order. For each procedure, we symbolically execute each
    instruction, tracking provenance of referenced stack slots. (We start out by
    assuming that the stack depth is 0. Any slots below this point are considered
@@ -56,55 +56,20 @@ The decompiler implements the following analysis passes.
    have different stack effects are not supported. If an unsupported instruction is
    encountered, the analysis exits early and returns `ProcSignature::Unknown`.
 
-3. **CFG construction.** (`src/cfg`). We construct a control-flow graph (CFG)
-   for each procedure by creating basic blocks for straight-line code, and lifting
-   branching and looping constructs into structured control-flow using
-   `Stmt::RepeatBranch`, `Stmt::WhileBranch` and `Stmt::IfBranch`. All other
-   instructions are wrapped using `Stmt::Inst` in this phase.
+3. **Lifting to SSA.** (`src/ssa`) We lift each AST to structured SSA, lifting
+   `repeat.N`, `while.true`, and `if.true` to corresponding IR statement variants.
+   Phi-nodes are tracked by the corresponding control-flow statement variants to
+   ensure that no information is lost. SSA variables are tracked by an ID and index
+   (an `IndexExpr`). The SSA IR is defined in `src/ir/mod.rs`. This phase also
+   assigns symbolic variable subscripts.
 
-4. **Lifting to SSA.** (`src/ssa`) We lift each CFG to SSA. This introduces
-   Phi-nodes to handle while-loop conditions and joining if-statement branches. SSA
-   variables are tracked by an ID and index (an `IndexExpr`). The SSA IR is minimal
-   with the following instructions types.
-   - `Stmt::Assign`
-   - `Stmt::Call`
-   - `Stmt::RepeatBranch`
-   - `Stmt::WhileBranch`
-   - `Stmt::IfBranch`
-   - `Stmt::Repeat`
-   - `Stmt::If`
-   - `Stmt::While`
-   - `Stmt::Return`
-   - `Stmt::MemLoad`
-   - `Stmt::MemStore`
-   - `Stmt::LocalLoad`
-   - `Stmt::LocalStore`
-   - `Stmt::AdviceLoad`
-   - `Stmt::AdviceStore`
-   - `Stmt::Intrinsic`
-   - `Stmt::Phi`
+4. **Optimization.** (`src/simplify`) Constant propagation, expression inlining,
+   and dead-code elimination takes place during this phase to make the final result
+   more readable.
 
-   The `Stmt::Repeat`, `Stmt::While`, and `Stmt::If` are not emitted in this
-   phase. After this phase, the CFG will not contain any `Stmt::Inst`
-   instructions.
+5. **Formatting.** (`src/fmt`). The final output is formatted and printed.
 
-5. **Variable subscript assignment.** (`src/structuring`).Variable subscripts
-   are computed. Synthetic index variables are introduced to handle indexing in
-   producing and consuming repeat-loops. The net stack effect of the loop is
-   determined by the corresponding `Stmt::RepeatBranch` instruction. For producing
-   and consuming loops, the base index and step are determined from context and the
-   net effect of the loop. (Note that for nested loops, the base index may also be
-   an index expression.)
-
-After this phase, all SSA variables will have concrete subscripts.
-
-6. **Structuring.** (`src/structuring`).Constant propagation, expression
-   inlining, and dead-code elimination takes place during this phase to make the
-   final result more readable. Loop constructs are converted from the branching
-   forms (`Stmt::RepeatBranch`, `Stmt::WhileBranch`, `Stmt::IfBranch`) to the
-   corresponding straight-line forms (`Stmt::Repeat`, `Stmt::While`, `Stmt::If`).
-
-   After this phase, the CFG will not contain any `Stmt::RepeatBranch`,
-   `Stmt::WhileBranch`, `Stmt::IfBranch`, or `Stmt::Phi` instructions.
-
-7. **Formatting.** (`src/fmt`). The final output is formatted and printed.
+Parallel to the main decompilation pipeline, we also implement a type inference
+pass (`src/types`) that performs best-effort type inference for SSA variables.
+This is used to annotate procedure signatures with type information, and is also
+used to identify potential typing errors in the original MASM code.
