@@ -393,6 +393,7 @@ impl<'a> Decompiler<'a> {
         if self.config.simplification {
             debug!("simplifying statements in `{}`", fq_name);
             simplify::simplify_statements(&mut stmts);
+            simplify::shorten_call_targets(&mut stmts, &resolver);
         }
 
         let signature = self.signatures.get(&proc_path).cloned();

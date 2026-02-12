@@ -1,11 +1,18 @@
 //! Tests for the high-level decompilation API.
 
 use masm_decompiler::{
-    decompile::{DecompilationConfig, Decompiler},
+    decompile::{DecompilationConfig, DecompiledProc, Decompiler},
     fmt::{CodeWriter, FormattingConfig},
     frontend::testing::workspace_from_modules,
     ir::Stmt,
 };
+
+/// Render a decompiled procedure without ANSI color codes.
+fn render_proc(proc: &DecompiledProc) -> String {
+    let mut writer = CodeWriter::with_config(FormattingConfig::new().with_color(false));
+    writer.write(proc);
+    writer.finish()
+}
 
 #[test]
 fn decompile_single_procedure() {
@@ -309,4 +316,89 @@ fn formatter_prints_typed_signatures() {
     let unknown_out_output = writer.finish();
     let unknown_out_first_line = unknown_out_output.lines().next().unwrap_or_default();
     assert_eq!(unknown_out_first_line, "proc unknown_out() -> Felt {");
+}
+
+#[test]
+fn shortens_local_call_targets_to_symbol_names() {
+    let ws = workspace_from_modules(&[(
+        "entry",
+        r#"
+        pub proc callee
+            push.1
+        end
+
+        pub proc caller
+            exec.callee
+        end
+        "#,
+    )]);
+
+    let decompiled = Decompiler::new(&ws)
+        .decompile_proc("entry::caller")
+        .expect("decompilation should succeed");
+    let output = render_proc(&decompiled);
+
+    assert!(output.contains("exec callee("), "{output}");
+    assert!(!output.contains("exec entry::callee("), "{output}");
+}
+
+#[test]
+fn shortens_imported_call_targets_to_relative_module_path() {
+    let ws = workspace_from_modules(&[
+        (
+            "pkg::foo",
+            r#"
+            pub proc bar
+                push.1
+            end
+            "#,
+        ),
+        (
+            "pkg::main",
+            r#"
+            use pkg::foo
+
+            pub proc caller
+                exec.foo::bar
+            end
+            "#,
+        ),
+    ]);
+
+    let decompiled = Decompiler::new(&ws)
+        .decompile_proc("pkg::main::caller")
+        .expect("decompilation should succeed");
+    let output = render_proc(&decompiled);
+
+    assert!(output.contains("exec foo::bar("), "{output}");
+    assert!(!output.contains("exec pkg::foo::bar("), "{output}");
+}
+
+#[test]
+fn preserves_full_target_when_shorter_suffix_would_change_resolution() {
+    let ws = workspace_from_modules(&[
+        (
+            "x::foo",
+            r#"
+            pub proc bar
+                push.1
+            end
+            "#,
+        ),
+        (
+            "caller",
+            r#"
+            pub proc run
+                exec.x::foo::bar
+            end
+            "#,
+        ),
+    ]);
+
+    let decompiled = Decompiler::new(&ws)
+        .decompile_proc("caller::run")
+        .expect("decompilation should succeed");
+    let output = render_proc(&decompiled);
+
+    assert!(output.contains("exec x::foo::bar("), "{output}");
 }

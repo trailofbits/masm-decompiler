@@ -457,7 +457,10 @@ pub struct LocalStoreW {
 /// Procedure call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Call {
-    /// Fully-qualified target name.
+    /// Resolved target name.
+    ///
+    /// During lifting this is fully-qualified. The final decompilation output may
+    /// shorten it to an equivalent module-relative form for readability.
     pub target: String,
     /// Input arguments popped from the stack.
     pub args: Vec<Var>,
