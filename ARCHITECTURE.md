@@ -1,26 +1,4 @@
-# MASM Decompiler
-
-This crate implements a best-effort decompiler for the Miden assembly language.
-
-## Overview
-
-Miden assembly (MASM) is a stack-based assembly language used in the Miden
-zero-knowledge VM. It is challenging to provide faithful decompilation for
-hand-written MASM (like the Miden stdlib) for a few different reasons.
-
-- MASM `exec` calls do not conform to a well-defined ABI, and the net stack
-  effect of such calls is generally impossible to determine statically.
-- Most procedures do not have declared signatures, which means that the number
-  of inputs and outputs have to be inferred from context.
-- While-loops do not need to be stack neutral. In particular, the while-loop
-  condition may occupy a different stack slot in each iteration.
-- Branches in conditional statements may have different stack effects, which
-  makes stack tracking and signature inference challenging.
-- Repeat loops may permute stack positions across iterations; we only support
-  repeats whose slot movements are linear in the loop counter. Repeat loops with
-  non-linear permutations (e.g., alternating swaps) are rejected as unsupported.
-
-## Architecture
+# Architecture
 
 We restrict ourself to instructions where stack effects can be determined
 statically. This means that
