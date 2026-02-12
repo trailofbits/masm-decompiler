@@ -215,6 +215,8 @@ pub enum BinOp {
     U32WrappingAdd,
     U32WrappingSub,
     U32WrappingMul,
+    /// Exponentiation where the exponent is interpreted as a u32 value.
+    U32Exp,
 }
 
 /// Unary operators.

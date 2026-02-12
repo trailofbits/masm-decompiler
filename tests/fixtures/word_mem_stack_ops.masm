@@ -98,3 +98,45 @@ proc uses_u32shift_binary
     push.1
     u32shr
 end
+
+proc uses_exp_u32
+    push.3.5
+    exp.u32
+end
+
+proc uses_u32assert_and_divmod_imm
+    push.9
+    u32assert
+    u32divmod.4
+end
+
+proc uses_u32assertw
+    push.1.2.3.4
+    u32assertw
+end
+
+proc uses_ext2add
+    push.1.2.3.4
+    ext2add
+end
+
+proc uses_is_odd
+    push.7
+    is_odd
+end
+
+proc uses_mem_stream
+    padw
+    padw
+    padw
+    push.0
+    mem_stream
+end
+
+proc uses_adv_pipe
+    padw
+    padw
+    padw
+    push.0
+    adv_pipe
+end

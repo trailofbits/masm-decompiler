@@ -324,7 +324,9 @@ impl<'a> ProcTypeAnalyzer<'a> {
             | BinOp::U32WrappingAdd
             | BinOp::U32WrappingSub
             | BinOp::U32WrappingMul => InferredType::U32,
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => InferredType::Felt,
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::U32Exp => {
+                InferredType::Felt
+            }
         }
     }
 
@@ -470,6 +472,10 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     | BinOp::U32WrappingSub
                     | BinOp::U32WrappingMul => {
                         changed |= self.require_u32_expr(lhs);
+                        changed |= self.require_u32_expr(rhs);
+                    }
+                    BinOp::U32Exp => {
+                        changed |= self.require_felt_expr(lhs);
                         changed |= self.require_u32_expr(rhs);
                     }
                     BinOp::And | BinOp::Or | BinOp::Xor => {

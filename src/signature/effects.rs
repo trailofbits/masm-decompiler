@@ -115,7 +115,8 @@ impl From<&Instruction> for StackEffect {
         // Unary instructions
         let unary = matches!(
             inst,
-            Exp | ILog2
+            ExpImm(_)
+                | ILog2
                 | Inv
                 | Incr
                 | IsOdd
@@ -139,6 +140,10 @@ impl From<&Instruction> for StackEffect {
                 | U32WrappingMulImm(_)
                 | U32ShlImm(_)
                 | U32ShrImm(_)
+                | U32DivImm(_)
+                | U32ModImm(_)
+                | U32RotlImm(_)
+                | U32RotrImm(_)
         );
         if unary {
             return StackEffect::known(1, 1);
@@ -149,6 +154,8 @@ impl From<&Instruction> for StackEffect {
             Add | Sub
                 | Mul
                 | Div
+                | Exp
+                | ExpBitLength(_)
                 | And
                 | Or
                 | Xor
@@ -191,6 +198,7 @@ impl From<&Instruction> for StackEffect {
                 StackEffect::known(1, 0).with_required_depth(1)
             }
             AssertEq | AssertEqWithError(_) => StackEffect::known(2, 0).with_required_depth(2),
+            AssertEqw | AssertEqwWithError(_) => StackEffect::known(8, 0).with_required_depth(8),
 
             // Stack operations
             Drop => StackEffect::known(1, 0),
@@ -284,22 +292,34 @@ impl From<&Instruction> for StackEffect {
 
             // Remaining U32 operations
             U32OverflowingAdd => StackEffect::known(2, 2),
+            U32OverflowingAddImm(_) => StackEffect::known(1, 2),
             U32OverflowingSub => StackEffect::known(2, 2),
+            U32OverflowingSubImm(_) => StackEffect::known(1, 2),
             U32OverflowingMul => StackEffect::known(2, 2),
+            U32OverflowingMulImm(_) => StackEffect::known(1, 2),
             U32OverflowingMadd => StackEffect::known(3, 2),
             U32OverflowingAdd3 => StackEffect::known(3, 2),
             U32WrappingAdd3 => StackEffect::known(3, 1),
             U32WrappingMadd => StackEffect::known(3, 1),
             U32DivMod => StackEffect::known(2, 2),
+            U32DivModImm(_) => StackEffect::known(1, 2),
             U32Test => StackEffect::known(0, 1).with_required_depth(1),
             U32TestW => StackEffect::known(0, 1).with_required_depth(4),
-            U32Assert => StackEffect::known(0, 0).with_required_depth(1),
-            U32Assert2 => StackEffect::known(0, 0).with_required_depth(2),
-            U32AssertW => StackEffect::known(0, 0).with_required_depth(4),
+            U32Assert | U32AssertWithError(_) => StackEffect::known(0, 0).with_required_depth(1),
+            U32Assert2 | U32Assert2WithError(_) => {
+                StackEffect::known(0, 0).with_required_depth(2)
+            }
+            U32AssertW | U32AssertWWithError(_) => {
+                StackEffect::known(0, 0).with_required_depth(4)
+            }
             U32Split => StackEffect::known(1, 2),
 
             // Remaining word-size operations.
             Eqw => StackEffect::known(0, 1).with_required_depth(8),
+
+            // Extension field operations.
+            Ext2Add | Ext2Sub | Ext2Mul | Ext2Div => StackEffect::known(4, 2),
+            Ext2Neg | Ext2Inv => StackEffect::known(2, 2),
 
             // TODO: Review remaining instruction effects.
 
@@ -345,14 +365,14 @@ impl From<&Instruction> for StackEffect {
             LocStoreWBe(_) => StackEffect::known(0, 0).with_required_depth(4),
             LocStoreWLe(_) => StackEffect::known(0, 0).with_required_depth(4),
 
-            MemStream => StackEffect::known(0, 0).with_required_depth(13),
+            MemStream => StackEffect::known(13, 13).with_required_depth(13),
 
             Push(_) | Locaddr(_) => StackEffect::known(0, 1),
             PushSlice(_, range) => StackEffect::known(0, range.len()),
             PushFeltList(values) => StackEffect::known(0, values.len()),
 
             AdvLoadW => StackEffect::known(4, 4).with_required_depth(4),
-            AdvPipe => StackEffect::known(0, 0).with_required_depth(13),
+            AdvPipe => StackEffect::known(13, 13).with_required_depth(13),
             AdvPush(Immediate::Value(values)) => StackEffect::known(0, *values.inner() as usize),
 
             SysEvent(_) => StackEffect::known(0, 0),
@@ -373,6 +393,31 @@ impl From<&Instruction> for StackEffect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use miden_assembly_syntax::ast::Instruction;
+
+    #[test]
+    fn exp_u32_uses_binary_stack_effect() {
+        assert_eq!(
+            StackEffect::from(&Instruction::ExpBitLength(32)),
+            StackEffect::known(2, 1)
+        );
+    }
+
+    #[test]
+    fn ext2add_uses_pair_stack_effect() {
+        assert_eq!(
+            StackEffect::from(&Instruction::Ext2Add),
+            StackEffect::known(4, 2)
+        );
+    }
+
+    #[test]
+    fn u32assertw_keeps_stack() {
+        assert_eq!(
+            StackEffect::from(&Instruction::U32AssertW),
+            StackEffect::known(0, 0).with_required_depth(4)
+        );
+    }
 
     #[test]
     fn then_push_then_drop_is_neutral() {

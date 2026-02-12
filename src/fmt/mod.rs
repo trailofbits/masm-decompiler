@@ -1162,6 +1162,7 @@ fn fmt_expr(f: &CodeWriter, expr: &Expr, parent_prec: u8) -> String {
                 BinOp::U32WrappingMul => (10, "*_u32"),
                 BinOp::U32WrappingAdd => (9, "+_u32"),
                 BinOp::U32WrappingSub => (9, "-_u32"),
+                BinOp::U32Exp => (11, "^_u32"),
             };
             let lhs = fmt_expr(f, a, prec);
             let rhs = fmt_expr(f, b, prec + 1);

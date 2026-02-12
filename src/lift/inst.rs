@@ -124,6 +124,7 @@ fn lift_arith_inst(
         Instruction::Not => lift_unop(span, UnOp::Not, stack),
         Instruction::Neg => lift_unop(span, UnOp::Neg, stack),
         Instruction::Pow2 => lift_unop(span, UnOp::Pow2, stack),
+        Instruction::ExpBitLength(32) => lift_binop(span, BinOp::U32Exp, stack),
         Instruction::Incr => lift_incr(span, stack),
         _ => return Ok(None),
     };
@@ -169,6 +170,17 @@ fn lift_u32_inst(
         Instruction::U32OverflowingAdd => {
             return lift_u32_intrinsic(inst, span, "u32overflowing_add", resolver, sigs, stack);
         }
+        Instruction::U32OverflowingAddImm(imm) => {
+            return lift_u32_intrinsic_imm(
+                inst,
+                span,
+                "u32overflowing_add",
+                imm,
+                resolver,
+                sigs,
+                stack,
+            );
+        }
         Instruction::U32OverflowingAdd3 => {
             return lift_u32_intrinsic(inst, span, "u32overflowing_add3", resolver, sigs, stack);
         }
@@ -178,14 +190,52 @@ fn lift_u32_inst(
         Instruction::U32OverflowingSub => {
             return lift_u32_intrinsic(inst, span, "u32overflowing_sub", resolver, sigs, stack);
         }
+        Instruction::U32OverflowingSubImm(imm) => {
+            return lift_u32_intrinsic_imm(
+                inst,
+                span,
+                "u32overflowing_sub",
+                imm,
+                resolver,
+                sigs,
+                stack,
+            );
+        }
         Instruction::U32OverflowingMul => {
             return lift_u32_intrinsic(inst, span, "u32overflowing_mul", resolver, sigs, stack);
+        }
+        Instruction::U32OverflowingMulImm(imm) => {
+            return lift_u32_intrinsic_imm(
+                inst,
+                span,
+                "u32overflowing_mul",
+                imm,
+                resolver,
+                sigs,
+                stack,
+            );
         }
         Instruction::U32OverflowingMadd => {
             return lift_u32_intrinsic(inst, span, "u32overflowing_madd", resolver, sigs, stack);
         }
+        Instruction::U32DivMod => {
+            return lift_u32_intrinsic(inst, span, "u32divmod", resolver, sigs, stack);
+        }
+        Instruction::U32DivModImm(imm) => {
+            return lift_u32_intrinsic_imm(inst, span, "u32divmod", imm, resolver, sigs, stack);
+        }
         Instruction::U32Split => {
             return Ok(Some(vec![lift_u32split(span, stack)]));
+        }
+        Instruction::U32Assert => {
+            return Ok(Some(vec![lift_u32_assert(span, "u32assert", stack)]));
+        }
+        Instruction::U32AssertWithError(err) => {
+            return Ok(Some(vec![lift_u32_assert(
+                span,
+                &format!("u32assert.{err}"),
+                stack,
+            )]));
         }
         Instruction::U32Assert2 => {
             return Ok(Some(vec![lift_u32_assert2(span, "u32assert2", stack)]));
@@ -194,6 +244,16 @@ fn lift_u32_inst(
             return Ok(Some(vec![lift_u32_assert2(
                 span,
                 &format!("u32assert2.{err}"),
+                stack,
+            )]));
+        }
+        Instruction::U32AssertW => {
+            return Ok(Some(vec![lift_u32_assertw(span, "u32assertw", stack)]));
+        }
+        Instruction::U32AssertWWithError(err) => {
+            return Ok(Some(vec![lift_u32_assertw(
+                span,
+                &format!("u32assertw.{err}"),
                 stack,
             )]));
         }
@@ -467,6 +527,43 @@ fn lift_u32_intrinsic(
     }]))
 }
 
+/// Lift a u32 intrinsic instruction with a u32 immediate suffix.
+fn lift_u32_intrinsic_imm(
+    inst: &Instruction,
+    span: SourceSpan,
+    name: &str,
+    imm: &ImmU32,
+    resolver: &SymbolResolver<'_>,
+    sigs: &SignatureMap,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Option<Vec<Stmt>>> {
+    let effect = effect_for_inst(inst, span, resolver, sigs)?;
+    let (args, results) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+    Ok(Some(vec![Stmt::Intrinsic {
+        span,
+        intrinsic: Intrinsic {
+            name: format!("{name}.{imm}"),
+            args,
+            results,
+        },
+    }]))
+}
+
+/// Lift `u32assert` and `u32assert.err=*` as no-stack-change intrinsics.
+fn lift_u32_assert(span: SourceSpan, name: &str, stack: &mut SymbolicStack) -> Stmt {
+    stack.ensure_depth(1);
+    let a = stack.peek(0).cloned().expect("u32assert stack");
+    Stmt::Intrinsic {
+        span,
+        intrinsic: Intrinsic {
+            name: name.to_string(),
+            args: vec![a],
+            results: Vec::new(),
+        },
+    }
+}
+
+/// Lift `u32assert2` and `u32assert2.err=*` as no-stack-change intrinsics.
 fn lift_u32_assert2(span: SourceSpan, name: &str, stack: &mut SymbolicStack) -> Stmt {
     stack.ensure_depth(2);
     let b = stack.peek(0).cloned().expect("u32assert2 stack");
@@ -476,6 +573,20 @@ fn lift_u32_assert2(span: SourceSpan, name: &str, stack: &mut SymbolicStack) -> 
         intrinsic: Intrinsic {
             name: name.to_string(),
             args: vec![b, a],
+            results: Vec::new(),
+        },
+    }
+}
+
+/// Lift `u32assertw` and `u32assertw.err=*` as no-stack-change intrinsics.
+fn lift_u32_assertw(span: SourceSpan, name: &str, stack: &mut SymbolicStack) -> Stmt {
+    stack.ensure_depth(4);
+    let args = stack.top_n(4);
+    Stmt::Intrinsic {
+        span,
+        intrinsic: Intrinsic {
+            name: name.to_string(),
+            args,
             results: Vec::new(),
         },
     }
@@ -848,8 +959,19 @@ fn lift_intrinsic_inst(
         Instruction::AssertWithError(err) => format!("assert.{err}"),
         Instruction::AssertEq => "assert_eq".to_string(),
         Instruction::AssertEqWithError(err) => format!("assert_eq.{err}"),
+        Instruction::AssertEqw => "assert_eqw".to_string(),
+        Instruction::AssertEqwWithError(err) => format!("assert_eqw.{err}"),
         Instruction::Assertz => "assertz".to_string(),
         Instruction::AssertzWithError(err) => format!("assertz.{err}"),
+        Instruction::IsOdd => "is_odd".to_string(),
+        Instruction::Ext2Add => "ext2add".to_string(),
+        Instruction::Ext2Sub => "ext2sub".to_string(),
+        Instruction::Ext2Mul => "ext2mul".to_string(),
+        Instruction::Ext2Div => "ext2div".to_string(),
+        Instruction::Ext2Neg => "ext2neg".to_string(),
+        Instruction::Ext2Inv => "ext2inv".to_string(),
+        Instruction::MemStream => "mem_stream".to_string(),
+        Instruction::AdvPipe => "adv_pipe".to_string(),
         Instruction::Hash => "hash".to_string(),
         Instruction::HMerge => "hmerge".to_string(),
         Instruction::HPerm => "hperm".to_string(),

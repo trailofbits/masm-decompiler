@@ -41,5 +41,12 @@ fixture_module!(
         uses_u32wrapping_add3,
         uses_u32shift_imm,
         uses_u32shift_binary,
+        uses_exp_u32,
+        uses_u32assert_and_divmod_imm,
+        uses_u32assertw,
+        uses_ext2add,
+        uses_is_odd,
+        uses_mem_stream,
+        uses_adv_pipe,
     ]
 );

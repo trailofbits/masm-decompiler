@@ -78,3 +78,43 @@ fn formats_u32shift_ops_with_infix_u32_operators() {
     assert!(binary_fmt.contains(">>_u32"), "{binary_fmt}");
     assert!(binary_fmt.contains("<<_u32"), "{binary_fmt}");
 }
+
+#[test]
+fn formats_u32_exp_with_infix_operator() {
+    let source = include_str!("fixtures/word_mem_stack_ops.masm");
+    let formatted = format_proc(source, "uses_exp_u32");
+    assert!(formatted.contains("^_u32"), "{formatted}");
+}
+
+#[test]
+fn formats_u32_assert_and_divmod_imm_as_intrinsics() {
+    let source = include_str!("fixtures/word_mem_stack_ops.masm");
+    let formatted = format_proc(source, "uses_u32assert_and_divmod_imm");
+    assert!(formatted.contains("u32assert("), "{formatted}");
+    assert!(formatted.contains("u32divmod.4("), "{formatted}");
+}
+
+#[test]
+fn formats_u32assertw_ext2add_and_is_odd_intrinsics() {
+    let source = include_str!("fixtures/word_mem_stack_ops.masm");
+
+    let u32assertw_fmt = format_proc(source, "uses_u32assertw");
+    assert!(u32assertw_fmt.contains("u32assertw("), "{u32assertw_fmt}");
+
+    let ext2_fmt = format_proc(source, "uses_ext2add");
+    assert!(ext2_fmt.contains("ext2add("), "{ext2_fmt}");
+
+    let is_odd_fmt = format_proc(source, "uses_is_odd");
+    assert!(is_odd_fmt.contains("is_odd("), "{is_odd_fmt}");
+}
+
+#[test]
+fn formats_mem_stream_and_adv_pipe_intrinsics() {
+    let source = include_str!("fixtures/word_mem_stack_ops.masm");
+
+    let mem_stream_fmt = format_proc(source, "uses_mem_stream");
+    assert!(mem_stream_fmt.contains("mem_stream("), "{mem_stream_fmt}");
+
+    let adv_pipe_fmt = format_proc(source, "uses_adv_pipe");
+    assert!(adv_pipe_fmt.contains("adv_pipe("), "{adv_pipe_fmt}");
+}
