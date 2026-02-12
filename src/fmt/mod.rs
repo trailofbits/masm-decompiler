@@ -975,16 +975,16 @@ impl CodeDisplay for Stmt {
                     .map(|v| f.fmt_var(v))
                     .collect::<Vec<_>>()
                     .join(", ");
-                if args.is_empty() {
-                    if let Some(index) = name.strip_prefix("locaddr.") {
-                        let call = format!("{}({index})", function_name("locaddr"));
-                        if outs.is_empty() {
-                            f.write_line(&format!("{call};"));
-                        } else {
-                            f.write_line(&format!("{outs} = {call};"));
-                        }
-                        return;
+                if args.is_empty()
+                    && let Some(index) = name.strip_prefix("locaddr.")
+                {
+                    let call = format!("{}({index})", function_name("locaddr"));
+                    if outs.is_empty() {
+                        f.write_line(&format!("{call};"));
+                    } else {
+                        f.write_line(&format!("{outs} = {call};"));
                     }
+                    return;
                 }
                 if outs.is_empty() {
                     f.write_line(&format!("{}({args});", function_name(name)));

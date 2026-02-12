@@ -241,7 +241,7 @@ fn check_stmt_defined(
             }
             check_stmt_list_defined(body, names, &mut loop_defined, errors);
             for phi in phis {
-                check_var_defined(&phi.step, names, &mut loop_defined, errors);
+                check_var_defined(&phi.step, names, &loop_defined, errors);
             }
             for phi in phis {
                 define_var(&phi.dest, names, defined);
@@ -278,7 +278,7 @@ fn check_stmt_defined(
             }
             check_stmt_list_defined(body, names, &mut loop_defined, errors);
             for phi in phis {
-                check_var_defined(&phi.step, names, &mut loop_defined, errors);
+                check_var_defined(&phi.step, names, &loop_defined, errors);
             }
             for phi in phis {
                 define_var(&phi.dest, names, defined);

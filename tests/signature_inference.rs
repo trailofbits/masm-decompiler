@@ -588,14 +588,12 @@ proptest! {
                 end
                 "#
             )),
-            ("caller".to_string(), format!(
-                r#"
+            ("caller".to_string(), r#"
                 use leaf::leaf_proc
                 proc caller_proc
                     exec.leaf::leaf_proc
                 end
-                "#
-            )),
+                "#.to_string()),
         ];
         prop_assert!(check_all_signatures_known(&modules).is_ok());
     }
@@ -629,14 +627,12 @@ proptest! {
                 end
                 "#
             )),
-            ("level3".to_string(), format!(
-                r#"
+            ("level3".to_string(), r#"
                 use level2::l2_proc
                 proc l3_proc
                     exec.level2::l2_proc
                 end
-                "#
-            )),
+                "#.to_string()),
         ];
         prop_assert!(check_all_signatures_known(&modules).is_ok());
     }
@@ -681,7 +677,7 @@ proptest! {
             "#
         );
 
-        let module_refs = vec![("unbal".to_string(), source)];
+        let module_refs = [("unbal".to_string(), source)];
         let refs: Vec<(&str, &str)> = module_refs
             .iter()
             .map(|(n, s)| (n.as_str(), s.as_str()))
@@ -719,7 +715,7 @@ proptest! {
             "#
         );
 
-        let module_refs = vec![("nn_while".to_string(), source)];
+        let module_refs = [("nn_while".to_string(), source)];
         let refs: Vec<(&str, &str)> = module_refs
             .iter()
             .map(|(n, s)| (n.as_str(), s.as_str()))

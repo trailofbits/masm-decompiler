@@ -202,10 +202,10 @@ impl Simplify for Stmt {
                 let dest = dest_result.value;
                 let expr = expr_result.value;
 
-                if let Expr::Var(source) = &expr {
-                    if &dest == source {
-                        return SimplifyResult::changed(Vec::new());
-                    }
+                if let Expr::Var(source) = &expr
+                    && &dest == source
+                {
+                    return SimplifyResult::changed(Vec::new());
                 }
                 SimplifyResult::new(vec![Stmt::Assign { span, dest, expr }], changed)
             }

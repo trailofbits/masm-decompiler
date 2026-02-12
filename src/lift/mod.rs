@@ -892,22 +892,22 @@ fn collect_repeat_phis_by_slot(
     let mut loop_carried_dests = HashMap::new();
     let mut loop_carried_ids = HashSet::new();
     for exit in exit_entries {
-        if let Some(init) = entry_map.get(&exit.slot_id) {
-            if init.base != exit.var.base {
-                let dest = stack.fresh_like(init);
-                stack.register_value_slot_for_var(&dest, exit.slot_id);
-                phis.push(LoopPhi {
-                    dest: dest.clone(),
-                    init: init.clone(),
-                    step: exit.var.clone(),
-                });
-                loop_carried_dests.insert(exit.slot_id, dest);
-                if let Some(id) = init.base.value_id() {
-                    loop_carried_ids.insert(id);
-                }
-                if let Some(id) = exit.var.base.value_id() {
-                    loop_carried_ids.insert(id);
-                }
+        if let Some(init) = entry_map.get(&exit.slot_id)
+            && init.base != exit.var.base
+        {
+            let dest = stack.fresh_like(init);
+            stack.register_value_slot_for_var(&dest, exit.slot_id);
+            phis.push(LoopPhi {
+                dest: dest.clone(),
+                init: init.clone(),
+                step: exit.var.clone(),
+            });
+            loop_carried_dests.insert(exit.slot_id, dest);
+            if let Some(id) = init.base.value_id() {
+                loop_carried_ids.insert(id);
+            }
+            if let Some(id) = exit.var.base.value_id() {
+                loop_carried_ids.insert(id);
             }
         }
     }

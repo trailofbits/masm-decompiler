@@ -306,12 +306,8 @@ impl From<&Instruction> for StackEffect {
             U32Test => StackEffect::known(0, 1).with_required_depth(1),
             U32TestW => StackEffect::known(0, 1).with_required_depth(4),
             U32Assert | U32AssertWithError(_) => StackEffect::known(0, 0).with_required_depth(1),
-            U32Assert2 | U32Assert2WithError(_) => {
-                StackEffect::known(0, 0).with_required_depth(2)
-            }
-            U32AssertW | U32AssertWWithError(_) => {
-                StackEffect::known(0, 0).with_required_depth(4)
-            }
+            U32Assert2 | U32Assert2WithError(_) => StackEffect::known(0, 0).with_required_depth(2),
+            U32AssertW | U32AssertWWithError(_) => StackEffect::known(0, 0).with_required_depth(4),
             U32Split => StackEffect::known(1, 2),
 
             // Remaining word-size operations.

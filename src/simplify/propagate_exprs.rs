@@ -495,17 +495,17 @@ fn substitute_in_expr(expr: &mut Expr, var_key: &VarKey, with: &Expr) {
         }
         Expr::EqW { lhs, rhs } => {
             for var in lhs {
-                if VarKey::from_var(var) == *var_key {
-                    if let Expr::Var(replacement) = with {
-                        *var = replacement.clone();
-                    }
+                if VarKey::from_var(var) == *var_key
+                    && let Expr::Var(replacement) = with
+                {
+                    *var = replacement.clone();
                 }
             }
             for var in rhs {
-                if VarKey::from_var(var) == *var_key {
-                    if let Expr::Var(replacement) = with {
-                        *var = replacement.clone();
-                    }
+                if VarKey::from_var(var) == *var_key
+                    && let Expr::Var(replacement) = with
+                {
+                    *var = replacement.clone();
                 }
             }
         }

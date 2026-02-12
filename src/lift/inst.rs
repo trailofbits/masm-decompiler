@@ -1324,10 +1324,12 @@ fn resolve_call_target_and_effect(
     sigs: &SignatureMap,
 ) -> LiftingResult<(SymbolPath, StackEffect)> {
     let callee = resolve_call_target(target, span, resolver)?;
-    let signature = sigs.get(&callee).ok_or_else(|| LiftingError::MissingSignature {
-        span,
-        callee: callee.clone(),
-    })?;
+    let signature = sigs
+        .get(&callee)
+        .ok_or_else(|| LiftingError::MissingSignature {
+            span,
+            callee: callee.clone(),
+        })?;
     let effect: StackEffect = signature.into();
     match effect {
         StackEffect::Known { .. } => Ok((callee, effect)),

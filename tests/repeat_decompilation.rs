@@ -42,10 +42,10 @@ fn loop_dest_var(stmts: &[Stmt]) -> Option<Var> {
     for stmt in stmts {
         if let Stmt::Repeat { body, .. } = stmt {
             for inner in body {
-                if let Stmt::Assign { dest, expr, .. } = inner {
-                    if matches!(expr, Expr::Binary(..)) {
-                        return Some(dest.clone());
-                    }
+                if let Stmt::Assign { dest, expr, .. } = inner
+                    && matches!(expr, Expr::Binary(..))
+                {
+                    return Some(dest.clone());
                 }
             }
         }
@@ -54,7 +54,7 @@ fn loop_dest_var(stmts: &[Stmt]) -> Option<Var> {
 }
 
 /// Find the first repeat loop and return its body and phis.
-fn find_repeat<'a>(stmts: &'a [Stmt]) -> Option<(&'a [Stmt], &'a [LoopPhi])> {
+fn find_repeat(stmts: &[Stmt]) -> Option<(&[Stmt], &[LoopPhi])> {
     for stmt in stmts {
         if let Stmt::Repeat { body, phis, .. } = stmt {
             return Some((body, phis));
@@ -702,20 +702,20 @@ fn consuming_repeat_uses_accumulator_operand() {
     for stmt in &stmts {
         if let Stmt::Repeat { body, .. } = stmt {
             for inner in body {
-                if let Stmt::Assign { dest, expr, .. } = inner {
-                    if let Expr::Binary(BinOp::And, lhs, rhs) = expr {
-                        let dest_base = subscript_base(&dest.subscript);
-                        let lhs_base = match &**lhs {
-                            Expr::Var(v) => subscript_base(&v.subscript),
-                            _ => None,
-                        };
-                        let rhs_base = match &**rhs {
-                            Expr::Var(v) => subscript_base(&v.subscript),
-                            _ => None,
-                        };
-                        found = Some((dest_base, lhs_base, rhs_base));
-                        break;
-                    }
+                if let Stmt::Assign { dest, expr, .. } = inner
+                    && let Expr::Binary(BinOp::And, lhs, rhs) = expr
+                {
+                    let dest_base = subscript_base(&dest.subscript);
+                    let lhs_base = match &**lhs {
+                        Expr::Var(v) => subscript_base(&v.subscript),
+                        _ => None,
+                    };
+                    let rhs_base = match &**rhs {
+                        Expr::Var(v) => subscript_base(&v.subscript),
+                        _ => None,
+                    };
+                    found = Some((dest_base, lhs_base, rhs_base));
+                    break;
                 }
             }
         }
@@ -804,22 +804,22 @@ fn consuming_repeat_1_uses_accumulator_after_loop() {
 
     let mut saw_sub = false;
     for stmt in &stmts {
-        if let Stmt::Assign { expr, .. } = stmt {
-            if let Expr::Binary(BinOp::Sub, lhs, _rhs) = expr {
-                let Expr::Var(lhs_var) = lhs.as_ref() else {
-                    panic!("expected sub lhs to be a variable. Output:\n{}", output);
-                };
-                let lhs_id = lhs_var
-                    .base
-                    .value_id()
-                    .expect("sub lhs should have value id");
-                assert_eq!(
-                    lhs_id, acc_id,
-                    "consuming_repeat_1 should subtract from the loop accumulator. Output:\n{}",
-                    output
-                );
-                saw_sub = true;
-            }
+        if let Stmt::Assign { expr, .. } = stmt
+            && let Expr::Binary(BinOp::Sub, lhs, _rhs) = expr
+        {
+            let Expr::Var(lhs_var) = lhs.as_ref() else {
+                panic!("expected sub lhs to be a variable. Output:\n{}", output);
+            };
+            let lhs_id = lhs_var
+                .base
+                .value_id()
+                .expect("sub lhs should have value id");
+            assert_eq!(
+                lhs_id, acc_id,
+                "consuming_repeat_1 should subtract from the loop accumulator. Output:\n{}",
+                output
+            );
+            saw_sub = true;
         }
     }
     assert!(

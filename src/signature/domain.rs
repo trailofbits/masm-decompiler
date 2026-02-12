@@ -147,7 +147,7 @@ impl ProvenanceStack {
     /// additional inputs to the stack. Must be called before popping values
     /// from the stack.
     pub fn ensure_depth(&mut self, required_depth: usize) {
-        while self.stack.len() < required_depth as usize {
+        while self.stack.len() < required_depth {
             self.stack.push_front(Provenance::Input);
             self.required_depth += 1;
         }
@@ -155,7 +155,7 @@ impl ProvenanceStack {
 
     /// Pop a single value from the stack.
     pub fn pop(&mut self) {
-        assert!(self.stack.len() > 0);
+        assert!(!self.stack.is_empty());
         self.stack.pop_back();
         self.current_depth -= 1;
     }

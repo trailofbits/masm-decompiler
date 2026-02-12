@@ -463,11 +463,12 @@ impl SymbolicStack {
     /// Move the top element down to the given depth.
     pub fn movdn(&mut self, depth: usize) {
         let len = self.stack.len();
-        if depth > 0 && depth < len {
-            if let Some(entry) = self.stack.pop_back() {
-                let idx = len - 1 - depth;
-                self.stack.insert(idx, entry);
-            }
+        if depth > 0
+            && depth < len
+            && let Some(entry) = self.stack.pop_back()
+        {
+            let idx = len - 1 - depth;
+            self.stack.insert(idx, entry);
         }
     }
 

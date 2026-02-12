@@ -102,7 +102,7 @@ impl<'a> Analysis<'a> {
             // Handle calls explicitly
             Exec(target) => self.visit_call(target, stack),
             // TODO: Handle call and syscall
-            Call(..) | SysCall(..) | DynCall | DynExec => return OpResult::Unknown,
+            Call(..) | SysCall(..) | DynCall | DynExec => OpResult::Unknown,
             _ => match StackEffect::from(inst) {
                 StackEffect::Known {
                     pops,
@@ -112,7 +112,7 @@ impl<'a> Analysis<'a> {
                     stack.apply(pops, pushes, required_depth);
                     OpResult::Known
                 }
-                StackEffect::Unknown => return OpResult::Unknown,
+                StackEffect::Unknown => OpResult::Unknown,
             },
         }
     }

@@ -100,10 +100,10 @@ fn run(cli: Cli) -> Result<(), String> {
     for module in workspace.modules() {
         for proc in module.procedures() {
             let proc_name = proc.name().to_string();
-            if let Some(target) = target_proc {
-                if proc_name != target {
-                    continue;
-                }
+            if let Some(target) = target_proc
+                && proc_name != target
+            {
+                continue;
             }
 
             let fq = format!("{}::{}", module.module_path(), proc.name());

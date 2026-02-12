@@ -59,7 +59,7 @@ fn and_assignment(stmt: &Stmt) -> Option<(Var, Var, Var)> {
 }
 
 /// Find the first repeat loop and return its depth, count, and body.
-fn find_repeat_loop<'a>(stmts: &'a [Stmt]) -> Option<(usize, usize, &'a [Stmt])> {
+fn find_repeat_loop(stmts: &[Stmt]) -> Option<(usize, usize, &[Stmt])> {
     for stmt in stmts {
         if let Stmt::Repeat {
             loop_var,
@@ -86,10 +86,10 @@ fn u256_or_pairs_inputs_and_returns_results() {
 
     let mut or_assignments = Vec::new();
     for stmt in &structured {
-        if let Stmt::Assign { dest, expr, .. } = stmt {
-            if let Expr::Binary(BinOp::U32Or, lhs, rhs) = expr {
-                or_assignments.push((dest.clone(), lhs.as_ref().clone(), rhs.as_ref().clone()));
-            }
+        if let Stmt::Assign { dest, expr, .. } = stmt
+            && let Expr::Binary(BinOp::U32Or, lhs, rhs) = expr
+        {
+            or_assignments.push((dest.clone(), lhs.as_ref().clone(), rhs.as_ref().clone()));
         }
     }
 
@@ -186,7 +186,7 @@ fn u256_eqz_loop_uses_boolean_accumulator_and_returns_it() {
         if matches!(stmt, Stmt::Repeat { .. }) {
             break;
         }
-        if let Some((dest, input)) = eq_zero_assignment(&stmt) {
+        if let Some((dest, input)) = eq_zero_assignment(stmt) {
             pre_loop_eq = Some((dest, input));
         }
     }
@@ -356,7 +356,7 @@ fn u256_eqz_loop_uses_boolean_accumulator_and_returns_it() {
         let is_input = operand
             .base
             .value_id()
-            .map_or(false, |id| input_ids.contains(&id));
+            .is_some_and(|id| input_ids.contains(&id));
         assert!(
             !is_input,
             "loop and should not consume raw input words. Output:\n{}",
@@ -366,7 +366,7 @@ fn u256_eqz_loop_uses_boolean_accumulator_and_returns_it() {
         let is_bool = operand
             .base
             .value_id()
-            .map_or(false, |id| bool_defs.contains(&id));
+            .is_some_and(|id| bool_defs.contains(&id));
         let is_loop_input = matches!(operand.base, VarBase::LoopInput { .. });
         assert!(
             is_bool || is_loop_input,

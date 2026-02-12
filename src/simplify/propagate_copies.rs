@@ -144,11 +144,12 @@ fn propagate_block(stmts: &mut Vec<Stmt>, state: &mut CopyState) -> bool {
             Stmt::Assign { dest, expr, .. } => {
                 changed |= rewrite_expr(expr, state);
                 state.kill_var(dest);
-                if let Expr::Var(src) = expr {
-                    if state.is_eligible(dest) && state.is_eligible(src) {
-                        let resolved = state.resolve_var(src);
-                        state.insert(dest, resolved);
-                    }
+                if let Expr::Var(src) = expr
+                    && state.is_eligible(dest)
+                    && state.is_eligible(src)
+                {
+                    let resolved = state.resolve_var(src);
+                    state.insert(dest, resolved);
                 }
             }
 

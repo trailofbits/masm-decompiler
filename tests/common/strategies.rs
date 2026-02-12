@@ -614,12 +614,7 @@ impl Module {
                 let StackEffect::Known { pops, pushes, .. } = effect else {
                     panic!("callable stack effect should be known")
                 };
-                CallableProcedure::new_external(
-                    &procedure.name().to_string(),
-                    &self.name,
-                    pops,
-                    pushes,
-                )
+                CallableProcedure::new_external(procedure.name().as_ref(), &self.name, pops, pushes)
             })
             .collect()
     }
@@ -705,7 +700,7 @@ fn module_procedures_with_external_calls_strategy(
 
     let procedure_index = local_callees.len();
     let name =
-        ProcedureName::new(&format!("proc_{}", procedure_index)).expect("valid procedure name");
+        ProcedureName::new(format!("proc_{}", procedure_index)).expect("valid procedure name");
 
     let effect_strategy = (0usize..=2, 0usize..=2);
 

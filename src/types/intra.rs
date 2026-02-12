@@ -324,9 +324,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
             | BinOp::U32WrappingAdd
             | BinOp::U32WrappingSub
             | BinOp::U32WrappingMul => InferredType::U32,
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::U32Exp => {
-                InferredType::Felt
-            }
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::U32Exp => InferredType::Felt,
         }
     }
 
