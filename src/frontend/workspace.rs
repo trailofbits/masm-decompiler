@@ -17,6 +17,7 @@ pub struct Workspace {
     modules: Vec<Program>,
     index: HashMap<SymbolPath, usize>,
     pub(crate) proc_index: HashMap<SymbolPath, (usize, usize)>,
+    pub(crate) const_index: HashMap<SymbolPath, (usize, usize)>,
 }
 
 impl Workspace {
@@ -35,6 +36,7 @@ impl Workspace {
             modules: Vec::new(),
             index: HashMap::new(),
             proc_index: HashMap::new(),
+            const_index: HashMap::new(),
         }
     }
 
@@ -49,7 +51,7 @@ impl Workspace {
         let idx = self.modules.len();
         self.modules.push(prog);
         self.index.insert(key, idx);
-        self.reindex_procs(idx);
+        self.reindex_symbols(idx);
         Ok(idx)
     }
 
@@ -65,7 +67,7 @@ impl Workspace {
         let idx = self.modules.len();
         self.modules.push(program);
         self.index.insert(key, idx);
-        self.reindex_procs(idx);
+        self.reindex_symbols(idx);
         idx
     }
 
@@ -108,7 +110,7 @@ impl Workspace {
         let idx = self.modules.len();
         self.modules.push(prog);
         self.index.insert(key, idx);
-        self.reindex_procs(idx);
+        self.reindex_symbols(idx);
         Some(idx)
     }
 
@@ -136,6 +138,24 @@ impl Workspace {
         self.lookup_proc_entry(&key).map(|(_, proc)| proc)
     }
 
+    /// Look up a constant by fully-qualified path.
+    pub fn lookup_constant_entry(
+        &self,
+        name: &SymbolPath,
+    ) -> Option<(&Program, &miden_assembly_syntax::ast::Constant)> {
+        let (m_idx, c_idx) = self.const_index.get(name).copied()?;
+        let program = self.modules.get(m_idx)?;
+        let constant = program.constants().nth(c_idx)?;
+        Some((program, constant))
+    }
+
+    /// Look up a constant by fully-qualified path string.
+    pub fn lookup_constant(&self, name: &str) -> Option<&miden_assembly_syntax::ast::Constant> {
+        let key = SymbolPath::new(name);
+        self.lookup_constant_entry(&key)
+            .map(|(_, constant)| constant)
+    }
+
     pub fn roots(&self) -> &[LibraryRoot] {
         &self.roots
     }
@@ -152,7 +172,8 @@ impl Workspace {
             let resolver = create_resolver(prog.module(), self.source_manager());
             for proc in prog.procedures() {
                 for invoke in proc.invoked() {
-                    let Some(target_path) = resolver.resolve_target(&invoke.target) else {
+                    let Some(target_path) = resolver.resolve_target(&invoke.target).ok().flatten()
+                    else {
                         continue;
                     };
                     let Some(module_path) = target_path.module_path() else {
@@ -228,13 +249,21 @@ fn proc_fq_name(module_path: &str, proc_name: &str) -> SymbolPath {
     SymbolPath::from_module_path_and_name(module_path, proc_name)
 }
 
+fn constant_fq_name(module_path: &str, constant_name: &str) -> SymbolPath {
+    SymbolPath::from_module_path_and_name(module_path, constant_name)
+}
+
 impl Workspace {
-    fn reindex_procs(&mut self, module_idx: usize) {
+    fn reindex_symbols(&mut self, module_idx: usize) {
         if let Some(prog) = self.modules.get(module_idx) {
             let module_path = as_str(prog.module_path());
             for (proc_idx, proc) in prog.procedures().enumerate() {
                 let name = proc_fq_name(module_path, proc.name().as_str());
                 self.proc_index.insert(name, (module_idx, proc_idx));
+            }
+            for (const_idx, constant) in prog.constants().enumerate() {
+                let name = constant_fq_name(module_path, constant.name().as_str());
+                self.const_index.insert(name, (module_idx, const_idx));
             }
         }
     }
@@ -290,5 +319,26 @@ mod tests {
         ]);
 
         assert!(ws.unresolved_module_paths().is_empty());
+    }
+
+    /// Ensure constants are indexed and can be looked up by fully-qualified name.
+    #[test]
+    fn lookup_constant_entry_returns_local_constant() {
+        let ws = workspace_from_modules(&[(
+            "entry",
+            r#"
+            const FOO = 42
+
+            proc main
+                push.FOO
+            end
+            "#,
+        )]);
+
+        let (program, constant) = ws
+            .lookup_constant_entry(&SymbolPath::new("entry::FOO"))
+            .expect("constant should be indexed");
+        assert_eq!(program.module_path().to_string(), "entry");
+        assert_eq!(constant.name().as_str(), "FOO");
     }
 }

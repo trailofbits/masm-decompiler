@@ -115,7 +115,7 @@ fn eliminate_at_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{BinOp, Constant, Expr, IndexExpr, LoopPhi, LoopVar, Var, VarBase, ValueId};
+    use crate::ir::{BinOp, Constant, Expr, IndexExpr, LoopPhi, LoopVar, ValueId, Var, VarBase};
     use miden_assembly_syntax::debuginfo::SourceSpan;
 
     const TEST_SPAN: SourceSpan = SourceSpan::UNKNOWN;

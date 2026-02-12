@@ -7,17 +7,17 @@ use std::collections::HashMap;
 
 use crate::{
     callgraph::CallGraph,
-    fmt::{assign_var_names, CodeWriter},
+    fmt::{CodeWriter, assign_var_names},
     frontend::Workspace,
     ir::{Stmt, Var},
     lift::{self, LiftingError},
-    signature::{infer_signatures, ProcSignature, SignatureMap},
+    signature::{ProcSignature, SignatureMap, infer_signatures},
     simplify,
     symbol::path::SymbolPath,
     symbol::resolution::create_resolver,
     types::{
-        infer_type_summaries, InferredType, TypeDiagnosticsMap, TypeRequirement, TypeSummary,
-        TypeSummaryMap,
+        InferredType, TypeDiagnosticsMap, TypeRequirement, TypeSummary, TypeSummaryMap,
+        infer_type_summaries,
     },
 };
 

@@ -112,6 +112,7 @@ fn lift_arith_inst(
         Instruction::Xor => lift_binop(span, BinOp::Xor, stack),
         Instruction::Eq => lift_binop(span, BinOp::Eq, stack),
         Instruction::EqImm(imm) => lift_binop_imm(span, BinOp::Eq, imm, stack),
+        Instruction::Eqw => lift_eqw(span, stack),
         Instruction::Neq => lift_binop(span, BinOp::Neq, stack),
         Instruction::NeqImm(imm) => lift_binop_imm(span, BinOp::Neq, imm, stack),
         Instruction::Lt => lift_binop(span, BinOp::Lt, stack),
@@ -817,6 +818,29 @@ fn lift_cdrop(span: SourceSpan, stack: &mut SymbolicStack) -> Stmt {
     }
 }
 
+/// Lift the `eqw` instruction into a word-equality assignment.
+fn lift_eqw(span: SourceSpan, stack: &mut SymbolicStack) -> Stmt {
+    stack.ensure_depth(8);
+    let lhs = [
+        stack.peek(0).cloned().expect("eqw stack"),
+        stack.peek(1).cloned().expect("eqw stack"),
+        stack.peek(2).cloned().expect("eqw stack"),
+        stack.peek(3).cloned().expect("eqw stack"),
+    ];
+    let rhs = [
+        stack.peek(4).cloned().expect("eqw stack"),
+        stack.peek(5).cloned().expect("eqw stack"),
+        stack.peek(6).cloned().expect("eqw stack"),
+        stack.peek(7).cloned().expect("eqw stack"),
+    ];
+    let dest = stack.push_fresh();
+    Stmt::Assign {
+        span,
+        dest,
+        expr: Expr::EqW { lhs, rhs },
+    }
+}
+
 /// Lift the `cswap` instruction into two ternary expression assignments.
 fn lift_cswap(span: SourceSpan, stack: &mut SymbolicStack) -> Vec<Stmt> {
     stack.ensure_depth(3);
@@ -959,7 +983,7 @@ fn call_effect(
 }
 
 fn call_name(target: &InvocationTarget, resolver: &SymbolResolver<'_>) -> Option<SymbolPath> {
-    resolver.resolve_target(target)
+    resolver.resolve_target(target).ok().flatten()
 }
 
 // Extension trait for StackEffect to get individual fields.
@@ -1081,5 +1105,47 @@ mod tests {
         assert_eq!(top.len(), 2);
         assert_eq!(top[0], e);
         assert_eq!(top[1], d);
+    }
+
+    /// Ensure eqw is lifted as a non-consuming expression and preserves inputs.
+    #[test]
+    fn test_lift_eqw_non_consuming() {
+        let mut stack = SymbolicStack::new();
+        stack.ensure_depth(8);
+        let before = stack.top_n(8);
+
+        let stmt = lift_eqw(SourceSpan::UNKNOWN, &mut stack);
+        let (dest, lhs, rhs) = match stmt {
+            Stmt::Assign {
+                dest,
+                expr: Expr::EqW { lhs, rhs },
+                ..
+            } => (dest, lhs, rhs),
+            _ => panic!("expected eqw assignment"),
+        };
+
+        assert_eq!(
+            lhs,
+            [
+                before[0].clone(),
+                before[1].clone(),
+                before[2].clone(),
+                before[3].clone()
+            ]
+        );
+        assert_eq!(
+            rhs,
+            [
+                before[4].clone(),
+                before[5].clone(),
+                before[6].clone(),
+                before[7].clone()
+            ]
+        );
+
+        let after = stack.top_n(9);
+        assert_eq!(after[0], dest);
+        assert_eq!(after[1], before[0]);
+        assert_eq!(after[8], before[7]);
     }
 }

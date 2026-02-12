@@ -100,6 +100,8 @@ fn edge_from_invoke(invoke: &Invoke, resolver: &SymbolResolver<'_>) -> CallEdge 
         kind: invoke.kind,
         target: resolver
             .resolve_target(&invoke.target)
+            .ok()
+            .flatten()
             .map(CallTarget::Direct)
             .unwrap_or(CallTarget::Opaque),
     }

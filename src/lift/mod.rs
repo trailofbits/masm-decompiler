@@ -789,6 +789,30 @@ fn transform_expr_loop_subscripts(
                 produced_stride,
             )),
         },
+        Expr::EqW { lhs, rhs } => Expr::EqW {
+            lhs: lhs.map(|var| {
+                transform_var_loop_subscripts(
+                    var,
+                    loop_var_id,
+                    slot_indices,
+                    value_slots,
+                    loop_carried_value_ids,
+                    produced_value_ids,
+                    produced_stride,
+                )
+            }),
+            rhs: rhs.map(|var| {
+                transform_var_loop_subscripts(
+                    var,
+                    loop_var_id,
+                    slot_indices,
+                    value_slots,
+                    loop_carried_value_ids,
+                    produced_value_ids,
+                    produced_stride,
+                )
+            }),
+        },
         other => other,
     }
 }
@@ -1944,6 +1968,10 @@ fn transform_expr_loop_input(
                 entry_value_ids,
                 loop_depth,
             )),
+        },
+        Expr::EqW { lhs, rhs } => Expr::EqW {
+            lhs: lhs.map(|var| transform_var_loop_input(var, entry_value_ids, loop_depth)),
+            rhs: rhs.map(|var| transform_var_loop_input(var, entry_value_ids, loop_depth)),
         },
         other => other,
     }

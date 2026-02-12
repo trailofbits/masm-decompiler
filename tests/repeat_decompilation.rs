@@ -263,6 +263,14 @@ fn collect_expr_ids(expr: &Expr, used: &mut HashSet<ValueId>) {
             collect_expr_ids(then_expr, used);
             collect_expr_ids(else_expr, used);
         }
+        Expr::EqW { lhs, rhs } => {
+            for v in lhs {
+                record_var_id(v, used);
+            }
+            for v in rhs {
+                record_var_id(v, used);
+            }
+        }
         Expr::True | Expr::False | Expr::Constant(_) => {}
     }
 }

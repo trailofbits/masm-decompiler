@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ir::{Expr, IndexExpr, LoopPhi, Stmt, Var, VarBase, ValueId};
+use crate::ir::{Expr, IndexExpr, LoopPhi, Stmt, ValueId, Var, VarBase};
 
 /// A path identifying a statement's location in the AST.
 ///
@@ -121,7 +121,8 @@ impl LivenessState {
     /// snapshot regardless of SSA base identity.
     fn mark_used_by_subscript(&mut self, subscript: Option<i64>) {
         let Some(target) = subscript else {
-            self.live_paths.extend(self.active_defs.values().flatten().cloned());
+            self.live_paths
+                .extend(self.active_defs.values().flatten().cloned());
             self.active_defs.clear();
             return;
         };
@@ -136,7 +137,6 @@ impl LivenessState {
             self.active_defs.remove(&var);
         }
     }
-
 
     /// Add a definition of a variable at the given path.
     /// If there's already an active definition for this variable, it means the variable
@@ -319,7 +319,9 @@ fn analyze_stmt(
             }
         }
 
-        Stmt::While { cond, body, phis, .. } => {
+        Stmt::While {
+            cond, body, phis, ..
+        } => {
             // Process uses in condition (condition is evaluated before each iteration).
             for var in expr_used_vars(cond, loop_stack) {
                 state.mark_used(&var);
@@ -426,7 +428,9 @@ fn analyze_stmt(
             }
         }
 
-        Stmt::Intrinsic { intrinsic: intr, .. } => {
+        Stmt::Intrinsic {
+            intrinsic: intr, ..
+        } => {
             for v in &intr.args {
                 for var in var_used_vars(v, loop_stack) {
                     state.mark_used(&var);
@@ -623,7 +627,9 @@ fn collect_defs_uses_recursive(
                 collect_defs_uses_recursive(body, &inner_stack, &repeat_path, defs, uses);
             }
 
-            Stmt::While { cond, body, phis, .. } => {
+            Stmt::While {
+                cond, body, phis, ..
+            } => {
                 uses.extend(expr_used_vars(cond, loop_stack));
 
                 for phi in phis {
@@ -689,7 +695,9 @@ fn collect_defs_uses_recursive(
                 }
             }
 
-            Stmt::Intrinsic { intrinsic: intr, .. } => {
+            Stmt::Intrinsic {
+                intrinsic: intr, ..
+            } => {
                 for v in &intr.args {
                     uses.extend(var_used_vars(v, loop_stack));
                 }
@@ -720,6 +728,16 @@ fn expr_used_vars(expr: &Expr, loop_stack: &[LoopBinding]) -> Vec<ConcreteVar> {
             let mut result = expr_used_vars(cond, loop_stack);
             result.extend(expr_used_vars(then_expr, loop_stack));
             result.extend(expr_used_vars(else_expr, loop_stack));
+            result
+        }
+        Expr::EqW { lhs, rhs } => {
+            let mut result = Vec::with_capacity(8);
+            for var in lhs {
+                result.extend(expand_var(var, loop_stack));
+            }
+            for var in rhs {
+                result.extend(expand_var(var, loop_stack));
+            }
             result
         }
         Expr::Constant(_) | Expr::True | Expr::False => Vec::new(),
@@ -785,10 +803,7 @@ fn enumerate_all_values(
 fn eval_index_expr(expr: &IndexExpr, bindings: &[(usize, i64)]) -> Option<i64> {
     match expr {
         IndexExpr::Const(c) => Some(*c),
-        IndexExpr::LoopVar(depth) => bindings
-            .iter()
-            .find(|(d, _)| *depth == *d)
-            .map(|(_, v)| *v),
+        IndexExpr::LoopVar(depth) => bindings.iter().find(|(d, _)| *depth == *d).map(|(_, v)| *v),
         IndexExpr::Add(lhs, rhs) => {
             let l = eval_index_expr(lhs, bindings)?;
             let r = eval_index_expr(rhs, bindings)?;
@@ -805,7 +820,7 @@ fn eval_index_expr(expr: &IndexExpr, bindings: &[(usize, i64)]) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{BinOp, Constant, LoopPhi, LoopVar, VarBase, ValueId};
+    use crate::ir::{BinOp, Constant, LoopPhi, LoopVar, ValueId, VarBase};
     use miden_assembly_syntax::debuginfo::SourceSpan;
 
     const TEST_SPAN: SourceSpan = SourceSpan::UNKNOWN;

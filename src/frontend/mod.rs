@@ -3,9 +3,9 @@
 use std::path::{Path as FsPath, PathBuf as FsPathBuf};
 
 use miden_assembly_syntax::{
-    ast::{path::PathBuf as MasmPathBuf, Module, ModuleKind, Procedure},
-    debuginfo::SourceManager,
     ModuleParser, Report,
+    ast::{Constant, Module, ModuleKind, Procedure, path::PathBuf as MasmPathBuf},
+    debuginfo::SourceManager,
 };
 use std::sync::Arc;
 
@@ -94,6 +94,11 @@ impl Program {
 
     pub fn procedures(&self) -> impl Iterator<Item = &Procedure> {
         self.module.procedures()
+    }
+
+    /// Iterate over constant definitions in this module.
+    pub fn constants(&self) -> impl Iterator<Item = &Constant> {
+        self.module.constants()
     }
 }
 

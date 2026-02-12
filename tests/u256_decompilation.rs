@@ -412,3 +412,36 @@ fn u256_eqz_loop_uses_boolean_accumulator_and_returns_it() {
         output
     );
 }
+
+/// U256 `eq` should lift each `eqw` into a dedicated word-equality expression.
+#[test]
+fn u256_eq_uses_word_equality_expressions() {
+    let ws = workspace_from_modules(&[("u256", include_str!("fixtures/u256.masm"))]);
+    let stmts = decompile_no_optimizations(&ws, "u256::eq");
+    let output = format_output(&stmts);
+    eprintln!("Output for u256::eq:\n{}", output);
+
+    let mut eqw_count = 0;
+    for stmt in &stmts {
+        if matches!(
+            stmt,
+            Stmt::Assign {
+                expr: Expr::EqW { .. },
+                ..
+            }
+        ) {
+            eqw_count += 1;
+        }
+    }
+
+    assert_eq!(
+        eqw_count, 2,
+        "u256::eq should contain two EqW assignments. Output:\n{}",
+        output
+    );
+    assert!(
+        output.contains("=="),
+        "u256::eq output should contain tuple equality formatting. Output:\n{}",
+        output
+    );
+}

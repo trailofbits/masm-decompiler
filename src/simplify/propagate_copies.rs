@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ir::{Expr, IndexExpr, Stmt, Var, VarBase, ValueId};
+use crate::ir::{Expr, IndexExpr, Stmt, ValueId, Var, VarBase};
 
 /// Base identity for a variable in copy propagation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -162,7 +162,9 @@ fn propagate_block(stmts: &mut Vec<Stmt>, state: &mut CopyState) -> bool {
                 state.kill_vars(results);
             }
 
-            Stmt::Intrinsic { intrinsic: intr, .. } => {
+            Stmt::Intrinsic {
+                intrinsic: intr, ..
+            } => {
                 changed |= rewrite_vars(&mut intr.args, state);
                 state.kill_vars(&intr.results);
             }
@@ -272,6 +274,24 @@ fn rewrite_expr(expr: &mut Expr, state: &CopyState) -> bool {
             let then_changed = rewrite_expr(then_expr, state);
             let else_changed = rewrite_expr(else_expr, state);
             cond_changed || then_changed || else_changed
+        }
+        Expr::EqW { lhs, rhs } => {
+            let mut changed = false;
+            for var in lhs {
+                let resolved = state.resolve_var(var);
+                if resolved != *var {
+                    *var = resolved;
+                    changed = true;
+                }
+            }
+            for var in rhs {
+                let resolved = state.resolve_var(var);
+                if resolved != *var {
+                    *var = resolved;
+                    changed = true;
+                }
+            }
+            changed
         }
         Expr::Constant(_) | Expr::True | Expr::False => false,
     }

@@ -297,7 +297,7 @@ impl From<&Instruction> for StackEffect {
             U32Split => StackEffect::known(1, 2),
 
             // Remaining word-size operations.
-            Eqw => StackEffect::known(8, 1),
+            Eqw => StackEffect::known(0, 1).with_required_depth(8),
 
             // TODO: Review remaining instruction effects.
 

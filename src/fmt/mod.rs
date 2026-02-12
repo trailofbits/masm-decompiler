@@ -307,6 +307,14 @@ fn collect_expr_usage(expr: &Expr, usage: &mut VarUsage) {
             collect_expr_usage(then_expr, usage);
             collect_expr_usage(else_expr, usage);
         }
+        Expr::EqW { lhs, rhs } => {
+            for v in lhs {
+                usage.record_use(v);
+            }
+            for v in rhs {
+                usage.record_use(v);
+            }
+        }
         Expr::True | Expr::False | Expr::Constant(_) => {}
     }
 }
@@ -1009,6 +1017,29 @@ fn fmt_expr(f: &CodeWriter, expr: &Expr, parent_prec: u8) -> String {
         Expr::False => keyword("false"),
         Expr::Var(v) => f.fmt_var(v),
         Expr::Constant(c) => fmt_constant(c),
+        Expr::EqW { lhs, rhs } => {
+            let prec = 5;
+            let lhs = format!(
+                "({}, {}, {}, {})",
+                f.fmt_var(&lhs[0]),
+                f.fmt_var(&lhs[1]),
+                f.fmt_var(&lhs[2]),
+                f.fmt_var(&lhs[3])
+            );
+            let rhs = format!(
+                "({}, {}, {}, {})",
+                f.fmt_var(&rhs[0]),
+                f.fmt_var(&rhs[1]),
+                f.fmt_var(&rhs[2]),
+                f.fmt_var(&rhs[3])
+            );
+            let expr_str = format!("{lhs} == {rhs}");
+            if prec < parent_prec {
+                format!("({expr_str})")
+            } else {
+                expr_str
+            }
+        }
         Expr::Unary(op, inner) => match op {
             UnOp::Not => {
                 let inner_str = fmt_expr(f, inner, 5);

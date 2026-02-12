@@ -210,27 +210,27 @@ impl Simplify for Stmt {
                 SimplifyResult::new(vec![Stmt::Assign { span, dest, expr }], changed)
             }
             // Simplify load and store arguments.
-            Stmt::MemLoad { span, load } => {
-                load.simplify().map(|l| vec![Stmt::MemLoad { span, load: l }])
-            }
-            Stmt::MemStore { span, store } => {
-                store.simplify().map(|s| vec![Stmt::MemStore { span, store: s }])
-            }
-            Stmt::AdvLoad { span, load } => {
-                load.simplify().map(|l| vec![Stmt::AdvLoad { span, load: l }])
-            }
-            Stmt::AdvStore { span, store } => {
-                store.simplify().map(|s| vec![Stmt::AdvStore { span, store: s }])
-            }
-            Stmt::LocalLoad { span, load } => {
-                load.simplify().map(|l| vec![Stmt::LocalLoad { span, load: l }])
-            }
-            Stmt::LocalStore { span, store } => {
-                store.simplify().map(|s| vec![Stmt::LocalStore { span, store: s }])
-            }
-            Stmt::LocalStoreW { span, store } => {
-                store.simplify().map(|s| vec![Stmt::LocalStoreW { span, store: s }])
-            }
+            Stmt::MemLoad { span, load } => load
+                .simplify()
+                .map(|l| vec![Stmt::MemLoad { span, load: l }]),
+            Stmt::MemStore { span, store } => store
+                .simplify()
+                .map(|s| vec![Stmt::MemStore { span, store: s }]),
+            Stmt::AdvLoad { span, load } => load
+                .simplify()
+                .map(|l| vec![Stmt::AdvLoad { span, load: l }]),
+            Stmt::AdvStore { span, store } => store
+                .simplify()
+                .map(|s| vec![Stmt::AdvStore { span, store: s }]),
+            Stmt::LocalLoad { span, load } => load
+                .simplify()
+                .map(|l| vec![Stmt::LocalLoad { span, load: l }]),
+            Stmt::LocalStore { span, store } => store
+                .simplify()
+                .map(|s| vec![Stmt::LocalStore { span, store: s }]),
+            Stmt::LocalStoreW { span, store } => store
+                .simplify()
+                .map(|s| vec![Stmt::LocalStoreW { span, store: s }]),
             // Calls.
             Stmt::Call { span, call } => {
                 call.simplify().map(|c| vec![Stmt::Call { span, call: c }])
@@ -238,10 +238,14 @@ impl Simplify for Stmt {
             Stmt::Exec { span, call } => {
                 call.simplify().map(|c| vec![Stmt::Exec { span, call: c }])
             }
-            Stmt::SysCall { span, call } => {
-                call.simplify().map(|c| vec![Stmt::SysCall { span, call: c }])
-            }
-            Stmt::DynCall { span, args, results } => {
+            Stmt::SysCall { span, call } => call
+                .simplify()
+                .map(|c| vec![Stmt::SysCall { span, call: c }]),
+            Stmt::DynCall {
+                span,
+                args,
+                results,
+            } => {
                 let args_result = args.simplify();
                 let results_result = results.simplify();
                 let changed = args_result.changed || results_result.changed;
@@ -464,6 +468,36 @@ impl Simplify for Expr {
                         cond: Box::new(cond),
                         then_expr: Box::new(then_expr),
                         else_expr: Box::new(else_expr),
+                    },
+                    changed,
+                )
+            }
+            Expr::EqW { lhs, rhs } => {
+                let [lhs0, lhs1, lhs2, lhs3] = lhs;
+                let [rhs0, rhs1, rhs2, rhs3] = rhs;
+
+                let lhs0 = lhs0.simplify();
+                let lhs1 = lhs1.simplify();
+                let lhs2 = lhs2.simplify();
+                let lhs3 = lhs3.simplify();
+                let rhs0 = rhs0.simplify();
+                let rhs1 = rhs1.simplify();
+                let rhs2 = rhs2.simplify();
+                let rhs3 = rhs3.simplify();
+
+                let changed = lhs0.changed
+                    || lhs1.changed
+                    || lhs2.changed
+                    || lhs3.changed
+                    || rhs0.changed
+                    || rhs1.changed
+                    || rhs2.changed
+                    || rhs3.changed;
+
+                SimplifyResult::new(
+                    Expr::EqW {
+                        lhs: [lhs0.value, lhs1.value, lhs2.value, lhs3.value],
+                        rhs: [rhs0.value, rhs1.value, rhs2.value, rhs3.value],
                     },
                     changed,
                 )

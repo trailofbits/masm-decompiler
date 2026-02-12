@@ -185,7 +185,8 @@ fn balanced_if_strategy(config: StrategyConfig) -> BoxedStrategy<(Op, StackEffec
     (0usize..=2, 0usize..=2)
         .prop_flat_map(move |(branch_pops, branch_pushes)| {
             let config = config.clone();
-            let then_strategy = block_with_effect_strategy(branch_pops, branch_pushes, config.clone());
+            let then_strategy =
+                block_with_effect_strategy(branch_pops, branch_pushes, config.clone());
             let else_strategy = block_with_effect_strategy(branch_pops, branch_pushes, config);
 
             (then_strategy, else_strategy).prop_map(move |(then_block, else_block)| {
@@ -517,7 +518,6 @@ impl StrategyConfig {
             ..self.clone()
         }
     }
-
 }
 
 /// Strategy for generating a procedure with configurable effects and optional calls.

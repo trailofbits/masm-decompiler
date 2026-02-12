@@ -268,6 +268,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
             Expr::Constant(constant) => self.infer_constant_type(constant),
             Expr::Unary(op, inner) => self.infer_unary_expr_type(*op, inner),
             Expr::Binary(op, lhs, rhs) => self.infer_binary_expr_type(*op, lhs, rhs),
+            Expr::EqW { .. } => InferredType::Bool,
             Expr::Ternary {
                 then_expr,
                 else_expr,
@@ -319,10 +320,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
             | BinOp::U32WrappingAdd
             | BinOp::U32WrappingSub
             | BinOp::U32WrappingMul => InferredType::U32,
-            BinOp::Add
-            | BinOp::Sub
-            | BinOp::Mul
-            | BinOp::Div => InferredType::Felt,
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => InferredType::Felt,
         }
     }
 
@@ -488,6 +486,16 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 }
                 changed
             }
+            Expr::EqW { lhs, rhs } => {
+                let mut changed = false;
+                for var in lhs {
+                    changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
+                }
+                for var in rhs {
+                    changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
+                }
+                changed
+            }
             Expr::Ternary {
                 cond,
                 then_expr,
@@ -582,6 +590,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 changed |= self.apply_requirement_to_expr(else_expr, req);
                 changed
             }
+            Expr::EqW { .. } => false,
             Expr::True | Expr::False | Expr::Constant(_) | Expr::Binary(..) | Expr::Unary(..) => {
                 false
             }
@@ -633,6 +642,16 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     | self.require_bool_expr(then_expr)
                     | self.require_bool_expr(else_expr)
             }
+            Expr::EqW { lhs, rhs } => {
+                let mut changed = false;
+                for var in lhs {
+                    changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
+                }
+                for var in rhs {
+                    changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
+                }
+                changed
+            }
             Expr::True | Expr::False | Expr::Constant(_) | Expr::Binary(..) | Expr::Unary(..) => {
                 false
             }
@@ -652,6 +671,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     | self.require_u32_expr(then_expr)
                     | self.require_u32_expr(else_expr)
             }
+            Expr::EqW { .. } => false,
             Expr::True | Expr::False | Expr::Constant(_) | Expr::Binary(..) | Expr::Unary(..) => {
                 false
             }
@@ -670,6 +690,16 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 self.require_bool_expr(cond)
                     | self.require_felt_expr(then_expr)
                     | self.require_felt_expr(else_expr)
+            }
+            Expr::EqW { lhs, rhs } => {
+                let mut changed = false;
+                for var in lhs {
+                    changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
+                }
+                for var in rhs {
+                    changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
+                }
+                changed
             }
             Expr::True | Expr::False | Expr::Constant(_) | Expr::Binary(..) | Expr::Unary(..) => {
                 false
@@ -819,6 +849,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 self.collect_expr_diagnostics(lhs, span);
                 self.collect_expr_diagnostics(rhs, span);
             }
+            Expr::EqW { .. } => {}
             Expr::Unary(_, inner) => self.collect_expr_diagnostics(inner, span),
             Expr::True | Expr::False | Expr::Var(_) | Expr::Constant(_) => {}
         }

@@ -119,8 +119,9 @@ impl<'a> Analysis<'a> {
 
     fn visit_call(&self, target: &InvocationTarget, stack: &mut ProvenanceStack) -> OpResult {
         let callee = match self.resolver.resolve_target(&self.module_path, target) {
-            Some(path) => path,
-            None => return OpResult::Unknown,
+            Ok(Some(path)) => path,
+            Ok(None) => return OpResult::Unknown,
+            Err(_) => return OpResult::Unknown,
         };
         // If the callee signature is not found, this procedure is part
         // of an SCC. In this case we bail and return unknown.

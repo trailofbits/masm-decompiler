@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use masm_decompiler::{frontend::testing::workspace_from_modules, SymbolPath};
+use masm_decompiler::{SymbolPath, frontend::testing::workspace_from_modules};
 
 /// Ensure unresolved dependency reporting captures missing `std` modules.
 #[test]

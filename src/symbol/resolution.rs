@@ -4,12 +4,72 @@ use std::sync::Arc;
 
 use miden_assembly_syntax::{
     Path,
-    ast::{InvocationTarget, LocalSymbolResolver, Module, SymbolResolution},
+    ast::{InvocationTarget, LocalSymbolResolver, Module, SymbolResolution, SymbolResolutionError},
     debuginfo::{SourceManager, SourceSpan, Span, Spanned},
 };
 
 use crate::frontend::Workspace;
 use crate::symbol::path::SymbolPath;
+
+/// Error returned when symbol resolution fails.
+#[derive(Debug, Clone)]
+pub enum ResolutionError {
+    /// The module context required for resolution is missing in the workspace.
+    ModuleNotLoaded { module: SymbolPath },
+    /// The symbol/path could not be resolved in the given module context.
+    SymbolResolution {
+        module: SymbolPath,
+        reference: String,
+        source: SymbolResolutionError,
+    },
+    /// The symbol resolved to a non-path target (e.g. MAST root digest).
+    NonPathResolution {
+        module: SymbolPath,
+        reference: String,
+    },
+    /// The reference resolved, but does not refer to a constant definition.
+    NonConstantSymbol {
+        module: SymbolPath,
+        reference: String,
+        resolved: SymbolPath,
+    },
+}
+
+impl std::fmt::Display for ResolutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolutionError::ModuleNotLoaded { module } => {
+                write!(f, "module `{module}` is not loaded in the workspace")
+            }
+            ResolutionError::SymbolResolution {
+                module, reference, ..
+            } => write!(f, "failed to resolve `{reference}` in module `{module}`"),
+            ResolutionError::NonPathResolution { module, reference } => write!(
+                f,
+                "symbol `{reference}` in module `{module}` resolved to a non-path target"
+            ),
+            ResolutionError::NonConstantSymbol {
+                module,
+                reference,
+                resolved,
+            } => write!(
+                f,
+                "reference `{reference}` in module `{module}` resolved to `{resolved}`, which is not a constant"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolutionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ResolutionError::SymbolResolution { source, .. } => Some(source),
+            ResolutionError::ModuleNotLoaded { .. }
+            | ResolutionError::NonPathResolution { .. }
+            | ResolutionError::NonConstantSymbol { .. } => None,
+        }
+    }
+}
 
 // -----------------------------------------------------------------------------
 // Module-level resolution
@@ -22,7 +82,7 @@ pub fn resolve_target(
     module: &Module,
     source_manager: Arc<dyn SourceManager>,
     target: &InvocationTarget,
-) -> Option<SymbolPath> {
+) -> Result<Option<SymbolPath>, ResolutionError> {
     create_resolver(module, source_manager).resolve_target(target)
 }
 
@@ -33,7 +93,7 @@ pub fn resolve_symbol(
     module: &Module,
     source_manager: Arc<dyn SourceManager>,
     name: &str,
-) -> SymbolPath {
+) -> Result<SymbolPath, ResolutionError> {
     create_resolver(module, source_manager).resolve_symbol(name)
 }
 
@@ -47,7 +107,7 @@ pub fn resolve_path(
     module: &Module,
     source_manager: Arc<dyn SourceManager>,
     path_str: &str,
-) -> SymbolPath {
+) -> Result<SymbolPath, ResolutionError> {
     create_resolver(module, source_manager).resolve_path(path_str)
 }
 
@@ -83,24 +143,25 @@ impl std::fmt::Debug for SymbolResolver<'_> {
 
 impl<'a> SymbolResolver<'a> {
     /// Resolve an invocation target to its fully-qualified path.
-    pub fn resolve_target(&self, target: &InvocationTarget) -> Option<SymbolPath> {
+    pub fn resolve_target(
+        &self,
+        target: &InvocationTarget,
+    ) -> Result<Option<SymbolPath>, ResolutionError> {
         match target {
-            InvocationTarget::MastRoot(_) => None,
-            InvocationTarget::Symbol(ident) => Some(resolve_symbol_span(
+            InvocationTarget::MastRoot(_) => Ok(None),
+            InvocationTarget::Symbol(ident) => resolve_symbol_span_to_option(
                 self.module,
                 &self.resolver,
                 Span::new(ident.span(), ident.as_str()),
-            )),
-            InvocationTarget::Path(path) => Some(resolve_path_span(
-                self.module,
-                &self.resolver,
-                path.as_deref(),
-            )),
+            ),
+            InvocationTarget::Path(path) => {
+                resolve_path_span_to_option(self.module, &self.resolver, path.as_deref())
+            }
         }
     }
 
     /// Resolve a simple symbol name.
-    pub fn resolve_symbol(&self, name: &str) -> SymbolPath {
+    pub fn resolve_symbol(&self, name: &str) -> Result<SymbolPath, ResolutionError> {
         resolve_symbol_span(
             self.module,
             &self.resolver,
@@ -109,7 +170,7 @@ impl<'a> SymbolResolver<'a> {
     }
 
     /// Resolve a qualified path.
-    pub fn resolve_path(&self, path_str: &str) -> SymbolPath {
+    pub fn resolve_path(&self, path_str: &str) -> Result<SymbolPath, ResolutionError> {
         let path = Path::new(path_str);
         resolve_path_span(
             self.module,
@@ -133,33 +194,77 @@ impl<'a> SymbolResolver<'a> {
 /// Implementations should use the provided module path to resolve symbols using
 /// the module's import context.
 pub trait WorkspaceSymbolResolver {
-    fn resolve_target(&self, module: &SymbolPath, target: &InvocationTarget) -> Option<SymbolPath>;
-    fn resolve_symbol(&self, module: &SymbolPath, name: &str) -> SymbolPath;
-    fn resolve_path(&self, module: &SymbolPath, path: &str) -> SymbolPath;
+    fn resolve_target(
+        &self,
+        module: &SymbolPath,
+        target: &InvocationTarget,
+    ) -> Result<Option<SymbolPath>, ResolutionError>;
+    fn resolve_symbol(
+        &self,
+        module: &SymbolPath,
+        name: &str,
+    ) -> Result<SymbolPath, ResolutionError>;
+    fn resolve_path(&self, module: &SymbolPath, path: &str) -> Result<SymbolPath, ResolutionError>;
 }
 
 impl WorkspaceSymbolResolver for Workspace {
-    fn resolve_target(&self, module: &SymbolPath, target: &InvocationTarget) -> Option<SymbolPath> {
-        let program = self.lookup_module(module)?;
+    fn resolve_target(
+        &self,
+        module: &SymbolPath,
+        target: &InvocationTarget,
+    ) -> Result<Option<SymbolPath>, ResolutionError> {
+        let program =
+            self.lookup_module(module)
+                .ok_or_else(|| ResolutionError::ModuleNotLoaded {
+                    module: module.clone(),
+                })?;
         let resolver = create_resolver(program.module(), self.source_manager());
         resolver.resolve_target(target)
     }
 
-    fn resolve_symbol(&self, module: &SymbolPath, name: &str) -> SymbolPath {
-        if let Some(program) = self.lookup_module(module) {
-            let resolver = create_resolver(program.module(), self.source_manager());
-            return resolver.resolve_symbol(name);
-        }
-        SymbolPath::from_module_path_and_name(module.as_str(), name)
+    fn resolve_symbol(
+        &self,
+        module: &SymbolPath,
+        name: &str,
+    ) -> Result<SymbolPath, ResolutionError> {
+        let program =
+            self.lookup_module(module)
+                .ok_or_else(|| ResolutionError::ModuleNotLoaded {
+                    module: module.clone(),
+                })?;
+        let resolver = create_resolver(program.module(), self.source_manager());
+        resolver.resolve_symbol(name)
     }
 
-    fn resolve_path(&self, module: &SymbolPath, path: &str) -> SymbolPath {
-        if let Some(program) = self.lookup_module(module) {
-            let resolver = create_resolver(program.module(), self.source_manager());
-            return resolver.resolve_path(path);
-        }
-        SymbolPath::new(path)
+    fn resolve_path(&self, module: &SymbolPath, path: &str) -> Result<SymbolPath, ResolutionError> {
+        let program =
+            self.lookup_module(module)
+                .ok_or_else(|| ResolutionError::ModuleNotLoaded {
+                    module: module.clone(),
+                })?;
+        let resolver = create_resolver(program.module(), self.source_manager());
+        resolver.resolve_path(path)
     }
+}
+
+/// Resolve a symbol and require that it refers to a constant definition.
+pub fn resolve_constant_symbol(
+    workspace: &Workspace,
+    module: &SymbolPath,
+    name: &str,
+) -> Result<SymbolPath, ResolutionError> {
+    let resolved = workspace.resolve_symbol(module, name)?;
+    ensure_constant_target(workspace, module, name.to_string(), resolved)
+}
+
+/// Resolve a qualified path and require that it refers to a constant definition.
+pub fn resolve_constant_path(
+    workspace: &Workspace,
+    module: &SymbolPath,
+    path: &str,
+) -> Result<SymbolPath, ResolutionError> {
+    let resolved = workspace.resolve_path(module, path)?;
+    ensure_constant_target(workspace, module, path.to_string(), resolved)
 }
 
 // -----------------------------------------------------------------------------
@@ -170,32 +275,123 @@ fn resolve_symbol_span(
     module: &Module,
     resolver: &LocalSymbolResolver,
     name: Span<&str>,
-) -> SymbolPath {
-    if let Ok(resolution) = resolver.resolve(name) {
-        if let Some(path) = resolution_to_path(module, resolution) {
-            return path;
-        }
-    }
+) -> Result<SymbolPath, ResolutionError> {
+    let resolution =
+        resolver
+            .resolve(name)
+            .map_err(|source| ResolutionError::SymbolResolution {
+                module: SymbolPath::new(module.path().to_string()),
+                reference: (*name.inner()).to_string(),
+                source,
+            })?;
+    resolution_to_path(module, resolution).ok_or_else(|| ResolutionError::NonPathResolution {
+        module: SymbolPath::new(module.path().to_string()),
+        reference: (*name.inner()).to_string(),
+    })
+}
 
-    SymbolPath::from_module_and_name(module, *name.inner())
+fn resolve_symbol_span_to_option(
+    module: &Module,
+    resolver: &LocalSymbolResolver,
+    name: Span<&str>,
+) -> Result<Option<SymbolPath>, ResolutionError> {
+    let resolution =
+        resolver
+            .resolve(name)
+            .map_err(|source| ResolutionError::SymbolResolution {
+                module: SymbolPath::new(module.path().to_string()),
+                reference: (*name.inner()).to_string(),
+                source,
+            })?;
+    Ok(resolution_to_path(module, resolution))
 }
 
 fn resolve_path_span(
     module: &Module,
     resolver: &LocalSymbolResolver,
     path: Span<&Path>,
-) -> SymbolPath {
+) -> Result<SymbolPath, ResolutionError> {
     if path.inner().is_absolute() {
-        return SymbolPath::new(path.as_str());
+        return Ok(SymbolPath::new(path.as_str()));
     }
 
-    if let Ok(resolution) = resolver.resolve_path(path) {
-        if let Some(path) = resolution_to_path(module, resolution) {
-            return path;
+    let resolution = match resolver.resolve_path(path) {
+        Ok(resolution) => resolution,
+        Err(source) if is_unresolved_qualified_external(path, &source) => {
+            return Ok(SymbolPath::new(path.as_str()));
+        }
+        Err(source) => {
+            return Err(ResolutionError::SymbolResolution {
+                module: SymbolPath::new(module.path().to_string()),
+                reference: path.as_str().to_string(),
+                source,
+            });
+        }
+    };
+    resolution_to_path(module, resolution).ok_or_else(|| ResolutionError::NonPathResolution {
+        module: SymbolPath::new(module.path().to_string()),
+        reference: path.as_str().to_string(),
+    })
+}
+
+fn resolve_path_span_to_option(
+    module: &Module,
+    resolver: &LocalSymbolResolver,
+    path: Span<&Path>,
+) -> Result<Option<SymbolPath>, ResolutionError> {
+    if path.inner().is_absolute() {
+        return Ok(Some(SymbolPath::new(path.as_str())));
+    }
+
+    let resolution = match resolver.resolve_path(path) {
+        Ok(resolution) => resolution,
+        Err(source) if is_unresolved_qualified_external(path, &source) => {
+            return Ok(Some(SymbolPath::new(path.as_str())));
+        }
+        Err(source) => {
+            return Err(ResolutionError::SymbolResolution {
+                module: SymbolPath::new(module.path().to_string()),
+                reference: path.as_str().to_string(),
+                source,
+            });
+        }
+    };
+    Ok(resolution_to_path(module, resolution))
+}
+
+/// Returns true when `path` is an explicit multi-segment external path (e.g. `foo::bar`) that
+/// does not rely on local imports and therefore can be used as-is.
+fn is_unresolved_qualified_external(path: Span<&Path>, source: &SymbolResolutionError) -> bool {
+    matches!(source, SymbolResolutionError::UndefinedSymbol { .. })
+        && !path.inner().is_absolute()
+        && path.inner().as_ident().is_none()
+}
+
+/// Ensure that a resolved path refers to a constant definition in the current workspace.
+fn ensure_constant_target(
+    workspace: &Workspace,
+    module: &SymbolPath,
+    reference: String,
+    resolved: SymbolPath,
+) -> Result<SymbolPath, ResolutionError> {
+    if workspace.lookup_constant_entry(&resolved).is_some() {
+        return Ok(resolved);
+    }
+
+    if let Some(module_path) = resolved.module_path() {
+        let module_path = SymbolPath::new(module_path);
+        if workspace.lookup_module(&module_path).is_none() {
+            return Err(ResolutionError::ModuleNotLoaded {
+                module: module_path,
+            });
         }
     }
 
-    SymbolPath::new(path.as_str())
+    Err(ResolutionError::NonConstantSymbol {
+        module: module.clone(),
+        reference,
+        resolved,
+    })
 }
 
 /// Convert a `SymbolResolution` to a `SymbolPath`.
@@ -212,5 +408,128 @@ fn resolution_to_path(module: &Module, resolution: SymbolResolution) -> Option<S
         SymbolResolution::Module { path, .. } => Some(SymbolPath::new(path.as_str())),
         SymbolResolution::Exact { path, .. } => Some(SymbolPath::new(path.as_str())),
         SymbolResolution::MastRoot(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frontend::testing::workspace_from_modules;
+
+    /// Ensure unresolved symbols return errors rather than synthesized fallback paths.
+    #[test]
+    fn resolve_symbol_is_strict_for_unknown_name() {
+        let ws = workspace_from_modules(&[(
+            "entry",
+            r#"
+            proc foo
+                push.1
+            end
+            "#,
+        )]);
+        let module = ws.lookup_module(&SymbolPath::new("entry")).expect("module");
+
+        let err = resolve_symbol(module.module(), ws.source_manager(), "MISSING")
+            .expect_err("expected strict resolution failure");
+        assert!(matches!(err, ResolutionError::SymbolResolution { .. }));
+    }
+
+    /// Ensure unknown unqualified path names fail explicitly.
+    #[test]
+    fn resolve_path_is_strict_for_unknown_unqualified_name() {
+        let ws = workspace_from_modules(&[(
+            "entry",
+            r#"
+            proc foo
+                push.1
+            end
+            "#,
+        )]);
+        let module = ws.lookup_module(&SymbolPath::new("entry")).expect("module");
+
+        let err = resolve_path(module.module(), ws.source_manager(), "missing")
+            .expect_err("expected strict resolution failure");
+        assert!(matches!(err, ResolutionError::SymbolResolution { .. }));
+    }
+
+    /// Ensure workspace resolution requires an existing module context.
+    #[test]
+    fn workspace_resolution_fails_for_missing_module() {
+        let ws = workspace_from_modules(&[(
+            "entry",
+            r#"
+            proc foo
+                push.1
+            end
+            "#,
+        )]);
+
+        let err = ws
+            .resolve_symbol(&SymbolPath::new("does::not::exist"), "foo")
+            .expect_err("expected missing module error");
+        assert!(matches!(err, ResolutionError::ModuleNotLoaded { .. }));
+    }
+
+    /// Ensure local constants resolve to their fully-qualified definitions.
+    #[test]
+    fn resolve_constant_symbol_local() {
+        let ws = workspace_from_modules(&[(
+            "entry",
+            r#"
+            const FOO = 42
+
+            proc main
+                push.FOO
+            end
+            "#,
+        )]);
+
+        let resolved =
+            resolve_constant_symbol(&ws, &SymbolPath::new("entry"), "FOO").expect("constant");
+        assert_eq!(resolved, SymbolPath::new("entry::FOO"));
+    }
+
+    /// Ensure imported constants resolve to the defining module.
+    #[test]
+    fn resolve_constant_symbol_imported() {
+        let ws = workspace_from_modules(&[
+            (
+                "constants",
+                r#"
+                const FOO = 7
+                "#,
+            ),
+            (
+                "entry",
+                r#"
+                use constants::FOO
+
+                proc main
+                    push.FOO
+                end
+                "#,
+            ),
+        ]);
+
+        let resolved =
+            resolve_constant_symbol(&ws, &SymbolPath::new("entry"), "FOO").expect("constant");
+        assert_eq!(resolved, SymbolPath::new("constants::FOO"));
+    }
+
+    /// Ensure resolving a non-constant symbol as a constant fails explicitly.
+    #[test]
+    fn resolve_constant_symbol_rejects_procedure() {
+        let ws = workspace_from_modules(&[(
+            "entry",
+            r#"
+            proc foo
+                push.1
+            end
+            "#,
+        )]);
+
+        let err = resolve_constant_symbol(&ws, &SymbolPath::new("entry"), "foo")
+            .expect_err("procedure should not resolve as constant");
+        assert!(matches!(err, ResolutionError::NonConstantSymbol { .. }));
     }
 }

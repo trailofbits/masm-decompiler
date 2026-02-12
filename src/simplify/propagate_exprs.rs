@@ -15,7 +15,7 @@
 
 use std::collections::HashSet;
 
-use crate::ir::{Expr, IfPhi, IndexExpr, LoopPhi, Stmt, Var, VarBase, ValueId};
+use crate::ir::{Expr, IfPhi, IndexExpr, LoopPhi, Stmt, ValueId, Var, VarBase};
 
 /// Maximum number of propagation passes to avoid infinite loops.
 const MAX_PROPAGATION_PASSES: usize = 100;
@@ -64,7 +64,9 @@ impl PhiDest for LoopPhi {
 
 /// Collect all phi destination variables as propagation keys.
 fn collect_defined_vars_in_phis<T: PhiDest>(phis: &[T]) -> HashSet<VarKey> {
-    phis.iter().map(|phi| VarKey::from_var(phi.dest())).collect()
+    phis.iter()
+        .map(|phi| VarKey::from_var(phi.dest()))
+        .collect()
 }
 
 impl VarKey {
@@ -137,9 +139,7 @@ fn propagate_one_pass(code: &mut Vec<Stmt>) -> bool {
         }
 
         // Find uses of this variable that can be propagated.
-        if let Some(use_info) =
-            find_propagatable_use(code, &var_key, def_idx, &def_expr, &props)
-        {
+        if let Some(use_info) = find_propagatable_use(code, &var_key, def_idx, &def_expr, &props) {
             // Perform the substitution.
             substitute_at_path(code, &use_info.path, &var_key, &def_expr);
             return true;
@@ -285,7 +285,9 @@ fn can_propagate_into(
             None
         }
 
-        Stmt::While { cond, body, phis, .. } => {
+        Stmt::While {
+            cond, body, phis, ..
+        } => {
             // Similar to Repeat - don't propagate into while loops.
             let loop_defs = collect_defined_vars_in_block(body);
             let phi_defs = collect_defined_vars_in_phis(phis);
@@ -491,6 +493,22 @@ fn substitute_in_expr(expr: &mut Expr, var_key: &VarKey, with: &Expr) {
             substitute_in_expr(then_expr, var_key, with);
             substitute_in_expr(else_expr, var_key, with);
         }
+        Expr::EqW { lhs, rhs } => {
+            for var in lhs {
+                if VarKey::from_var(var) == *var_key {
+                    if let Expr::Var(replacement) = with {
+                        *var = replacement.clone();
+                    }
+                }
+            }
+            for var in rhs {
+                if VarKey::from_var(var) == *var_key {
+                    if let Expr::Var(replacement) = with {
+                        *var = replacement.clone();
+                    }
+                }
+            }
+        }
         Expr::True | Expr::False | Expr::Constant(_) => {}
     }
 }
@@ -563,7 +581,9 @@ fn collect_defined_vars(stmt: &Stmt, defs: &mut HashSet<VarKey>) {
                 defs.insert(VarKey::from_var(v));
             }
         }
-        Stmt::Intrinsic { intrinsic: intr, .. } => {
+        Stmt::Intrinsic {
+            intrinsic: intr, ..
+        } => {
             for v in &intr.results {
                 defs.insert(VarKey::from_var(v));
             }
@@ -596,6 +616,14 @@ fn collect_expr_vars(expr: &Expr, vars: &mut Vec<VarKey>) {
             collect_expr_vars(then_expr, vars);
             collect_expr_vars(else_expr, vars);
         }
+        Expr::EqW { lhs, rhs } => {
+            for var in lhs {
+                vars.push(VarKey::from_var(var));
+            }
+            for var in rhs {
+                vars.push(VarKey::from_var(var));
+            }
+        }
         Expr::True | Expr::False | Expr::Constant(_) => {}
     }
 }
@@ -616,6 +644,17 @@ fn count_var_in_expr(expr: &Expr, var_key: &VarKey) -> usize {
                 + count_var_in_expr(then_expr, var_key)
                 + count_var_in_expr(else_expr, var_key)
         }
+        Expr::EqW { lhs, rhs } => {
+            let lhs_count = lhs
+                .iter()
+                .filter(|var| VarKey::from_var(var) == *var_key)
+                .count();
+            let rhs_count = rhs
+                .iter()
+                .filter(|var| VarKey::from_var(var) == *var_key)
+                .count();
+            lhs_count + rhs_count
+        }
         Expr::True | Expr::False | Expr::Constant(_) => 0,
     }
 }
@@ -626,6 +665,7 @@ fn expr_complexity(expr: &Expr) -> usize {
         Expr::True | Expr::False | Expr::Var(_) | Expr::Constant(_) => 1,
         Expr::Unary(_, a) => 1 + expr_complexity(a),
         Expr::Binary(_, a, b) => 1 + expr_complexity(a) + expr_complexity(b),
+        Expr::EqW { .. } => 9,
         Expr::Ternary {
             cond,
             then_expr,
@@ -655,7 +695,7 @@ impl ExprProperties {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{BinOp, Constant, IndexExpr, LoopVar, Var, VarBase, ValueId};
+    use crate::ir::{BinOp, Constant, IndexExpr, LoopVar, ValueId, Var, VarBase};
     use miden_assembly_syntax::debuginfo::SourceSpan;
 
     const TEST_SPAN: SourceSpan = SourceSpan::UNKNOWN;

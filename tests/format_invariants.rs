@@ -113,6 +113,10 @@ fn collect_expr_vars(expr: &Expr, vars: &mut Vec<Var>) {
             collect_expr_vars(then_expr, vars);
             collect_expr_vars(else_expr, vars);
         }
+        Expr::EqW { lhs, rhs } => {
+            vars.extend(lhs.iter().cloned());
+            vars.extend(rhs.iter().cloned());
+        }
         Expr::True | Expr::False | Expr::Constant(_) => {}
     }
 }

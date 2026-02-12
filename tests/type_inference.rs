@@ -218,19 +218,25 @@ fn reports_call_argument_type_mismatches() {
     let decompiler = setup_decompiler();
 
     let bad_bool = diagnostics_for(&decompiler, "typecheck::caller_bad_bool");
-    assert!(bad_bool
-        .iter()
-        .any(|diag| diag.arg_index == Some(0) && diag.expected == Some(TypeRequirement::Bool)));
+    assert!(
+        bad_bool
+            .iter()
+            .any(|diag| diag.arg_index == Some(0) && diag.expected == Some(TypeRequirement::Bool))
+    );
 
     let bad_u32 = diagnostics_for(&decompiler, "typecheck::caller_bad_u32");
-    assert!(bad_u32
-        .iter()
-        .any(|diag| diag.arg_index == Some(0) && diag.expected == Some(TypeRequirement::U32)));
+    assert!(
+        bad_u32
+            .iter()
+            .any(|diag| diag.arg_index == Some(0) && diag.expected == Some(TypeRequirement::U32))
+    );
 
     let bad_addr = diagnostics_for(&decompiler, "typecheck::caller_bad_address");
-    assert!(bad_addr
-        .iter()
-        .any(|diag| diag.arg_index == Some(0) && diag.expected == Some(TypeRequirement::Address)));
+    assert!(
+        bad_addr.iter().any(
+            |diag| diag.arg_index == Some(0) && diag.expected == Some(TypeRequirement::Address)
+        )
+    );
 
     let bad_and = diagnostics_for(&decompiler, "typecheck::caller_bad_and_bool");
     assert!(
