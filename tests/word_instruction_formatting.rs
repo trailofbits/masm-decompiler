@@ -87,6 +87,21 @@ fn formats_u32_exp_with_infix_operator() {
 }
 
 #[test]
+fn formats_u32cast_with_readable_parenthesization() {
+    let source = include_str!("fixtures/word_mem_stack_ops.masm");
+
+    let cast_fmt = format_proc(source, "uses_u32cast");
+    assert!(cast_fmt.contains("mod 2^32"), "{cast_fmt}");
+
+    let composite_fmt = format_proc(source, "uses_u32cast_in_composite_expr");
+    assert!(composite_fmt.contains("mod 2^32"), "{composite_fmt}");
+    assert!(
+        composite_fmt.contains(") mod 2^32) + 1"),
+        "u32cast in composite expressions should be grouped for readability: {composite_fmt}"
+    );
+}
+
+#[test]
 fn formats_u32_assert_and_divmod_imm_as_intrinsics() {
     let source = include_str!("fixtures/word_mem_stack_ops.masm");
     let formatted = format_proc(source, "uses_u32assert_and_divmod_imm");

@@ -1112,6 +1112,21 @@ fn fmt_expr(f: &CodeWriter, expr: &Expr, parent_prec: u8) -> String {
                 let inner_str = fmt_expr(f, inner, 5);
                 format!("-{inner_str}")
             }
+            UnOp::U32Cast => {
+                let prec = 3;
+                let inner_str = fmt_expr(f, inner, 0);
+                let inner_str = if is_atomic_expr(inner) {
+                    inner_str
+                } else {
+                    format!("({inner_str})")
+                };
+                let expr_str = format!("{inner_str} mod 2^32");
+                if prec < parent_prec {
+                    format!("({expr_str})")
+                } else {
+                    expr_str
+                }
+            }
             UnOp::U32Clz => format!("clz_u32({})", fmt_expr(f, inner, 0)),
             UnOp::U32Ctz => format!("ctz_u32({})", fmt_expr(f, inner, 0)),
             UnOp::U32Clo => format!("clo_u32({})", fmt_expr(f, inner, 0)),
@@ -1192,6 +1207,14 @@ fn fmt_expr(f: &CodeWriter, expr: &Expr, parent_prec: u8) -> String {
             }
         }
     }
+}
+
+/// Return true if expression can be embedded without explicit grouping.
+fn is_atomic_expr(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::True | Expr::False | Expr::Var(_) | Expr::Constant(_)
+    )
 }
 
 /// Return true when an expression is a binary operation with boolean output.

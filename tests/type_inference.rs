@@ -171,6 +171,78 @@ fn setup_decompiler() -> Decompiler<'static> {
             end
             drop
         end
+
+        pub proc assert_only
+            u32assert
+        end
+
+        pub proc assert2_only
+            u32assert2
+        end
+
+        pub proc assertw_only
+            u32assertw
+        end
+
+        pub proc assert_then_add
+            u32assert
+            push.1
+            u32wrapping_add
+            drop
+        end
+
+        pub proc assert_then_divmod
+            u32assert
+            push.4
+            u32divmod
+            drop
+            drop
+        end
+
+        pub proc split_only
+            u32split
+        end
+
+        pub proc split_then_add
+            u32split
+            drop
+            push.1
+            u32wrapping_add
+            drop
+        end
+
+        pub proc cast_only
+            u32cast
+        end
+
+        pub proc cast_then_add
+            u32cast
+            push.1
+            u32wrapping_add
+            drop
+        end
+
+        pub proc bool_to_u32assert
+            push.1.1
+            eq
+            u32assert
+            drop
+        end
+
+        pub proc bool_to_u32split
+            push.1.1
+            eq
+            u32split
+            drop
+            drop
+        end
+
+        pub proc bool_to_u32cast
+            push.1.1
+            eq
+            u32cast
+            drop
+        end
         "#,
     )]));
 
@@ -404,4 +476,100 @@ fn infers_u32shift_outputs_as_u32() {
         .get(&SymbolPath::new("u32_shift_types::shifts"))
         .expect("shifts summary");
     assert_eq!(summary.outputs, vec![InferredType::U32]);
+}
+
+#[test]
+fn u32_assert_split_and_cast_do_not_seed_u32_input_requirements() {
+    let decompiler = setup_decompiler();
+    let summaries = decompiler.type_summaries();
+
+    let assert_only = summaries
+        .get(&SymbolPath::new("typecheck::assert_only"))
+        .expect("assert_only summary");
+    assert_eq!(assert_only.inputs, vec![TypeRequirement::Unknown]);
+
+    let assert2_only = summaries
+        .get(&SymbolPath::new("typecheck::assert2_only"))
+        .expect("assert2_only summary");
+    assert_eq!(
+        assert2_only.inputs,
+        vec![TypeRequirement::Unknown, TypeRequirement::Unknown]
+    );
+
+    let assertw_only = summaries
+        .get(&SymbolPath::new("typecheck::assertw_only"))
+        .expect("assertw_only summary");
+    assert_eq!(
+        assertw_only.inputs,
+        vec![
+            TypeRequirement::Unknown,
+            TypeRequirement::Unknown,
+            TypeRequirement::Unknown,
+            TypeRequirement::Unknown
+        ]
+    );
+
+    let split_only = summaries
+        .get(&SymbolPath::new("typecheck::split_only"))
+        .expect("split_only summary");
+    assert_eq!(split_only.inputs, vec![TypeRequirement::Unknown]);
+    assert_eq!(
+        split_only.outputs,
+        vec![InferredType::U32, InferredType::U32]
+    );
+
+    let cast_only = summaries
+        .get(&SymbolPath::new("typecheck::cast_only"))
+        .expect("cast_only summary");
+    assert_eq!(cast_only.inputs, vec![TypeRequirement::Unknown]);
+    assert_eq!(cast_only.outputs, vec![InferredType::U32]);
+}
+
+#[test]
+fn u32_postconditions_discharge_downstream_u32_requirements() {
+    let decompiler = setup_decompiler();
+    let summaries = decompiler.type_summaries();
+
+    let assert_then_add = summaries
+        .get(&SymbolPath::new("typecheck::assert_then_add"))
+        .expect("assert_then_add summary");
+    assert_eq!(assert_then_add.inputs, vec![TypeRequirement::Unknown]);
+
+    let assert_then_divmod = summaries
+        .get(&SymbolPath::new("typecheck::assert_then_divmod"))
+        .expect("assert_then_divmod summary");
+    assert_eq!(assert_then_divmod.inputs, vec![TypeRequirement::Unknown]);
+
+    let split_then_add = summaries
+        .get(&SymbolPath::new("typecheck::split_then_add"))
+        .expect("split_then_add summary");
+    assert_eq!(split_then_add.inputs, vec![TypeRequirement::Unknown]);
+
+    let cast_then_add = summaries
+        .get(&SymbolPath::new("typecheck::cast_then_add"))
+        .expect("cast_then_add summary");
+    assert_eq!(cast_then_add.inputs, vec![TypeRequirement::Unknown]);
+}
+
+#[test]
+fn u32_assert_split_and_cast_skip_argument_mismatch_diagnostics() {
+    let decompiler = setup_decompiler();
+
+    let assert_diags = diagnostics_for(&decompiler, "typecheck::bool_to_u32assert");
+    assert!(
+        assert_diags.is_empty(),
+        "u32assert should be a runtime check, got: {assert_diags:?}"
+    );
+
+    let split_diags = diagnostics_for(&decompiler, "typecheck::bool_to_u32split");
+    assert!(
+        split_diags.is_empty(),
+        "u32split should not require U32 input, got: {split_diags:?}"
+    );
+
+    let cast_diags = diagnostics_for(&decompiler, "typecheck::bool_to_u32cast");
+    assert!(
+        cast_diags.is_empty(),
+        "u32cast should not require U32 input, got: {cast_diags:?}"
+    );
 }

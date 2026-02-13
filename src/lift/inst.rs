@@ -163,6 +163,7 @@ fn lift_u32_inst(
         Instruction::U32WrappingMulImm(imm) => {
             lift_binop_u32_imm(span, BinOp::U32WrappingMul, imm, stack)
         }
+        Instruction::U32Cast => lift_unop(span, UnOp::U32Cast, stack),
         Instruction::U32Clz => lift_unop(span, UnOp::U32Clz, stack),
         Instruction::U32Ctz => lift_unop(span, UnOp::U32Ctz, stack),
         Instruction::U32Clo => lift_unop(span, UnOp::U32Clo, stack),

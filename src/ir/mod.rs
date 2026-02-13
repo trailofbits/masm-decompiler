@@ -226,6 +226,8 @@ pub enum UnOp {
     Not,
     /// Arithmetic negation.
     Neg,
+    /// Cast to a 32-bit unsigned value (`x mod 2^32`).
+    U32Cast,
     /// Count leading zeros in a 32-bit word.
     U32Clz,
     /// Count trailing zeros in a 32-bit word.

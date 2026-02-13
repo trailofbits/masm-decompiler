@@ -192,6 +192,11 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 for result in &intrinsic.results {
                     changed |= self.set_inferred_type_for_var(result, result_ty);
                 }
+                if Self::intrinsic_asserts_u32_args(&intrinsic.name) {
+                    for arg in &intrinsic.args {
+                        changed |= self.set_inferred_type_for_var(arg, InferredType::U32);
+                    }
+                }
                 changed
             }
             Stmt::If {
@@ -262,6 +267,31 @@ impl<'a> ProcTypeAnalyzer<'a> {
         }
     }
 
+    /// Return intrinsic base name without suffixes such as `.err=*` or immediates.
+    fn intrinsic_base_name(name: &str) -> &str {
+        name.split_once('.').map_or(name, |(base, _)| base)
+    }
+
+    /// Return true if intrinsic arguments require a caller-side u32 precondition.
+    fn intrinsic_requires_u32_precondition(name: &str) -> bool {
+        if !name.starts_with("u32") {
+            return false;
+        }
+
+        !matches!(
+            Self::intrinsic_base_name(name),
+            "u32assert" | "u32assert2" | "u32assertw" | "u32split" | "u32cast"
+        )
+    }
+
+    /// Return true if this intrinsic asserts that all arguments are valid u32 values.
+    fn intrinsic_asserts_u32_args(name: &str) -> bool {
+        matches!(
+            Self::intrinsic_base_name(name),
+            "u32assert" | "u32assert2" | "u32assertw"
+        )
+    }
+
     /// Infer type for an expression.
     fn infer_expr_type(&self, expr: &Expr) -> InferredType {
         match expr {
@@ -295,7 +325,9 @@ impl<'a> ProcTypeAnalyzer<'a> {
     fn infer_unary_expr_type(&self, op: UnOp, _inner: &Expr) -> InferredType {
         match op {
             UnOp::Not => InferredType::Bool,
-            UnOp::U32Clz | UnOp::U32Ctz | UnOp::U32Clo | UnOp::U32Cto => InferredType::U32,
+            UnOp::U32Cast | UnOp::U32Clz | UnOp::U32Ctz | UnOp::U32Clo | UnOp::U32Cto => {
+                InferredType::U32
+            }
             UnOp::Neg | UnOp::Pow2 => InferredType::Felt,
         }
     }
@@ -428,12 +460,13 @@ impl<'a> ProcTypeAnalyzer<'a> {
 
     /// Seed requirements for intrinsic arguments.
     fn seed_intrinsic_arg_requirements(&mut self, intrinsic: &crate::ir::Intrinsic) -> bool {
-        if !intrinsic.name.starts_with("u32") {
+        if !Self::intrinsic_requires_u32_precondition(&intrinsic.name) {
             return false;
         }
+
         let mut changed = false;
         for arg in &intrinsic.args {
-            changed |= self.apply_requirement_to_var(arg, TypeRequirement::U32);
+            changed |= self.require_u32_var_if_not_guaranteed(arg);
         }
         changed
     }
@@ -446,8 +479,9 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 let mut changed = self.seed_requirements_in_expr(inner);
                 match op {
                     UnOp::Not => changed |= self.require_bool_expr(inner),
+                    UnOp::U32Cast => {}
                     UnOp::U32Clz | UnOp::U32Ctz | UnOp::U32Clo | UnOp::U32Cto => {
-                        changed |= self.require_u32_expr(inner);
+                        changed |= self.require_u32_expr_if_not_guaranteed(inner);
                     }
                     UnOp::Neg | UnOp::Pow2 => changed |= self.require_felt_expr(inner),
                 }
@@ -469,12 +503,12 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     | BinOp::U32WrappingAdd
                     | BinOp::U32WrappingSub
                     | BinOp::U32WrappingMul => {
-                        changed |= self.require_u32_expr(lhs);
-                        changed |= self.require_u32_expr(rhs);
+                        changed |= self.require_u32_expr_if_not_guaranteed(lhs);
+                        changed |= self.require_u32_expr_if_not_guaranteed(rhs);
                     }
                     BinOp::U32Exp => {
                         changed |= self.require_felt_expr(lhs);
-                        changed |= self.require_u32_expr(rhs);
+                        changed |= self.require_u32_expr_if_not_guaranteed(rhs);
                     }
                     BinOp::And | BinOp::Or | BinOp::Xor => {
                         changed |= self.require_bool_expr(lhs);
@@ -635,6 +669,17 @@ impl<'a> ProcTypeAnalyzer<'a> {
         }
     }
 
+    /// Require a variable to be u32 only if it is not already guaranteed u32.
+    fn require_u32_var_if_not_guaranteed(&mut self, var: &Var) -> bool {
+        let actual = self.inferred_type_for_var(var);
+        match check_compatibility(actual, TypeRequirement::U32) {
+            Compatibility::Compatible => false,
+            Compatibility::Incompatible | Compatibility::Indeterminate => {
+                self.apply_requirement_to_var(var, TypeRequirement::U32)
+            }
+        }
+    }
+
     /// Require that an expression is boolean.
     fn require_bool_expr(&mut self, expr: &Expr) -> bool {
         match expr {
@@ -684,6 +729,17 @@ impl<'a> ProcTypeAnalyzer<'a> {
             Expr::EqW { .. } => false,
             Expr::True | Expr::False | Expr::Constant(_) | Expr::Binary(..) | Expr::Unary(..) => {
                 false
+            }
+        }
+    }
+
+    /// Require an expression to be u32 only if it is not already guaranteed u32.
+    fn require_u32_expr_if_not_guaranteed(&mut self, expr: &Expr) -> bool {
+        let actual = self.infer_expr_type(expr);
+        match check_compatibility(actual, TypeRequirement::U32) {
+            Compatibility::Compatible => false,
+            Compatibility::Incompatible | Compatibility::Indeterminate => {
+                self.require_u32_expr(expr)
             }
         }
     }
@@ -756,7 +812,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 self.collect_call_arg_diagnostics(*span, &call.target, &call.args);
             }
             Stmt::Intrinsic { span, intrinsic } => {
-                if intrinsic.name.starts_with("u32") {
+                if Self::intrinsic_requires_u32_precondition(&intrinsic.name) {
                     for arg in &intrinsic.args {
                         self.check_var_requirement(
                             arg,
