@@ -224,8 +224,14 @@ fn propagate_block(stmts: &mut Vec<Stmt>, state: &mut CopyState) -> bool {
                 state.clear();
             }
 
-            Stmt::While { cond, body, .. } => {
-                changed |= rewrite_expr(cond, state);
+            Stmt::While {
+                cond, body, phis, ..
+            } => {
+                // Do not rewrite loop-carried while conditions from pre-loop copies.
+                let loop_carried = while_loop_carried_keys(phis);
+                if !expr_uses_any_key(cond, &loop_carried) {
+                    changed |= rewrite_expr(cond, state);
+                }
                 let mut body_state = state.clone();
                 changed |= propagate_block(body, &mut body_state);
                 state.clear();
@@ -294,6 +300,40 @@ fn rewrite_expr(expr: &mut Expr, state: &CopyState) -> bool {
             }
             changed
         }
+        Expr::Constant(_) | Expr::True | Expr::False => false,
+    }
+}
+
+/// Collect while loop-carried identities from loop phis.
+fn while_loop_carried_keys(phis: &[crate::ir::LoopPhi]) -> HashSet<VarKey> {
+    let mut keys = HashSet::new();
+    for phi in phis {
+        keys.insert(VarKey::from_var(&phi.init));
+        keys.insert(VarKey::from_var(&phi.dest));
+        keys.insert(VarKey::from_var(&phi.step));
+    }
+    keys
+}
+
+/// Return true if the expression uses any variable in `keys`.
+fn expr_uses_any_key(expr: &Expr, keys: &HashSet<VarKey>) -> bool {
+    match expr {
+        Expr::Var(var) => keys.contains(&VarKey::from_var(var)),
+        Expr::Binary(_, lhs, rhs) => expr_uses_any_key(lhs, keys) || expr_uses_any_key(rhs, keys),
+        Expr::Unary(_, inner) => expr_uses_any_key(inner, keys),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            expr_uses_any_key(cond, keys)
+                || expr_uses_any_key(then_expr, keys)
+                || expr_uses_any_key(else_expr, keys)
+        }
+        Expr::EqW { lhs, rhs } => lhs
+            .iter()
+            .chain(rhs.iter())
+            .any(|var| keys.contains(&VarKey::from_var(var))),
         Expr::Constant(_) | Expr::True | Expr::False => false,
     }
 }

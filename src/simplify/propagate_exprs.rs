@@ -291,6 +291,7 @@ fn can_propagate_into(
             // Similar to Repeat - don't propagate into while loops.
             let loop_defs = collect_defined_vars_in_block(body);
             let phi_defs = collect_defined_vars_in_phis(phis);
+            let loop_carried = while_loop_carried_keys(phis);
             if loop_defs.intersection(used_vars).next().is_some() {
                 return None;
             }
@@ -298,9 +299,15 @@ fn can_propagate_into(
                 return None;
             }
 
-            // Can propagate into condition if it doesn't involve loop-modified vars.
+            // Can propagate into condition only if it does not use loop-carried identities.
+            let cond_uses_loop_carried = expr_uses_vars(cond)
+                .into_iter()
+                .any(|var| loop_carried.contains(&var));
             let cond_uses = count_var_in_expr(cond, var_key);
-            if cond_uses == 1 && loop_defs.intersection(used_vars).next().is_none() {
+            if !cond_uses_loop_carried
+                && cond_uses == 1
+                && loop_defs.intersection(used_vars).next().is_none()
+            {
                 let use_complexity = expr_complexity(cond);
                 if props.complexity + use_complexity <= MAX_COMBINED_COMPLEXITY {
                     return Some(current_path);
@@ -590,6 +597,17 @@ fn collect_defined_vars(stmt: &Stmt, defs: &mut HashSet<VarKey>) {
         }
         _ => {}
     }
+}
+
+/// Collect loop-carried variable identities for a while loop.
+fn while_loop_carried_keys(phis: &[LoopPhi]) -> HashSet<VarKey> {
+    let mut keys = HashSet::new();
+    for phi in phis {
+        keys.insert(VarKey::from_var(&phi.init));
+        keys.insert(VarKey::from_var(&phi.dest));
+        keys.insert(VarKey::from_var(&phi.step));
+    }
+    keys
 }
 
 /// Get all variables used by an expression.

@@ -2016,7 +2016,7 @@ fn lift_while(
 ) -> LiftingResult<Vec<Stmt>> {
     // Pop initial condition.
     let cond_var = stack.pop();
-    let cond = Expr::Var(cond_var);
+    let cond = Expr::Var(cond_var.clone());
 
     let entry_depth = stack.len();
     let entry_vars = stack.to_vec();
@@ -2035,8 +2035,8 @@ fn lift_while(
     if body_stack.is_empty() {
         return Err(LiftingError::NonNeutralWhile { span: op_span });
     }
-    // Pop the continuation condition.
-    body_stack.pop();
+    // Pop the continuation condition and model it as a loop-carried phi.
+    let cond_step = body_stack.pop();
 
     // Verify that the loop body is stack-neutral.
     if body_stack.len() != entry_depth {
@@ -2044,7 +2044,13 @@ fn lift_while(
     }
 
     let step_vars = body_stack.to_vec();
-    let mut phis = Vec::with_capacity(phi_vars.len());
+    let cond_dest = stack.fresh_like(&cond_var);
+    let mut phis = Vec::with_capacity(phi_vars.len() + 1);
+    phis.push(LoopPhi {
+        dest: cond_dest,
+        init: cond_var,
+        step: cond_step,
+    });
     for ((dest, init), step) in phi_vars
         .iter()
         .cloned()

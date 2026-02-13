@@ -435,7 +435,19 @@ fn collect_phi_alias_names_stmt(stmt: &Stmt, aliases: &mut HashMap<Var, String>)
                 collect_phi_alias_names_stmt(stmt, aliases);
             }
         }
-        Stmt::While { body, .. } => {
+        Stmt::While { body, phis, .. } => {
+            for phi in phis {
+                let base = base_name_for_var(&phi.init);
+                aliases
+                    .entry(phi.init.clone())
+                    .or_insert_with(|| base.clone());
+                aliases
+                    .entry(phi.dest.clone())
+                    .or_insert_with(|| base.clone());
+                aliases
+                    .entry(phi.step.clone())
+                    .or_insert_with(|| base.clone());
+            }
             for stmt in body {
                 collect_phi_alias_names_stmt(stmt, aliases);
             }
@@ -786,7 +798,13 @@ impl CodeDisplay for Stmt {
             Stmt::Assign {
                 dest: dst, expr, ..
             } => {
-                f.write_line(&format!("{} = {};", f.fmt_var(dst), fmt_expr(f, expr, 0)));
+                let rhs = fmt_expr(f, expr, 0);
+                let rhs = if is_boolean_binary_expr(expr) {
+                    format!("({rhs})")
+                } else {
+                    rhs
+                };
+                f.write_line(&format!("{} = {rhs};", f.fmt_var(dst)));
             }
             Stmt::Return { values, .. } => {
                 let vals = values
@@ -1174,6 +1192,26 @@ fn fmt_expr(f: &CodeWriter, expr: &Expr, parent_prec: u8) -> String {
             }
         }
     }
+}
+
+/// Return true when an expression is a binary operation with boolean output.
+fn is_boolean_binary_expr(expr: &Expr) -> bool {
+    let Expr::Binary(op, _, _) = expr else {
+        return false;
+    };
+    matches!(
+        op,
+        BinOp::Eq
+            | BinOp::Neq
+            | BinOp::Lt
+            | BinOp::Lte
+            | BinOp::Gt
+            | BinOp::Gte
+            | BinOp::U32Lt
+            | BinOp::U32Lte
+            | BinOp::U32Gt
+            | BinOp::U32Gte
+    )
 }
 
 /// Return the formatter access path for a memory access kind.
