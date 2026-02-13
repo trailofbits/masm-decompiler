@@ -63,7 +63,7 @@ variant (e.g. `ProcSignature::Unknown`) rather than producing incorrect output.
 # Debugging
 
 The decompiler supports logging that can be enabled using the `RUST_LOG`
-environment variable. To run the decompiler on a file, use the command
+environment variable. To run the decompiler on a file, use the command:
 
 ```sh
 cargo run -- --no-color path/to/file.masm
@@ -74,6 +74,15 @@ decompile individual procedures, use the `--procedure` argument.
 
 ```sh
 cargo run -- --no-color --procedure proc_name path/to/file.masm
+```
+
+To decompile files that import modules from other libraries, use the `--library`
+flag to specify the path to the library root. For example, to decompile files
+inside the examples folder that import other modules from the Miden stdlib, use
+the following command:
+
+```sh
+cargo run -- --no-color --library std:examples/stdlib examples/stdlib/path/to/file.masm
 ```
 
 Finally, use the `--no-dce`, `--no-propagation`, and `--no-simplification` to
