@@ -102,6 +102,13 @@ fn formats_u32cast_with_readable_parenthesization() {
 }
 
 #[test]
+fn formats_inv_as_unary_field_inverse() {
+    let source = include_str!("fixtures/word_mem_stack_ops.masm");
+    let formatted = format_proc(source, "uses_inv");
+    assert!(formatted.contains("inv("), "{formatted}");
+}
+
+#[test]
 fn formats_u32_assert_and_divmod_imm_as_intrinsics() {
     let source = include_str!("fixtures/word_mem_stack_ops.masm");
     let formatted = format_proc(source, "uses_u32assert_and_divmod_imm");

@@ -226,6 +226,8 @@ pub enum UnOp {
     Not,
     /// Arithmetic negation.
     Neg,
+    /// Multiplicative inverse in the base field (`x^-1 mod p`).
+    Inv,
     /// Cast to a 32-bit unsigned value (`x mod 2^32`).
     U32Cast,
     /// Count leading zeros in a 32-bit word.

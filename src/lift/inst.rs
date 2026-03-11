@@ -123,6 +123,7 @@ fn lift_arith_inst(
         Instruction::Gte => lift_binop(span, BinOp::Gte, stack),
         Instruction::Not => lift_unop(span, UnOp::Not, stack),
         Instruction::Neg => lift_unop(span, UnOp::Neg, stack),
+        Instruction::Inv => lift_unop(span, UnOp::Inv, stack),
         Instruction::Pow2 => lift_unop(span, UnOp::Pow2, stack),
         Instruction::ExpBitLength(32) => lift_binop(span, BinOp::U32Exp, stack),
         Instruction::Incr => lift_incr(span, stack),

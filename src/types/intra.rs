@@ -328,7 +328,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
             UnOp::U32Cast | UnOp::U32Clz | UnOp::U32Ctz | UnOp::U32Clo | UnOp::U32Cto => {
                 InferredType::U32
             }
-            UnOp::Neg | UnOp::Pow2 => InferredType::Felt,
+            UnOp::Neg | UnOp::Inv | UnOp::Pow2 => InferredType::Felt,
         }
     }
 
@@ -483,7 +483,9 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     UnOp::U32Clz | UnOp::U32Ctz | UnOp::U32Clo | UnOp::U32Cto => {
                         changed |= self.require_u32_expr_if_not_guaranteed(inner);
                     }
-                    UnOp::Neg | UnOp::Pow2 => changed |= self.require_felt_expr(inner),
+                    UnOp::Neg | UnOp::Inv | UnOp::Pow2 => {
+                        changed |= self.require_felt_expr(inner);
+                    }
                 }
                 changed
             }

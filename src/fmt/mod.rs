@@ -1112,6 +1112,7 @@ fn fmt_expr(f: &CodeWriter, expr: &Expr, parent_prec: u8) -> String {
                 let inner_str = fmt_expr(f, inner, 5);
                 format!("-{inner_str}")
             }
+            UnOp::Inv => format!("inv({})", fmt_expr(f, inner, 0)),
             UnOp::U32Cast => {
                 let prec = 3;
                 let inner_str = fmt_expr(f, inner, 0);

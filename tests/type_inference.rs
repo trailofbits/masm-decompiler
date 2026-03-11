@@ -479,6 +479,26 @@ fn infers_u32shift_outputs_as_u32() {
 }
 
 #[test]
+fn infers_inv_input_and_output_as_felt() {
+    let ws = workspace_from_modules(&[(
+        "inv_types",
+        r#"
+        pub proc inverse
+            inv
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("inv_types::inverse"))
+        .expect("inverse summary");
+    assert_eq!(summary.inputs, vec![TypeRequirement::Felt]);
+    assert_eq!(summary.outputs, vec![InferredType::Felt]);
+}
+
+#[test]
 fn u32_assert_split_and_cast_do_not_seed_u32_input_requirements() {
     let decompiler = setup_decompiler();
     let summaries = decompiler.type_summaries();

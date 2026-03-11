@@ -108,6 +108,10 @@ proc uses_u32cast
     u32cast
 end
 
+proc uses_inv
+    inv
+end
+
 proc uses_u32cast_in_composite_expr
     add
     u32cast
