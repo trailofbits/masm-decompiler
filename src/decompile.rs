@@ -92,6 +92,10 @@ pub enum DecompilationError {
     ProcedureNotFound(String),
     /// Module not found in the workspace.
     ModuleNotFound(String),
+    /// Procedure exists, but no inferred signature entry was recorded for it.
+    MissingProcedureSignature(String),
+    /// Procedure exists, but signature inference marked it as unknown.
+    UnknownProcedureSignature(String),
     /// Error during lifting.
     Lifting(LiftingError),
 }
@@ -104,6 +108,12 @@ impl std::fmt::Display for DecompilationError {
             }
             DecompilationError::ModuleNotFound(name) => {
                 write!(f, "module `{name}` not found")
+            }
+            DecompilationError::MissingProcedureSignature(name) => {
+                write!(f, "procedure `{name}` is missing an inferred signature")
+            }
+            DecompilationError::UnknownProcedureSignature(name) => {
+                write!(f, "procedure `{name}` has unknown inferred signature")
             }
             DecompilationError::Lifting(e) => write!(f, "{e}"),
         }
@@ -374,6 +384,20 @@ impl<'a> Decompiler<'a> {
 
         // Extract module path from fq_name
         let module_path = proc_path.module_path().unwrap_or("").to_string();
+
+        match self.signatures.get(&proc_path) {
+            Some(ProcSignature::Known { .. }) => {}
+            Some(ProcSignature::Unknown) => {
+                return Err(DecompilationError::UnknownProcedureSignature(
+                    fq_name.to_string(),
+                ));
+            }
+            None => {
+                return Err(DecompilationError::MissingProcedureSignature(
+                    fq_name.to_string(),
+                ));
+            }
+        }
 
         // Lift directly from AST to structured IR
         debug!("lifting procedure `{}`", fq_name);

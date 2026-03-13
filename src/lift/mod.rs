@@ -53,6 +53,17 @@ pub enum LiftingError {
         /// Fully-qualified callee path.
         callee: SymbolPath,
     },
+    /// Control-flow construct tried to consume a condition from an empty stack.
+    MissingControlFlowCondition {
+        /// Source span of the originating control-flow operation.
+        span: SourceSpan,
+        /// The MASM construct that required the condition.
+        construct: &'static str,
+        /// Required stack depth to evaluate the condition.
+        required_depth: usize,
+        /// Actual symbolic stack depth at the point of failure.
+        actual_depth: usize,
+    },
     /// Unbalanced if-statement (branches have different stack effects).
     UnbalancedIf {
         /// Source span of the originating if operation.
@@ -96,6 +107,15 @@ impl std::fmt::Display for LiftingError {
             LiftingError::UnknownSignature { callee, .. } => {
                 write!(f, "call target `{callee}` has unknown inferred signature")
             }
+            LiftingError::MissingControlFlowCondition {
+                construct,
+                required_depth,
+                actual_depth,
+                ..
+            } => write!(
+                f,
+                "`{construct}` requires stack depth {required_depth}, but lifting only has depth {actual_depth}"
+            ),
             LiftingError::UnbalancedIf { .. } => write!(f, "unbalanced if-statement"),
             LiftingError::NonNeutralWhile { .. } => write!(f, "non-neutral while loop"),
             LiftingError::IncompatibleIfMerge { .. } => {
@@ -236,6 +256,14 @@ fn lift_if(
     sigs: &SignatureMap,
 ) -> LiftingResult<Vec<Stmt>> {
     // Pop condition from stack.
+    if stack.is_empty() {
+        return Err(LiftingError::MissingControlFlowCondition {
+            span: op_span,
+            construct: "if.true",
+            required_depth: 1,
+            actual_depth: 0,
+        });
+    }
     let cond_var = stack.pop();
     let cond = Expr::Var(cond_var);
 
@@ -2015,6 +2043,14 @@ fn lift_while(
     sigs: &SignatureMap,
 ) -> LiftingResult<Vec<Stmt>> {
     // Pop initial condition.
+    if stack.is_empty() {
+        return Err(LiftingError::MissingControlFlowCondition {
+            span: op_span,
+            construct: "while.true",
+            required_depth: 1,
+            actual_depth: 0,
+        });
+    }
     let cond_var = stack.pop();
     let cond = Expr::Var(cond_var.clone());
 
