@@ -64,6 +64,17 @@ pub enum LiftingError {
         /// Actual symbolic stack depth at the point of failure.
         actual_depth: usize,
     },
+    /// Instruction or stack operation required more inputs than lifting had available.
+    InsufficientStackDepth {
+        /// Source span of the originating operation.
+        span: SourceSpan,
+        /// The operation that required the missing inputs.
+        operation: String,
+        /// Required stack depth to execute the operation.
+        required_depth: usize,
+        /// Actual symbolic stack depth at the point of failure.
+        actual_depth: usize,
+    },
     /// Unbalanced if-statement (branches have different stack effects).
     UnbalancedIf {
         /// Source span of the originating if operation.
@@ -115,6 +126,15 @@ impl std::fmt::Display for LiftingError {
             } => write!(
                 f,
                 "`{construct}` requires stack depth {required_depth}, but lifting only has depth {actual_depth}"
+            ),
+            LiftingError::InsufficientStackDepth {
+                operation,
+                required_depth,
+                actual_depth,
+                ..
+            } => write!(
+                f,
+                "`{operation}` requires stack depth {required_depth}, but lifting only has depth {actual_depth}"
             ),
             LiftingError::UnbalancedIf { .. } => write!(f, "unbalanced if-statement"),
             LiftingError::NonNeutralWhile { .. } => write!(f, "non-neutral while loop"),
@@ -190,7 +210,7 @@ pub fn lift_proc(
 
     // Add return statement with outputs.
     if let Some(ProcSignature::Known { outputs, .. }) = sigs.get(proc_path) {
-        let return_vars = stack.top_n(*outputs);
+        let return_vars = stack.top_n_checked(*outputs, SourceSpan::UNKNOWN, "return")?;
         stmts.push(Stmt::Return {
             span: SourceSpan::UNKNOWN,
             values: return_vars,
@@ -1374,53 +1394,53 @@ fn simulate_inst_slots(
     sigs: &SignatureMap,
 ) -> LiftingResult<()> {
     match inst {
-        Instruction::Swap1 => stack.swap(1),
-        Instruction::Swap2 => stack.swap(2),
-        Instruction::Swap3 => stack.swap(3),
-        Instruction::Swap4 => stack.swap(4),
-        Instruction::Swap5 => stack.swap(5),
-        Instruction::Swap6 => stack.swap(6),
-        Instruction::Swap7 => stack.swap(7),
-        Instruction::Swap8 => stack.swap(8),
-        Instruction::Swap9 => stack.swap(9),
-        Instruction::Swap10 => stack.swap(10),
-        Instruction::Swap11 => stack.swap(11),
-        Instruction::Swap12 => stack.swap(12),
-        Instruction::Swap13 => stack.swap(13),
-        Instruction::Swap14 => stack.swap(14),
-        Instruction::Swap15 => stack.swap(15),
-        Instruction::SwapW1 => stack.swapw(1),
-        Instruction::SwapW2 => stack.swapw(2),
-        Instruction::SwapW3 => stack.swapw(3),
-        Instruction::MovUp2 => stack.movup(2),
-        Instruction::MovUp3 => stack.movup(3),
-        Instruction::MovUp4 => stack.movup(4),
-        Instruction::MovUp5 => stack.movup(5),
-        Instruction::MovUp6 => stack.movup(6),
-        Instruction::MovUp7 => stack.movup(7),
-        Instruction::MovUp8 => stack.movup(8),
-        Instruction::MovUp9 => stack.movup(9),
-        Instruction::MovUp10 => stack.movup(10),
-        Instruction::MovUp11 => stack.movup(11),
-        Instruction::MovUp12 => stack.movup(12),
-        Instruction::MovUp13 => stack.movup(13),
-        Instruction::MovUp14 => stack.movup(14),
-        Instruction::MovUp15 => stack.movup(15),
-        Instruction::MovDn2 => stack.movdn(2),
-        Instruction::MovDn3 => stack.movdn(3),
-        Instruction::MovDn4 => stack.movdn(4),
-        Instruction::MovDn5 => stack.movdn(5),
-        Instruction::MovDn6 => stack.movdn(6),
-        Instruction::MovDn7 => stack.movdn(7),
-        Instruction::MovDn8 => stack.movdn(8),
-        Instruction::MovDn9 => stack.movdn(9),
-        Instruction::MovDn10 => stack.movdn(10),
-        Instruction::MovDn11 => stack.movdn(11),
-        Instruction::MovDn12 => stack.movdn(12),
-        Instruction::MovDn13 => stack.movdn(13),
-        Instruction::MovDn14 => stack.movdn(14),
-        Instruction::MovDn15 => stack.movdn(15),
-        Instruction::Reversew => stack.reversew(),
+        Instruction::Swap1 => stack.swap(1, op_span, inst.to_string())?,
+        Instruction::Swap2 => stack.swap(2, op_span, inst.to_string())?,
+        Instruction::Swap3 => stack.swap(3, op_span, inst.to_string())?,
+        Instruction::Swap4 => stack.swap(4, op_span, inst.to_string())?,
+        Instruction::Swap5 => stack.swap(5, op_span, inst.to_string())?,
+        Instruction::Swap6 => stack.swap(6, op_span, inst.to_string())?,
+        Instruction::Swap7 => stack.swap(7, op_span, inst.to_string())?,
+        Instruction::Swap8 => stack.swap(8, op_span, inst.to_string())?,
+        Instruction::Swap9 => stack.swap(9, op_span, inst.to_string())?,
+        Instruction::Swap10 => stack.swap(10, op_span, inst.to_string())?,
+        Instruction::Swap11 => stack.swap(11, op_span, inst.to_string())?,
+        Instruction::Swap12 => stack.swap(12, op_span, inst.to_string())?,
+        Instruction::Swap13 => stack.swap(13, op_span, inst.to_string())?,
+        Instruction::Swap14 => stack.swap(14, op_span, inst.to_string())?,
+        Instruction::Swap15 => stack.swap(15, op_span, inst.to_string())?,
+        Instruction::SwapW1 => stack.swapw(1, op_span, inst.to_string())?,
+        Instruction::SwapW2 => stack.swapw(2, op_span, inst.to_string())?,
+        Instruction::SwapW3 => stack.swapw(3, op_span, inst.to_string())?,
+        Instruction::MovUp2 => stack.movup(2, op_span, inst.to_string())?,
+        Instruction::MovUp3 => stack.movup(3, op_span, inst.to_string())?,
+        Instruction::MovUp4 => stack.movup(4, op_span, inst.to_string())?,
+        Instruction::MovUp5 => stack.movup(5, op_span, inst.to_string())?,
+        Instruction::MovUp6 => stack.movup(6, op_span, inst.to_string())?,
+        Instruction::MovUp7 => stack.movup(7, op_span, inst.to_string())?,
+        Instruction::MovUp8 => stack.movup(8, op_span, inst.to_string())?,
+        Instruction::MovUp9 => stack.movup(9, op_span, inst.to_string())?,
+        Instruction::MovUp10 => stack.movup(10, op_span, inst.to_string())?,
+        Instruction::MovUp11 => stack.movup(11, op_span, inst.to_string())?,
+        Instruction::MovUp12 => stack.movup(12, op_span, inst.to_string())?,
+        Instruction::MovUp13 => stack.movup(13, op_span, inst.to_string())?,
+        Instruction::MovUp14 => stack.movup(14, op_span, inst.to_string())?,
+        Instruction::MovUp15 => stack.movup(15, op_span, inst.to_string())?,
+        Instruction::MovDn2 => stack.movdn(2, op_span, inst.to_string())?,
+        Instruction::MovDn3 => stack.movdn(3, op_span, inst.to_string())?,
+        Instruction::MovDn4 => stack.movdn(4, op_span, inst.to_string())?,
+        Instruction::MovDn5 => stack.movdn(5, op_span, inst.to_string())?,
+        Instruction::MovDn6 => stack.movdn(6, op_span, inst.to_string())?,
+        Instruction::MovDn7 => stack.movdn(7, op_span, inst.to_string())?,
+        Instruction::MovDn8 => stack.movdn(8, op_span, inst.to_string())?,
+        Instruction::MovDn9 => stack.movdn(9, op_span, inst.to_string())?,
+        Instruction::MovDn10 => stack.movdn(10, op_span, inst.to_string())?,
+        Instruction::MovDn11 => stack.movdn(11, op_span, inst.to_string())?,
+        Instruction::MovDn12 => stack.movdn(12, op_span, inst.to_string())?,
+        Instruction::MovDn13 => stack.movdn(13, op_span, inst.to_string())?,
+        Instruction::MovDn14 => stack.movdn(14, op_span, inst.to_string())?,
+        Instruction::MovDn15 => stack.movdn(15, op_span, inst.to_string())?,
+        Instruction::Reversew => stack.reversew(op_span, inst.to_string())?,
         _ => {
             let effect = inst::effect_for_inst(inst, op_span, resolver, sigs)?;
             let (pops, pushes, required_depth) = match effect {
@@ -1431,7 +1451,7 @@ fn simulate_inst_slots(
                 } => (pops, pushes, required_depth),
                 StackEffect::Unknown => (0, 0, 0),
             };
-            stack.apply_effect(pops, pushes, required_depth);
+            stack.apply_effect(pops, pushes, required_depth, op_span, inst.to_string())?;
         }
     }
     Ok(())
@@ -1459,12 +1479,23 @@ impl SlotStack {
         }
     }
 
-    /// Ensure the stack has at least the required depth by pushing new slots.
-    fn ensure_depth(&mut self, required_depth: usize) {
-        while self.slots.len() < required_depth {
-            let slot = self.alloc_slot();
-            self.slots.push(slot);
+    /// Require the stack to have at least the given depth without synthesizing slots.
+    fn require_depth(
+        &self,
+        required_depth: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
+        let actual_depth = self.slots.len();
+        if actual_depth < required_depth {
+            return Err(LiftingError::InsufficientStackDepth {
+                span,
+                operation: operation.into(),
+                required_depth,
+                actual_depth,
+            });
         }
+        Ok(())
     }
 
     /// Allocate a fresh slot identifier.
@@ -1480,65 +1511,102 @@ impl SlotStack {
     }
 
     /// Swap the top slot with the slot at the given depth.
-    fn swap(&mut self, depth: usize) {
+    fn swap(
+        &mut self,
+        depth: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
+        self.require_depth(depth + 1, span, operation)?;
         let len = self.slots.len();
         if depth > 0 && depth < len {
             let top_idx = len - 1;
             let other_idx = len - 1 - depth;
             self.slots.swap(top_idx, other_idx);
         }
+        Ok(())
     }
 
     /// Swap the top word with the word below it.
-    fn swapw(&mut self, word_index: usize) {
+    fn swapw(
+        &mut self,
+        word_index: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
         if word_index == 0 {
-            return;
+            return Ok(());
         }
+        self.require_depth((word_index + 1) * 4, span, operation)?;
         let len = self.slots.len();
         let offset = word_index.saturating_mul(4);
         if offset + 4 > len {
-            return;
+            return Ok(());
         }
         for i in 0..4 {
             let top_idx = len - 1 - i;
             let other_idx = len - 1 - offset - i;
             self.slots.swap(top_idx, other_idx);
         }
+        Ok(())
     }
 
     /// Reverse the order of the top word.
-    fn reversew(&mut self) {
+    fn reversew(&mut self, span: SourceSpan, operation: impl Into<String>) -> LiftingResult<()> {
+        self.require_depth(4, span, operation)?;
         let len = self.slots.len();
         if len < 4 {
-            return;
+            return Ok(());
         }
         self.slots.swap(len - 4, len - 1);
         self.slots.swap(len - 3, len - 2);
+        Ok(())
     }
 
     /// Move the slot at the given depth to the top.
-    fn movup(&mut self, depth: usize) {
+    fn movup(
+        &mut self,
+        depth: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
+        self.require_depth(depth + 1, span, operation)?;
         let len = self.slots.len();
         if depth > 0 && depth < len {
             let idx = len - 1 - depth;
             let slot = self.slots.remove(idx);
             self.slots.push(slot);
         }
+        Ok(())
     }
 
     /// Move the top slot down to the given depth.
-    fn movdn(&mut self, depth: usize) {
+    fn movdn(
+        &mut self,
+        depth: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
+        self.require_depth(depth + 1, span, operation)?;
         let len = self.slots.len();
         if depth > 0 && depth < len {
             let slot = self.slots.pop().expect("slot stack underflow");
             let idx = len - 1 - depth;
             self.slots.insert(idx, slot);
         }
+        Ok(())
     }
 
     /// Apply a stack effect to the slot stack, reusing slots where possible.
-    fn apply_effect(&mut self, pops: usize, pushes: usize, required_depth: usize) {
-        self.ensure_depth(required_depth);
+    fn apply_effect(
+        &mut self,
+        pops: usize,
+        pushes: usize,
+        required_depth: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
+        self.require_depth(required_depth, span, operation)?;
         let mut popped = Vec::with_capacity(pops);
         for _ in 0..pops {
             popped.push(self.pop());
@@ -1552,6 +1620,7 @@ impl SlotStack {
             let slot = self.alloc_slot();
             self.slots.push(slot);
         }
+        Ok(())
     }
 
     /// Return the stack contents from bottom to top.
@@ -1620,13 +1689,23 @@ impl TaggedSlotStack {
         self.tags.get(slot_id).cloned().unwrap_or_default()
     }
 
-    /// Ensure the stack has at least the required depth by pushing new slots.
-    fn ensure_depth(&mut self, required_depth: usize) {
-        while self.slots.len() < required_depth {
-            let slot = self.alloc_slot();
-            self.tags.entry(slot).or_default();
-            self.slots.push(slot);
+    /// Require the stack to have at least the given depth without synthesizing slots.
+    fn require_depth(
+        &self,
+        required_depth: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
+        let actual_depth = self.slots.len();
+        if actual_depth < required_depth {
+            return Err(LiftingError::InsufficientStackDepth {
+                span,
+                operation: operation.into(),
+                required_depth,
+                actual_depth,
+            });
         }
+        Ok(())
     }
 
     /// Allocate a fresh slot identifier.
@@ -1642,66 +1721,103 @@ impl TaggedSlotStack {
     }
 
     /// Swap the top slot with the slot at the given depth.
-    fn swap(&mut self, depth: usize) {
+    fn swap(
+        &mut self,
+        depth: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
+        self.require_depth(depth + 1, span, operation)?;
         let len = self.slots.len();
         if depth > 0 && depth < len {
             let top_idx = len - 1;
             let other_idx = len - 1 - depth;
             self.slots.swap(top_idx, other_idx);
         }
+        Ok(())
     }
 
     /// Swap the top word with the word below it.
-    fn swapw(&mut self, word_index: usize) {
+    fn swapw(
+        &mut self,
+        word_index: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
         if word_index == 0 {
-            return;
+            return Ok(());
         }
+        self.require_depth((word_index + 1) * 4, span, operation)?;
         let len = self.slots.len();
         let offset = word_index.saturating_mul(4);
         if offset + 4 > len {
-            return;
+            return Ok(());
         }
         for i in 0..4 {
             let top_idx = len - 1 - i;
             let other_idx = len - 1 - offset - i;
             self.slots.swap(top_idx, other_idx);
         }
+        Ok(())
     }
 
     /// Reverse the order of the top word.
-    fn reversew(&mut self) {
+    fn reversew(&mut self, span: SourceSpan, operation: impl Into<String>) -> LiftingResult<()> {
+        self.require_depth(4, span, operation)?;
         let len = self.slots.len();
         if len < 4 {
-            return;
+            return Ok(());
         }
         self.slots.swap(len - 4, len - 1);
         self.slots.swap(len - 3, len - 2);
+        Ok(())
     }
 
     /// Move the slot at the given depth to the top.
-    fn movup(&mut self, depth: usize) {
+    fn movup(
+        &mut self,
+        depth: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
+        self.require_depth(depth + 1, span, operation)?;
         let len = self.slots.len();
         if depth > 0 && depth < len {
             let idx = len - 1 - depth;
             let slot = self.slots.remove(idx);
             self.slots.push(slot);
         }
+        Ok(())
     }
 
     /// Move the top slot down to the given depth.
-    fn movdn(&mut self, depth: usize) {
+    fn movdn(
+        &mut self,
+        depth: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
+        self.require_depth(depth + 1, span, operation)?;
         let len = self.slots.len();
         if depth > 0 && depth < len {
             let slot = self.slots.pop().expect("slot stack underflow");
             let idx = len - 1 - depth;
             self.slots.insert(idx, slot);
         }
+        Ok(())
     }
 
     /// Apply a stack effect to the tagged slot stack.
-    fn apply_effect(&mut self, pops: usize, pushes: usize, required_depth: usize) {
+    fn apply_effect(
+        &mut self,
+        pops: usize,
+        pushes: usize,
+        required_depth: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
         let before = self.state_snapshot();
-        self.ensure_depth(required_depth);
+        self.require_depth(required_depth, span, operation)?;
         let mut popped = Vec::with_capacity(pops);
         let mut popped_tags = Vec::with_capacity(pops);
         for _ in 0..pops {
@@ -1733,6 +1849,7 @@ impl TaggedSlotStack {
             before,
             self.state_snapshot()
         );
+        Ok(())
     }
 }
 
@@ -1805,53 +1922,53 @@ fn simulate_inst_tags(
 ) -> LiftingResult<()> {
     let before = stack.state_snapshot();
     match inst {
-        Instruction::Swap1 => stack.swap(1),
-        Instruction::Swap2 => stack.swap(2),
-        Instruction::Swap3 => stack.swap(3),
-        Instruction::Swap4 => stack.swap(4),
-        Instruction::Swap5 => stack.swap(5),
-        Instruction::Swap6 => stack.swap(6),
-        Instruction::Swap7 => stack.swap(7),
-        Instruction::Swap8 => stack.swap(8),
-        Instruction::Swap9 => stack.swap(9),
-        Instruction::Swap10 => stack.swap(10),
-        Instruction::Swap11 => stack.swap(11),
-        Instruction::Swap12 => stack.swap(12),
-        Instruction::Swap13 => stack.swap(13),
-        Instruction::Swap14 => stack.swap(14),
-        Instruction::Swap15 => stack.swap(15),
-        Instruction::SwapW1 => stack.swapw(1),
-        Instruction::SwapW2 => stack.swapw(2),
-        Instruction::SwapW3 => stack.swapw(3),
-        Instruction::MovUp2 => stack.movup(2),
-        Instruction::MovUp3 => stack.movup(3),
-        Instruction::MovUp4 => stack.movup(4),
-        Instruction::MovUp5 => stack.movup(5),
-        Instruction::MovUp6 => stack.movup(6),
-        Instruction::MovUp7 => stack.movup(7),
-        Instruction::MovUp8 => stack.movup(8),
-        Instruction::MovUp9 => stack.movup(9),
-        Instruction::MovUp10 => stack.movup(10),
-        Instruction::MovUp11 => stack.movup(11),
-        Instruction::MovUp12 => stack.movup(12),
-        Instruction::MovUp13 => stack.movup(13),
-        Instruction::MovUp14 => stack.movup(14),
-        Instruction::MovUp15 => stack.movup(15),
-        Instruction::MovDn2 => stack.movdn(2),
-        Instruction::MovDn3 => stack.movdn(3),
-        Instruction::MovDn4 => stack.movdn(4),
-        Instruction::MovDn5 => stack.movdn(5),
-        Instruction::MovDn6 => stack.movdn(6),
-        Instruction::MovDn7 => stack.movdn(7),
-        Instruction::MovDn8 => stack.movdn(8),
-        Instruction::MovDn9 => stack.movdn(9),
-        Instruction::MovDn10 => stack.movdn(10),
-        Instruction::MovDn11 => stack.movdn(11),
-        Instruction::MovDn12 => stack.movdn(12),
-        Instruction::MovDn13 => stack.movdn(13),
-        Instruction::MovDn14 => stack.movdn(14),
-        Instruction::MovDn15 => stack.movdn(15),
-        Instruction::Reversew => stack.reversew(),
+        Instruction::Swap1 => stack.swap(1, op_span, inst.to_string())?,
+        Instruction::Swap2 => stack.swap(2, op_span, inst.to_string())?,
+        Instruction::Swap3 => stack.swap(3, op_span, inst.to_string())?,
+        Instruction::Swap4 => stack.swap(4, op_span, inst.to_string())?,
+        Instruction::Swap5 => stack.swap(5, op_span, inst.to_string())?,
+        Instruction::Swap6 => stack.swap(6, op_span, inst.to_string())?,
+        Instruction::Swap7 => stack.swap(7, op_span, inst.to_string())?,
+        Instruction::Swap8 => stack.swap(8, op_span, inst.to_string())?,
+        Instruction::Swap9 => stack.swap(9, op_span, inst.to_string())?,
+        Instruction::Swap10 => stack.swap(10, op_span, inst.to_string())?,
+        Instruction::Swap11 => stack.swap(11, op_span, inst.to_string())?,
+        Instruction::Swap12 => stack.swap(12, op_span, inst.to_string())?,
+        Instruction::Swap13 => stack.swap(13, op_span, inst.to_string())?,
+        Instruction::Swap14 => stack.swap(14, op_span, inst.to_string())?,
+        Instruction::Swap15 => stack.swap(15, op_span, inst.to_string())?,
+        Instruction::SwapW1 => stack.swapw(1, op_span, inst.to_string())?,
+        Instruction::SwapW2 => stack.swapw(2, op_span, inst.to_string())?,
+        Instruction::SwapW3 => stack.swapw(3, op_span, inst.to_string())?,
+        Instruction::MovUp2 => stack.movup(2, op_span, inst.to_string())?,
+        Instruction::MovUp3 => stack.movup(3, op_span, inst.to_string())?,
+        Instruction::MovUp4 => stack.movup(4, op_span, inst.to_string())?,
+        Instruction::MovUp5 => stack.movup(5, op_span, inst.to_string())?,
+        Instruction::MovUp6 => stack.movup(6, op_span, inst.to_string())?,
+        Instruction::MovUp7 => stack.movup(7, op_span, inst.to_string())?,
+        Instruction::MovUp8 => stack.movup(8, op_span, inst.to_string())?,
+        Instruction::MovUp9 => stack.movup(9, op_span, inst.to_string())?,
+        Instruction::MovUp10 => stack.movup(10, op_span, inst.to_string())?,
+        Instruction::MovUp11 => stack.movup(11, op_span, inst.to_string())?,
+        Instruction::MovUp12 => stack.movup(12, op_span, inst.to_string())?,
+        Instruction::MovUp13 => stack.movup(13, op_span, inst.to_string())?,
+        Instruction::MovUp14 => stack.movup(14, op_span, inst.to_string())?,
+        Instruction::MovUp15 => stack.movup(15, op_span, inst.to_string())?,
+        Instruction::MovDn2 => stack.movdn(2, op_span, inst.to_string())?,
+        Instruction::MovDn3 => stack.movdn(3, op_span, inst.to_string())?,
+        Instruction::MovDn4 => stack.movdn(4, op_span, inst.to_string())?,
+        Instruction::MovDn5 => stack.movdn(5, op_span, inst.to_string())?,
+        Instruction::MovDn6 => stack.movdn(6, op_span, inst.to_string())?,
+        Instruction::MovDn7 => stack.movdn(7, op_span, inst.to_string())?,
+        Instruction::MovDn8 => stack.movdn(8, op_span, inst.to_string())?,
+        Instruction::MovDn9 => stack.movdn(9, op_span, inst.to_string())?,
+        Instruction::MovDn10 => stack.movdn(10, op_span, inst.to_string())?,
+        Instruction::MovDn11 => stack.movdn(11, op_span, inst.to_string())?,
+        Instruction::MovDn12 => stack.movdn(12, op_span, inst.to_string())?,
+        Instruction::MovDn13 => stack.movdn(13, op_span, inst.to_string())?,
+        Instruction::MovDn14 => stack.movdn(14, op_span, inst.to_string())?,
+        Instruction::MovDn15 => stack.movdn(15, op_span, inst.to_string())?,
+        Instruction::Reversew => stack.reversew(op_span, inst.to_string())?,
         _ => {
             let effect = inst::effect_for_inst(inst, op_span, resolver, sigs)?;
             let (pops, pushes, required_depth) = match effect {
@@ -1862,7 +1979,7 @@ fn simulate_inst_tags(
                 } => (pops, pushes, required_depth),
                 StackEffect::Unknown => (0, 0, 0),
             };
-            stack.apply_effect(pops, pushes, required_depth);
+            stack.apply_effect(pops, pushes, required_depth, op_span, inst.to_string())?;
         }
     }
     trace!(

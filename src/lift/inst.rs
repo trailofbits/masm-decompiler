@@ -101,32 +101,32 @@ fn lift_arith_inst(
     stack: &mut SymbolicStack,
 ) -> LiftingResult<Option<Vec<Stmt>>> {
     let stmt = match inst {
-        Instruction::Add => lift_binop(span, BinOp::Add, stack),
-        Instruction::AddImm(imm) => lift_binop_imm(span, BinOp::Add, imm, stack),
-        Instruction::Sub => lift_binop(span, BinOp::Sub, stack),
-        Instruction::SubImm(imm) => lift_binop_imm(span, BinOp::Sub, imm, stack),
-        Instruction::Mul => lift_binop(span, BinOp::Mul, stack),
-        Instruction::MulImm(imm) => lift_binop_imm(span, BinOp::Mul, imm, stack),
-        Instruction::Div => lift_binop(span, BinOp::Div, stack),
-        Instruction::DivImm(imm) => lift_binop_imm(span, BinOp::Div, imm, stack),
-        Instruction::And => lift_binop(span, BinOp::And, stack),
-        Instruction::Or => lift_binop(span, BinOp::Or, stack),
-        Instruction::Xor => lift_binop(span, BinOp::Xor, stack),
-        Instruction::Eq => lift_binop(span, BinOp::Eq, stack),
-        Instruction::EqImm(imm) => lift_binop_imm(span, BinOp::Eq, imm, stack),
-        Instruction::Eqw => lift_eqw(span, stack),
-        Instruction::Neq => lift_binop(span, BinOp::Neq, stack),
-        Instruction::NeqImm(imm) => lift_binop_imm(span, BinOp::Neq, imm, stack),
-        Instruction::Lt => lift_binop(span, BinOp::Lt, stack),
-        Instruction::Lte => lift_binop(span, BinOp::Lte, stack),
-        Instruction::Gt => lift_binop(span, BinOp::Gt, stack),
-        Instruction::Gte => lift_binop(span, BinOp::Gte, stack),
-        Instruction::Not => lift_unop(span, UnOp::Not, stack),
-        Instruction::Neg => lift_unop(span, UnOp::Neg, stack),
-        Instruction::Inv => lift_unop(span, UnOp::Inv, stack),
-        Instruction::Pow2 => lift_unop(span, UnOp::Pow2, stack),
-        Instruction::ExpBitLength(32) => lift_binop(span, BinOp::U32Exp, stack),
-        Instruction::Incr => lift_incr(span, stack),
+        Instruction::Add => lift_binop(inst, span, BinOp::Add, stack)?,
+        Instruction::AddImm(imm) => lift_binop_imm(inst, span, BinOp::Add, imm, stack)?,
+        Instruction::Sub => lift_binop(inst, span, BinOp::Sub, stack)?,
+        Instruction::SubImm(imm) => lift_binop_imm(inst, span, BinOp::Sub, imm, stack)?,
+        Instruction::Mul => lift_binop(inst, span, BinOp::Mul, stack)?,
+        Instruction::MulImm(imm) => lift_binop_imm(inst, span, BinOp::Mul, imm, stack)?,
+        Instruction::Div => lift_binop(inst, span, BinOp::Div, stack)?,
+        Instruction::DivImm(imm) => lift_binop_imm(inst, span, BinOp::Div, imm, stack)?,
+        Instruction::And => lift_binop(inst, span, BinOp::And, stack)?,
+        Instruction::Or => lift_binop(inst, span, BinOp::Or, stack)?,
+        Instruction::Xor => lift_binop(inst, span, BinOp::Xor, stack)?,
+        Instruction::Eq => lift_binop(inst, span, BinOp::Eq, stack)?,
+        Instruction::EqImm(imm) => lift_binop_imm(inst, span, BinOp::Eq, imm, stack)?,
+        Instruction::Eqw => lift_eqw(span, inst.to_string(), stack)?,
+        Instruction::Neq => lift_binop(inst, span, BinOp::Neq, stack)?,
+        Instruction::NeqImm(imm) => lift_binop_imm(inst, span, BinOp::Neq, imm, stack)?,
+        Instruction::Lt => lift_binop(inst, span, BinOp::Lt, stack)?,
+        Instruction::Lte => lift_binop(inst, span, BinOp::Lte, stack)?,
+        Instruction::Gt => lift_binop(inst, span, BinOp::Gt, stack)?,
+        Instruction::Gte => lift_binop(inst, span, BinOp::Gte, stack)?,
+        Instruction::Not => lift_unop(inst, span, UnOp::Not, stack)?,
+        Instruction::Neg => lift_unop(inst, span, UnOp::Neg, stack)?,
+        Instruction::Inv => lift_unop(inst, span, UnOp::Inv, stack)?,
+        Instruction::Pow2 => lift_unop(inst, span, UnOp::Pow2, stack)?,
+        Instruction::ExpBitLength(32) => lift_binop(inst, span, BinOp::U32Exp, stack)?,
+        Instruction::Incr => lift_incr(inst, span, stack)?,
         _ => return Ok(None),
     };
     Ok(Some(vec![stmt]))
@@ -141,44 +141,45 @@ fn lift_u32_inst(
     stack: &mut SymbolicStack,
 ) -> LiftingResult<Option<Vec<Stmt>>> {
     let stmt = match inst {
-        Instruction::U32And => lift_binop(span, BinOp::U32And, stack),
-        Instruction::U32Or => lift_binop(span, BinOp::U32Or, stack),
-        Instruction::U32Xor => lift_binop(span, BinOp::U32Xor, stack),
-        Instruction::U32Shl => lift_binop(span, BinOp::U32Shl, stack),
-        Instruction::U32Shr => lift_binop(span, BinOp::U32Shr, stack),
-        Instruction::U32Rotr => lift_binop(span, BinOp::U32Rotr, stack),
-        Instruction::U32ShlImm(imm) => lift_binop_u8_imm(span, BinOp::U32Shl, imm, stack),
-        Instruction::U32ShrImm(imm) => lift_binop_u8_imm(span, BinOp::U32Shr, imm, stack),
-        Instruction::U32RotrImm(imm) => lift_binop_u8_imm(span, BinOp::U32Rotr, imm, stack),
-        Instruction::U32Lt => lift_binop(span, BinOp::U32Lt, stack),
-        Instruction::U32Lte => lift_binop(span, BinOp::U32Lte, stack),
-        Instruction::U32Gt => lift_binop(span, BinOp::U32Gt, stack),
-        Instruction::U32Gte => lift_binop(span, BinOp::U32Gte, stack),
-        Instruction::U32WrappingAdd => lift_binop(span, BinOp::U32WrappingAdd, stack),
-        Instruction::U32WrappingSub => lift_binop(span, BinOp::U32WrappingSub, stack),
-        Instruction::U32WrappingMul => lift_binop(span, BinOp::U32WrappingMul, stack),
+        Instruction::U32And => lift_binop(inst, span, BinOp::U32And, stack)?,
+        Instruction::U32Or => lift_binop(inst, span, BinOp::U32Or, stack)?,
+        Instruction::U32Xor => lift_binop(inst, span, BinOp::U32Xor, stack)?,
+        Instruction::U32Shl => lift_binop(inst, span, BinOp::U32Shl, stack)?,
+        Instruction::U32Shr => lift_binop(inst, span, BinOp::U32Shr, stack)?,
+        Instruction::U32Rotr => lift_binop(inst, span, BinOp::U32Rotr, stack)?,
+        Instruction::U32ShlImm(imm) => lift_binop_u8_imm(inst, span, BinOp::U32Shl, imm, stack)?,
+        Instruction::U32ShrImm(imm) => lift_binop_u8_imm(inst, span, BinOp::U32Shr, imm, stack)?,
+        Instruction::U32RotrImm(imm) => lift_binop_u8_imm(inst, span, BinOp::U32Rotr, imm, stack)?,
+        Instruction::U32Lt => lift_binop(inst, span, BinOp::U32Lt, stack)?,
+        Instruction::U32Lte => lift_binop(inst, span, BinOp::U32Lte, stack)?,
+        Instruction::U32Gt => lift_binop(inst, span, BinOp::U32Gt, stack)?,
+        Instruction::U32Gte => lift_binop(inst, span, BinOp::U32Gte, stack)?,
+        Instruction::U32WrappingAdd => lift_binop(inst, span, BinOp::U32WrappingAdd, stack)?,
+        Instruction::U32WrappingSub => lift_binop(inst, span, BinOp::U32WrappingSub, stack)?,
+        Instruction::U32WrappingMul => lift_binop(inst, span, BinOp::U32WrappingMul, stack)?,
         Instruction::U32WrappingAddImm(imm) => {
-            lift_binop_u32_imm(span, BinOp::U32WrappingAdd, imm, stack)
+            lift_binop_u32_imm(inst, span, BinOp::U32WrappingAdd, imm, stack)?
         }
         Instruction::U32WrappingSubImm(imm) => {
-            lift_binop_u32_imm(span, BinOp::U32WrappingSub, imm, stack)
+            lift_binop_u32_imm(inst, span, BinOp::U32WrappingSub, imm, stack)?
         }
         Instruction::U32WrappingMulImm(imm) => {
-            lift_binop_u32_imm(span, BinOp::U32WrappingMul, imm, stack)
+            lift_binop_u32_imm(inst, span, BinOp::U32WrappingMul, imm, stack)?
         }
-        Instruction::U32Cast => lift_unop(span, UnOp::U32Cast, stack),
+        Instruction::U32Cast => lift_unop(inst, span, UnOp::U32Cast, stack)?,
         Instruction::U32Test => {
             return Ok(Some(vec![lift_non_consuming_unop(
+                inst,
                 span,
                 UnOp::U32Test,
                 stack,
-            )]));
+            )?]));
         }
-        Instruction::U32Not => lift_unop(span, UnOp::U32Not, stack),
-        Instruction::U32Clz => lift_unop(span, UnOp::U32Clz, stack),
-        Instruction::U32Ctz => lift_unop(span, UnOp::U32Ctz, stack),
-        Instruction::U32Clo => lift_unop(span, UnOp::U32Clo, stack),
-        Instruction::U32Cto => lift_unop(span, UnOp::U32Cto, stack),
+        Instruction::U32Not => lift_unop(inst, span, UnOp::U32Not, stack)?,
+        Instruction::U32Clz => lift_unop(inst, span, UnOp::U32Clz, stack)?,
+        Instruction::U32Ctz => lift_unop(inst, span, UnOp::U32Ctz, stack)?,
+        Instruction::U32Clo => lift_unop(inst, span, UnOp::U32Clo, stack)?,
+        Instruction::U32Cto => lift_unop(inst, span, UnOp::U32Cto, stack)?,
         Instruction::U32WideningAdd => {
             return lift_u32_intrinsic(inst, span, "u32widening_add", resolver, sigs, stack);
         }
@@ -260,37 +261,37 @@ fn lift_u32_inst(
             return lift_u32_intrinsic_imm(inst, span, "u32mod", imm, resolver, sigs, stack);
         }
         Instruction::U32Split => {
-            return Ok(Some(vec![lift_u32split(span, stack)]));
+            return Ok(Some(vec![lift_u32split(span, inst.to_string(), stack)?]));
         }
         Instruction::U32Assert => {
-            return Ok(Some(vec![lift_u32_assert(span, "u32assert", stack)]));
+            return Ok(Some(vec![lift_u32_assert(span, "u32assert", stack)?]));
         }
         Instruction::U32AssertWithError(err) => {
             return Ok(Some(vec![lift_u32_assert(
                 span,
                 &format!("u32assert.{err}"),
                 stack,
-            )]));
+            )?]));
         }
         Instruction::U32Assert2 => {
-            return Ok(Some(vec![lift_u32_assert2(span, "u32assert2", stack)]));
+            return Ok(Some(vec![lift_u32_assert2(span, "u32assert2", stack)?]));
         }
         Instruction::U32Assert2WithError(err) => {
             return Ok(Some(vec![lift_u32_assert2(
                 span,
                 &format!("u32assert2.{err}"),
                 stack,
-            )]));
+            )?]));
         }
         Instruction::U32AssertW => {
-            return Ok(Some(vec![lift_u32_assertw(span, "u32assertw", stack)]));
+            return Ok(Some(vec![lift_u32_assertw(span, "u32assertw", stack)?]));
         }
         Instruction::U32AssertWWithError(err) => {
             return Ok(Some(vec![lift_u32_assertw(
                 span,
                 &format!("u32assertw.{err}"),
                 stack,
-            )]));
+            )?]));
         }
         _ => return Ok(None),
     };
@@ -305,20 +306,20 @@ fn lift_stack_inst(
 ) -> LiftingResult<Option<Vec<Stmt>>> {
     match inst {
         Instruction::Drop => {
-            stack.ensure_depth(1);
+            stack.require_depth(1, span, inst.to_string())?;
             stack.pop();
             Ok(Some(Vec::new()))
         }
         Instruction::DropW => {
-            stack.ensure_depth(4);
+            stack.require_depth(4, span, inst.to_string())?;
             for _ in 0..4 {
                 stack.pop();
             }
             Ok(Some(Vec::new()))
         }
         Instruction::PadW => Ok(Some(lift_padw(span, stack))),
-        Instruction::CDrop => Ok(Some(vec![lift_cdrop(span, stack)])),
-        Instruction::CSwap => Ok(Some(lift_cswap(span, stack))),
+        Instruction::CDrop => Ok(Some(vec![lift_cdrop(span, inst.to_string(), stack)?])),
+        Instruction::CSwap => Ok(Some(lift_cswap(span, inst.to_string(), stack)?)),
         Instruction::Dup0 => lift_dup(span, 0, stack),
         Instruction::Dup1 => lift_dup(span, 1, stack),
         Instruction::Dup2 => lift_dup(span, 2, stack),
@@ -340,211 +341,211 @@ fn lift_stack_inst(
         Instruction::DupW2 => lift_dupw(span, 2, stack),
         Instruction::DupW3 => lift_dupw(span, 3, stack),
         Instruction::Swap1 => {
-            stack.swap(1);
+            stack.swap(1, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::Swap2 => {
-            stack.swap(2);
+            stack.swap(2, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::Swap3 => {
-            stack.swap(3);
+            stack.swap(3, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::Swap4 => {
-            stack.swap(4);
+            stack.swap(4, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::Swap5 => {
-            stack.swap(5);
+            stack.swap(5, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::Swap6 => {
-            stack.swap(6);
+            stack.swap(6, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::Swap7 => {
-            stack.swap(7);
+            stack.swap(7, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::Swap8 => {
-            stack.swap(8);
+            stack.swap(8, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::Swap9 => {
-            stack.swap(9);
+            stack.swap(9, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::Swap10 => {
-            stack.swap(10);
+            stack.swap(10, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::Swap11 => {
-            stack.swap(11);
+            stack.swap(11, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::Swap12 => {
-            stack.swap(12);
+            stack.swap(12, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::Swap13 => {
-            stack.swap(13);
+            stack.swap(13, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::Swap14 => {
-            stack.swap(14);
+            stack.swap(14, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::Swap15 => {
-            stack.swap(15);
+            stack.swap(15, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::SwapW1 => {
-            stack.swapw(1);
+            stack.swapw(1, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::SwapW2 => {
-            stack.swapw(2);
+            stack.swapw(2, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::SwapW3 => {
-            stack.swapw(3);
+            stack.swapw(3, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::SwapDw => {
-            stack.swapdw();
+            stack.swapdw(span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovUp2 => {
-            stack.movup(2);
+            stack.movup(2, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovUp3 => {
-            stack.movup(3);
+            stack.movup(3, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovUp4 => {
-            stack.movup(4);
+            stack.movup(4, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovUp5 => {
-            stack.movup(5);
+            stack.movup(5, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovUp6 => {
-            stack.movup(6);
+            stack.movup(6, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovUp7 => {
-            stack.movup(7);
+            stack.movup(7, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovUp8 => {
-            stack.movup(8);
+            stack.movup(8, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovUp9 => {
-            stack.movup(9);
+            stack.movup(9, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovUp10 => {
-            stack.movup(10);
+            stack.movup(10, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovUp11 => {
-            stack.movup(11);
+            stack.movup(11, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovUp12 => {
-            stack.movup(12);
+            stack.movup(12, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovUp13 => {
-            stack.movup(13);
+            stack.movup(13, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovUp14 => {
-            stack.movup(14);
+            stack.movup(14, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovUp15 => {
-            stack.movup(15);
+            stack.movup(15, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovUpW2 => {
-            stack.movupw(2);
+            stack.movupw(2, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovUpW3 => {
-            stack.movupw(3);
+            stack.movupw(3, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovDn2 => {
-            stack.movdn(2);
+            stack.movdn(2, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovDn3 => {
-            stack.movdn(3);
+            stack.movdn(3, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovDn4 => {
-            stack.movdn(4);
+            stack.movdn(4, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovDn5 => {
-            stack.movdn(5);
+            stack.movdn(5, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovDn6 => {
-            stack.movdn(6);
+            stack.movdn(6, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovDn7 => {
-            stack.movdn(7);
+            stack.movdn(7, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovDn8 => {
-            stack.movdn(8);
+            stack.movdn(8, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovDn9 => {
-            stack.movdn(9);
+            stack.movdn(9, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovDn10 => {
-            stack.movdn(10);
+            stack.movdn(10, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovDn11 => {
-            stack.movdn(11);
+            stack.movdn(11, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovDn12 => {
-            stack.movdn(12);
+            stack.movdn(12, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovDnW2 => {
-            stack.movdnw(2);
+            stack.movdnw(2, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovDnW3 => {
-            stack.movdnw(3);
+            stack.movdnw(3, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovDn13 => {
-            stack.movdn(13);
+            stack.movdn(13, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovDn14 => {
-            stack.movdn(14);
+            stack.movdn(14, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::MovDn15 => {
-            stack.movdn(15);
+            stack.movdn(15, span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::Reversew => {
-            stack.reversew();
+            stack.reversew(span, inst.to_string())?;
             Ok(Some(Vec::new()))
         }
         Instruction::Nop | Instruction::Debug(_) => Ok(Some(Vec::new())),
@@ -561,7 +562,13 @@ fn lift_u32_intrinsic(
     stack: &mut SymbolicStack,
 ) -> LiftingResult<Option<Vec<Stmt>>> {
     let effect = effect_for_inst(inst, span, resolver, sigs)?;
-    let (args, results) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+    let (args, results) = stack.apply_checked(
+        effect.pops(),
+        effect.pushes(),
+        effect.required_depth(),
+        span,
+        inst.to_string(),
+    )?;
     Ok(Some(vec![Stmt::Intrinsic {
         span,
         intrinsic: Intrinsic {
@@ -583,7 +590,13 @@ fn lift_u32_intrinsic_imm(
     stack: &mut SymbolicStack,
 ) -> LiftingResult<Option<Vec<Stmt>>> {
     let effect = effect_for_inst(inst, span, resolver, sigs)?;
-    let (args, results) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+    let (args, results) = stack.apply_checked(
+        effect.pops(),
+        effect.pushes(),
+        effect.required_depth(),
+        span,
+        inst.to_string(),
+    )?;
     Ok(Some(vec![Stmt::Intrinsic {
         span,
         intrinsic: Intrinsic {
@@ -595,46 +608,53 @@ fn lift_u32_intrinsic_imm(
 }
 
 /// Lift `u32assert` and `u32assert.err=*` as no-stack-change intrinsics.
-fn lift_u32_assert(span: SourceSpan, name: &str, stack: &mut SymbolicStack) -> Stmt {
-    stack.ensure_depth(1);
+fn lift_u32_assert(span: SourceSpan, name: &str, stack: &mut SymbolicStack) -> LiftingResult<Stmt> {
+    stack.require_depth(1, span, name)?;
     let a = stack.peek(0).cloned().expect("u32assert stack");
-    Stmt::Intrinsic {
+    Ok(Stmt::Intrinsic {
         span,
         intrinsic: Intrinsic {
             name: name.to_string(),
             args: vec![a],
             results: Vec::new(),
         },
-    }
+    })
 }
 
 /// Lift `u32assert2` and `u32assert2.err=*` as no-stack-change intrinsics.
-fn lift_u32_assert2(span: SourceSpan, name: &str, stack: &mut SymbolicStack) -> Stmt {
-    stack.ensure_depth(2);
+fn lift_u32_assert2(
+    span: SourceSpan,
+    name: &str,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Stmt> {
+    stack.require_depth(2, span, name)?;
     let b = stack.peek(0).cloned().expect("u32assert2 stack");
     let a = stack.peek(1).cloned().expect("u32assert2 stack");
-    Stmt::Intrinsic {
+    Ok(Stmt::Intrinsic {
         span,
         intrinsic: Intrinsic {
             name: name.to_string(),
             args: vec![b, a],
             results: Vec::new(),
         },
-    }
+    })
 }
 
 /// Lift `u32assertw` and `u32assertw.err=*` as no-stack-change intrinsics.
-fn lift_u32_assertw(span: SourceSpan, name: &str, stack: &mut SymbolicStack) -> Stmt {
-    stack.ensure_depth(4);
-    let args = stack.top_n(4);
-    Stmt::Intrinsic {
+fn lift_u32_assertw(
+    span: SourceSpan,
+    name: &str,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Stmt> {
+    let args = stack.top_n_checked(4, span, name)?;
+    Ok(Stmt::Intrinsic {
         span,
         intrinsic: Intrinsic {
             name: name.to_string(),
             args,
             results: Vec::new(),
         },
-    }
+    })
 }
 
 /// Lift memory load/store instructions.
@@ -648,8 +668,13 @@ fn lift_mem_inst(
     match inst {
         Instruction::MemLoad => {
             let effect = effect_for_inst(inst, span, resolver, sigs)?;
-            let (popped, pushed) =
-                stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+            let (popped, pushed) = stack.apply_checked(
+                effect.pops(),
+                effect.pushes(),
+                effect.required_depth(),
+                span,
+                inst.to_string(),
+            )?;
             Ok(Some(vec![Stmt::MemLoad {
                 span,
                 load: MemLoad {
@@ -661,7 +686,13 @@ fn lift_mem_inst(
         }
         Instruction::MemLoadImm(imm) => {
             let effect = effect_for_inst(inst, span, resolver, sigs)?;
-            let (_, pushed) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+            let (_, pushed) = stack.apply_checked(
+                effect.pops(),
+                effect.pushes(),
+                effect.required_depth(),
+                span,
+                inst.to_string(),
+            )?;
             let (addr_var, assign) = assign_from_u32_immediate(span, imm, stack);
             Ok(Some(vec![
                 assign,
@@ -677,14 +708,13 @@ fn lift_mem_inst(
         }
         Instruction::MemLoadWBe => {
             let effect = effect_for_inst(inst, span, resolver, sigs)?;
-            let (popped, pushed) =
-                stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
-            if popped.is_empty() {
-                return Err(LiftingError::UnsupportedInstruction {
-                    span,
-                    instruction: inst.clone(),
-                });
-            }
+            let (popped, pushed) = stack.apply_checked(
+                effect.pops(),
+                effect.pushes(),
+                effect.required_depth(),
+                span,
+                inst.to_string(),
+            )?;
             let address = popped[0].clone();
             Ok(Some(vec![Stmt::MemLoad {
                 span,
@@ -697,7 +727,13 @@ fn lift_mem_inst(
         }
         Instruction::MemLoadWBeImm(imm) => {
             let effect = effect_for_inst(inst, span, resolver, sigs)?;
-            let (_, pushed) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+            let (_, pushed) = stack.apply_checked(
+                effect.pops(),
+                effect.pushes(),
+                effect.required_depth(),
+                span,
+                inst.to_string(),
+            )?;
             let (addr_var, assign) = assign_from_u32_immediate(span, imm, stack);
             Ok(Some(vec![
                 assign,
@@ -713,14 +749,13 @@ fn lift_mem_inst(
         }
         Instruction::MemLoadWLe => {
             let effect = effect_for_inst(inst, span, resolver, sigs)?;
-            let (popped, pushed) =
-                stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
-            if popped.is_empty() {
-                return Err(LiftingError::UnsupportedInstruction {
-                    span,
-                    instruction: inst.clone(),
-                });
-            }
+            let (popped, pushed) = stack.apply_checked(
+                effect.pops(),
+                effect.pushes(),
+                effect.required_depth(),
+                span,
+                inst.to_string(),
+            )?;
             let address = popped[0].clone();
             Ok(Some(vec![Stmt::MemLoad {
                 span,
@@ -733,7 +768,13 @@ fn lift_mem_inst(
         }
         Instruction::MemLoadWLeImm(imm) => {
             let effect = effect_for_inst(inst, span, resolver, sigs)?;
-            let (_, pushed) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+            let (_, pushed) = stack.apply_checked(
+                effect.pops(),
+                effect.pushes(),
+                effect.required_depth(),
+                span,
+                inst.to_string(),
+            )?;
             let (addr_var, assign) = assign_from_u32_immediate(span, imm, stack);
             Ok(Some(vec![
                 assign,
@@ -749,13 +790,13 @@ fn lift_mem_inst(
         }
         Instruction::MemStore => {
             let effect = effect_for_inst(inst, span, resolver, sigs)?;
-            let (mut popped, _) = stack.apply(effect.pops(), 0, effect.required_depth());
-            if popped.is_empty() {
-                return Err(LiftingError::UnsupportedInstruction {
-                    span,
-                    instruction: inst.clone(),
-                });
-            }
+            let (mut popped, _) = stack.apply_checked(
+                effect.pops(),
+                0,
+                effect.required_depth(),
+                span,
+                inst.to_string(),
+            )?;
             let address = popped.remove(0);
             Ok(Some(vec![Stmt::MemStore {
                 span,
@@ -768,7 +809,13 @@ fn lift_mem_inst(
         }
         Instruction::MemStoreImm(imm) => {
             let effect = effect_for_inst(inst, span, resolver, sigs)?;
-            let (popped, _) = stack.apply(effect.pops(), 0, effect.required_depth());
+            let (popped, _) = stack.apply_checked(
+                effect.pops(),
+                0,
+                effect.required_depth(),
+                span,
+                inst.to_string(),
+            )?;
             let (addr_var, assign) = assign_from_u32_immediate(span, imm, stack);
             Ok(Some(vec![
                 assign,
@@ -784,15 +831,15 @@ fn lift_mem_inst(
         }
         Instruction::MemStoreWBe => {
             let effect = effect_for_inst(inst, span, resolver, sigs)?;
-            let (popped, _) = stack.apply(effect.pops(), 0, effect.required_depth());
-            if popped.is_empty() {
-                return Err(LiftingError::UnsupportedInstruction {
-                    span,
-                    instruction: inst.clone(),
-                });
-            }
+            let (popped, _) = stack.apply_checked(
+                effect.pops(),
+                0,
+                effect.required_depth(),
+                span,
+                inst.to_string(),
+            )?;
             let address = popped[0].clone();
-            let values = stack.top_n(4);
+            let values = stack.top_n_checked(4, span, inst.to_string())?;
             Ok(Some(vec![Stmt::MemStore {
                 span,
                 store: MemStore {
@@ -804,8 +851,14 @@ fn lift_mem_inst(
         }
         Instruction::MemStoreWBeImm(imm) => {
             let effect = effect_for_inst(inst, span, resolver, sigs)?;
-            let (_, _) = stack.apply(effect.pops(), 0, effect.required_depth());
-            let values = stack.top_n(4);
+            let (_, _) = stack.apply_checked(
+                effect.pops(),
+                0,
+                effect.required_depth(),
+                span,
+                inst.to_string(),
+            )?;
+            let values = stack.top_n_checked(4, span, inst.to_string())?;
             let (addr_var, assign) = assign_from_u32_immediate(span, imm, stack);
             Ok(Some(vec![
                 assign,
@@ -821,15 +874,15 @@ fn lift_mem_inst(
         }
         Instruction::MemStoreWLe => {
             let effect = effect_for_inst(inst, span, resolver, sigs)?;
-            let (popped, _) = stack.apply(effect.pops(), 0, effect.required_depth());
-            if popped.is_empty() {
-                return Err(LiftingError::UnsupportedInstruction {
-                    span,
-                    instruction: inst.clone(),
-                });
-            }
+            let (popped, _) = stack.apply_checked(
+                effect.pops(),
+                0,
+                effect.required_depth(),
+                span,
+                inst.to_string(),
+            )?;
             let address = popped[0].clone();
-            let values = stack.top_n(4);
+            let values = stack.top_n_checked(4, span, inst.to_string())?;
             Ok(Some(vec![Stmt::MemStore {
                 span,
                 store: MemStore {
@@ -841,8 +894,14 @@ fn lift_mem_inst(
         }
         Instruction::MemStoreWLeImm(imm) => {
             let effect = effect_for_inst(inst, span, resolver, sigs)?;
-            let (_, _) = stack.apply(effect.pops(), 0, effect.required_depth());
-            let values = stack.top_n(4);
+            let (_, _) = stack.apply_checked(
+                effect.pops(),
+                0,
+                effect.required_depth(),
+                span,
+                inst.to_string(),
+            )?;
+            let values = stack.top_n_checked(4, span, inst.to_string())?;
             let (addr_var, assign) = assign_from_u32_immediate(span, imm, stack);
             Ok(Some(vec![
                 assign,
@@ -871,7 +930,13 @@ fn lift_local_inst(
     match inst {
         Instruction::LocLoad(idx) => {
             let effect = effect_for_inst(inst, span, resolver, sigs)?;
-            let (_, pushed) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+            let (_, pushed) = stack.apply_checked(
+                effect.pops(),
+                effect.pushes(),
+                effect.required_depth(),
+                span,
+                inst.to_string(),
+            )?;
             Ok(Some(vec![Stmt::LocalLoad {
                 span,
                 load: LocalLoad {
@@ -883,7 +948,13 @@ fn lift_local_inst(
         }
         Instruction::LocLoadWBe(idx) => {
             let effect = effect_for_inst(inst, span, resolver, sigs)?;
-            let (_, pushed) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+            let (_, pushed) = stack.apply_checked(
+                effect.pops(),
+                effect.pushes(),
+                effect.required_depth(),
+                span,
+                inst.to_string(),
+            )?;
             Ok(Some(vec![Stmt::LocalLoad {
                 span,
                 load: LocalLoad {
@@ -895,7 +966,13 @@ fn lift_local_inst(
         }
         Instruction::LocLoadWLe(idx) => {
             let effect = effect_for_inst(inst, span, resolver, sigs)?;
-            let (_, pushed) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+            let (_, pushed) = stack.apply_checked(
+                effect.pops(),
+                effect.pushes(),
+                effect.required_depth(),
+                span,
+                inst.to_string(),
+            )?;
             Ok(Some(vec![Stmt::LocalLoad {
                 span,
                 load: LocalLoad {
@@ -907,7 +984,13 @@ fn lift_local_inst(
         }
         Instruction::LocStore(idx) => {
             let effect = effect_for_inst(inst, span, resolver, sigs)?;
-            let (popped, _) = stack.apply(effect.pops(), 0, effect.required_depth());
+            let (popped, _) = stack.apply_checked(
+                effect.pops(),
+                0,
+                effect.required_depth(),
+                span,
+                inst.to_string(),
+            )?;
             Ok(Some(vec![Stmt::LocalStore {
                 span,
                 store: LocalStore {
@@ -917,8 +1000,7 @@ fn lift_local_inst(
             }]))
         }
         Instruction::LocStoreWBe(idx) => {
-            stack.ensure_depth(4);
-            let values = stack.top_n(4);
+            let values = stack.top_n_checked(4, span, inst.to_string())?;
             Ok(Some(vec![Stmt::LocalStoreW {
                 span,
                 store: LocalStoreW {
@@ -929,8 +1011,7 @@ fn lift_local_inst(
             }]))
         }
         Instruction::LocStoreWLe(idx) => {
-            stack.ensure_depth(4);
-            let values = stack.top_n(4);
+            let values = stack.top_n_checked(4, span, inst.to_string())?;
             Ok(Some(vec![Stmt::LocalStoreW {
                 span,
                 store: LocalStoreW {
@@ -955,7 +1036,13 @@ fn lift_adv_inst(
     match inst {
         Instruction::AdvLoadW => {
             let effect = effect_for_inst(inst, span, resolver, sigs)?;
-            let (_, pushed) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+            let (_, pushed) = stack.apply_checked(
+                effect.pops(),
+                effect.pushes(),
+                effect.required_depth(),
+                span,
+                inst.to_string(),
+            )?;
             Ok(Some(vec![Stmt::AdvLoad {
                 span,
                 load: AdvLoad { outputs: pushed },
@@ -977,7 +1064,7 @@ fn lift_adv_inst(
                     instruction: inst.clone(),
                 });
             }
-            let (_, pushed) = stack.apply(0, count, 0);
+            let (_, pushed) = stack.apply_checked(0, count, 0, span, inst.to_string())?;
             Ok(Some(vec![Stmt::Intrinsic {
                 span,
                 intrinsic: Intrinsic {
@@ -1034,7 +1121,13 @@ fn lift_intrinsic_inst(
         _ => return Ok(None),
     };
     let effect = effect_for_inst(inst, span, resolver, sigs)?;
-    let (args, results) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+    let (args, results) = stack.apply_checked(
+        effect.pops(),
+        effect.pushes(),
+        effect.required_depth(),
+        span,
+        name.clone(),
+    )?;
     Ok(Some(vec![Stmt::Intrinsic {
         span,
         intrinsic: Intrinsic {
@@ -1058,7 +1151,7 @@ fn lift_push_inst(
             Ok(Some(vec![Stmt::Assign { span, dest, expr }]))
         }
         Instruction::Locaddr(index) => {
-            let (_, pushed) = stack.apply(0, 1, 0);
+            let (_, pushed) = stack.apply_checked(0, 1, 0, span, "locaddr")?;
             Ok(Some(vec![Stmt::Intrinsic {
                 span,
                 intrinsic: Intrinsic {
@@ -1110,7 +1203,13 @@ where
     F: Fn(Call) -> Stmt,
 {
     let (name, effect) = resolve_call_target_and_effect(target, span, resolver, sigs)?;
-    let (args, results) = stack.apply(effect.pops(), effect.pushes(), effect.required_depth());
+    let (args, results) = stack.apply_checked(
+        effect.pops(),
+        effect.pushes(),
+        effect.required_depth(),
+        span,
+        target.to_string(),
+    )?;
     Ok(ctor(Call {
         target: name.to_string(),
         args,
@@ -1118,57 +1217,82 @@ where
     }))
 }
 
-fn lift_binop(span: SourceSpan, op: BinOp, stack: &mut SymbolicStack) -> Stmt {
-    stack.ensure_depth(2);
+fn lift_binop(
+    inst: &Instruction,
+    span: SourceSpan,
+    op: BinOp,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Stmt> {
+    stack.require_depth(2, span, inst.to_string())?;
     let b = stack.pop_entry();
     let a = stack.pop_entry();
     let dest = stack.push_fresh_with_slot_like(a.slot_id, &a.var);
-    Stmt::Assign {
+    Ok(Stmt::Assign {
         span,
         dest,
         expr: Expr::Binary(op, Box::new(Expr::Var(a.var)), Box::new(Expr::Var(b.var))),
-    }
+    })
 }
 
-fn lift_binop_imm(span: SourceSpan, op: BinOp, imm: &ImmFelt, stack: &mut SymbolicStack) -> Stmt {
-    stack.ensure_depth(1);
+fn lift_binop_imm(
+    inst: &Instruction,
+    span: SourceSpan,
+    op: BinOp,
+    imm: &ImmFelt,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Stmt> {
+    stack.require_depth(1, span, inst.to_string())?;
     let a = stack.pop_entry();
     let dest = stack.push_fresh_with_slot_like(a.slot_id, &a.var);
     let rhs: Expr = imm.into();
-    Stmt::Assign {
+    Ok(Stmt::Assign {
         span,
         dest,
         expr: Expr::Binary(op, Box::new(Expr::Var(a.var)), Box::new(rhs)),
-    }
+    })
 }
 
-fn lift_unop(span: SourceSpan, op: UnOp, stack: &mut SymbolicStack) -> Stmt {
-    stack.ensure_depth(1);
+fn lift_unop(
+    inst: &Instruction,
+    span: SourceSpan,
+    op: UnOp,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Stmt> {
+    stack.require_depth(1, span, inst.to_string())?;
     let a = stack.pop_entry();
     let dest = stack.push_fresh_with_slot_like(a.slot_id, &a.var);
-    Stmt::Assign {
+    Ok(Stmt::Assign {
         span,
         dest,
         expr: Expr::Unary(op, Box::new(Expr::Var(a.var))),
-    }
+    })
 }
 
-fn lift_non_consuming_unop(span: SourceSpan, op: UnOp, stack: &mut SymbolicStack) -> Stmt {
-    stack.ensure_depth(1);
+fn lift_non_consuming_unop(
+    inst: &Instruction,
+    span: SourceSpan,
+    op: UnOp,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Stmt> {
+    stack.require_depth(1, span, inst.to_string())?;
     let a = stack.peek(0).cloned().expect("non-consuming unary stack");
     let dest = stack.push_fresh();
-    Stmt::Assign {
+    Ok(Stmt::Assign {
         span,
         dest,
         expr: Expr::Unary(op, Box::new(Expr::Var(a))),
-    }
+    })
 }
 
-fn lift_incr(span: SourceSpan, stack: &mut SymbolicStack) -> Stmt {
-    stack.ensure_depth(1);
+fn lift_incr(
+    inst: &Instruction,
+    span: SourceSpan,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Stmt> {
+    stack.require_depth(1, span, inst.to_string())?;
     let a = stack.pop_entry();
     let dest = stack.push_fresh_with_slot_like(a.slot_id, &a.var);
-    Stmt::Assign {
+    Ok(Stmt::Assign {
         span,
         dest,
         expr: Expr::Binary(
@@ -1176,47 +1300,58 @@ fn lift_incr(span: SourceSpan, stack: &mut SymbolicStack) -> Stmt {
             Box::new(Expr::Var(a.var)),
             Box::new(Expr::Constant(Constant::Felt(1))),
         ),
-    }
+    })
 }
 
 fn lift_binop_u32_imm(
+    inst: &Instruction,
     span: SourceSpan,
     op: BinOp,
     imm: &ImmU32,
     stack: &mut SymbolicStack,
-) -> Stmt {
-    stack.ensure_depth(1);
+) -> LiftingResult<Stmt> {
+    stack.require_depth(1, span, inst.to_string())?;
     let a = stack.pop_entry();
     let dest = stack.push_fresh_with_slot_like(a.slot_id, &a.var);
     let rhs: Expr = imm.into();
-    Stmt::Assign {
+    Ok(Stmt::Assign {
         span,
         dest,
         expr: Expr::Binary(op, Box::new(Expr::Var(a.var)), Box::new(rhs)),
-    }
+    })
 }
 
-fn lift_binop_u8_imm(span: SourceSpan, op: BinOp, imm: &ImmU8, stack: &mut SymbolicStack) -> Stmt {
-    stack.ensure_depth(1);
+fn lift_binop_u8_imm(
+    inst: &Instruction,
+    span: SourceSpan,
+    op: BinOp,
+    imm: &ImmU8,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Stmt> {
+    stack.require_depth(1, span, inst.to_string())?;
     let a = stack.pop_entry();
     let dest = stack.push_fresh_with_slot_like(a.slot_id, &a.var);
     let rhs: Expr = imm.into();
-    Stmt::Assign {
+    Ok(Stmt::Assign {
         span,
         dest,
         expr: Expr::Binary(op, Box::new(Expr::Var(a.var)), Box::new(rhs)),
-    }
+    })
 }
 
 /// Lift the `cdrop` instruction into a ternary expression assignment.
 /// Lift the `cdrop` instruction into a ternary expression assignment.
-fn lift_cdrop(span: SourceSpan, stack: &mut SymbolicStack) -> Stmt {
-    stack.ensure_depth(3);
+fn lift_cdrop(
+    span: SourceSpan,
+    operation: impl Into<String>,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Stmt> {
+    stack.require_depth(3, span, operation)?;
     let cond = stack.pop_entry();
     let b = stack.pop_entry();
     let a = stack.pop_entry();
     let dest = stack.push_fresh_with_slot_like(a.slot_id, &a.var);
-    Stmt::Assign {
+    Ok(Stmt::Assign {
         span,
         dest,
         expr: Expr::Ternary {
@@ -1224,12 +1359,16 @@ fn lift_cdrop(span: SourceSpan, stack: &mut SymbolicStack) -> Stmt {
             then_expr: Box::new(Expr::Var(b.var)),
             else_expr: Box::new(Expr::Var(a.var)),
         },
-    }
+    })
 }
 
 /// Lift the `eqw` instruction into a word-equality assignment.
-fn lift_eqw(span: SourceSpan, stack: &mut SymbolicStack) -> Stmt {
-    stack.ensure_depth(8);
+fn lift_eqw(
+    span: SourceSpan,
+    operation: impl Into<String>,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Stmt> {
+    stack.require_depth(8, span, operation)?;
     let lhs = [
         stack.peek(0).cloned().expect("eqw stack"),
         stack.peek(1).cloned().expect("eqw stack"),
@@ -1243,16 +1382,20 @@ fn lift_eqw(span: SourceSpan, stack: &mut SymbolicStack) -> Stmt {
         stack.peek(7).cloned().expect("eqw stack"),
     ];
     let dest = stack.push_fresh();
-    Stmt::Assign {
+    Ok(Stmt::Assign {
         span,
         dest,
         expr: Expr::EqW { lhs, rhs },
-    }
+    })
 }
 
 /// Lift the `cswap` instruction into two ternary expression assignments.
-fn lift_cswap(span: SourceSpan, stack: &mut SymbolicStack) -> Vec<Stmt> {
-    stack.ensure_depth(3);
+fn lift_cswap(
+    span: SourceSpan,
+    operation: impl Into<String>,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Vec<Stmt>> {
+    stack.require_depth(3, span, operation)?;
     let cond = stack.pop_entry();
     let b = stack.pop_entry();
     let a = stack.pop_entry();
@@ -1278,23 +1421,27 @@ fn lift_cswap(span: SourceSpan, stack: &mut SymbolicStack) -> Vec<Stmt> {
             else_expr: Box::new(Expr::Var(b.var)),
         },
     };
-    vec![first, second]
+    Ok(vec![first, second])
 }
 
 /// Lift the `u32split` instruction into an intrinsic assignment.
-fn lift_u32split(span: SourceSpan, stack: &mut SymbolicStack) -> Stmt {
-    stack.ensure_depth(1);
+fn lift_u32split(
+    span: SourceSpan,
+    operation: impl Into<String>,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Stmt> {
+    stack.require_depth(1, span, operation)?;
     let a = stack.pop_entry();
     let lo = stack.push_fresh_with_slot_like(a.slot_id, &a.var);
     let hi = stack.push_fresh();
-    Stmt::Intrinsic {
+    Ok(Stmt::Intrinsic {
         span,
         intrinsic: Intrinsic {
             name: "u32split".to_string(),
             args: vec![a.var],
             results: vec![lo, hi],
         },
-    }
+    })
 }
 
 fn lift_padw(span: SourceSpan, stack: &mut SymbolicStack) -> Vec<Stmt> {
@@ -1316,7 +1463,7 @@ fn lift_dup(
     stack: &mut SymbolicStack,
 ) -> LiftingResult<Option<Vec<Stmt>>> {
     let required_depth = idx + 1;
-    stack.ensure_depth(required_depth);
+    stack.require_depth(required_depth, span, format!("dup.{idx}"))?;
     let src = stack.peek(idx).cloned().unwrap();
     let dest = stack.push_fresh();
     Ok(Some(vec![Stmt::Assign {
@@ -1332,7 +1479,7 @@ fn lift_dupw(
     stack: &mut SymbolicStack,
 ) -> LiftingResult<Option<Vec<Stmt>>> {
     let required_depth = (idx + 1) * 4;
-    stack.ensure_depth(required_depth);
+    stack.require_depth(required_depth, span, format!("dupw.{idx}"))?;
     let offset = idx * 4;
     let mut stmts = Vec::with_capacity(4);
     // Peek the word (4 elements starting at offset from top).
@@ -1460,7 +1607,8 @@ mod tests {
         stack.ensure_depth(1);
         let input = stack.peek(0).cloned().expect("input var");
 
-        let stmt = lift_u32split(SourceSpan::UNKNOWN, &mut stack);
+        let stmt = lift_u32split(SourceSpan::UNKNOWN, "u32split", &mut stack)
+            .expect("u32split should lift");
         let (lo, hi) = match stmt {
             Stmt::Intrinsic {
                 intrinsic:
@@ -1492,7 +1640,13 @@ mod tests {
         stack.ensure_depth(1);
         let input = stack.peek(0).cloned().expect("input var");
 
-        let stmt = lift_non_consuming_unop(SourceSpan::UNKNOWN, UnOp::U32Test, &mut stack);
+        let stmt = lift_non_consuming_unop(
+            &Instruction::U32Test,
+            SourceSpan::UNKNOWN,
+            UnOp::U32Test,
+            &mut stack,
+        )
+        .expect("u32test should lift");
         let result = match stmt {
             Stmt::Assign {
                 expr: Expr::Unary(UnOp::U32Test, inner),
@@ -1520,7 +1674,8 @@ mod tests {
         let b = stack.peek(1).cloned().expect("b");
         let a = stack.peek(2).cloned().expect("a");
 
-        let stmts = lift_cswap(SourceSpan::UNKNOWN, &mut stack);
+        let stmts =
+            lift_cswap(SourceSpan::UNKNOWN, "cswap", &mut stack).expect("cswap should lift");
         assert_eq!(stmts.len(), 2);
 
         let (d, first_expr) = match &stmts[0] {
@@ -1571,7 +1726,7 @@ mod tests {
         stack.ensure_depth(8);
         let before = stack.top_n(8);
 
-        let stmt = lift_eqw(SourceSpan::UNKNOWN, &mut stack);
+        let stmt = lift_eqw(SourceSpan::UNKNOWN, "eqw", &mut stack).expect("eqw should lift");
         let (dest, lhs, rhs) = match stmt {
             Stmt::Assign {
                 dest,

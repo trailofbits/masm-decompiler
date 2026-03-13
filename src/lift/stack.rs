@@ -7,7 +7,11 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
+use miden_assembly_syntax::debuginfo::SourceSpan;
+
 use crate::ir::{ValueId, Var, VarBase};
+
+use super::{LiftingError, LiftingResult};
 
 /// Generator for unique SSA value identifiers.
 #[derive(Debug, Clone)]
@@ -329,6 +333,25 @@ impl SymbolicStack {
         inputs
     }
 
+    /// Require the stack to have at least the given depth without synthesizing inputs.
+    pub fn require_depth(
+        &self,
+        required_depth: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
+        let actual_depth = self.stack.len();
+        if actual_depth < required_depth {
+            return Err(LiftingError::InsufficientStackDepth {
+                span,
+                operation: operation.into(),
+                required_depth,
+                actual_depth,
+            });
+        }
+        Ok(())
+    }
+
     /// Apply a stack effect: pop `pops` values, push `pushes` new variables.
     ///
     /// The `required_depth` is ensured before popping. Returns the popped
@@ -372,66 +395,140 @@ impl SymbolicStack {
         (popped, pushed)
     }
 
+    /// Apply a stack effect without synthesizing inputs.
+    pub fn apply_checked(
+        &mut self,
+        pops: usize,
+        pushes: usize,
+        required_depth: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<(Vec<Var>, Vec<Var>)> {
+        self.require_depth(required_depth, span, operation)?;
+
+        let popped_entries = self.pop_n_entries(pops);
+        let popped = popped_entries
+            .iter()
+            .map(|entry| entry.var.clone())
+            .collect::<Vec<_>>();
+        let reuse_slots = popped_entries
+            .iter()
+            .rev()
+            .map(|entry| entry.slot_id)
+            .collect::<Vec<_>>();
+
+        let mut pushed = Vec::with_capacity(pushes);
+        let reuse_count = reuse_slots.len().min(pushes);
+        for idx in 0..pushes {
+            let depth = self.stack.len();
+            let var = self.fresh_var(depth);
+            let slot_id = if idx < reuse_count {
+                reuse_slots[idx]
+            } else {
+                self.slots.next()
+            };
+            self.register_value_slot(&var, slot_id);
+            self.stack.push_back(StackEntry::new(var.clone(), slot_id));
+            pushed.push(var);
+        }
+
+        Ok((popped, pushed))
+    }
+
+    /// Get the top n variables without removing them, failing on underflow.
+    pub fn top_n_checked(
+        &self,
+        n: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<Vec<Var>> {
+        self.require_depth(n, span, operation)?;
+        Ok(self.top_n(n))
+    }
+
     /// Swap the top element with the element at the given depth.
-    pub fn swap(&mut self, depth: usize) {
-        self.ensure_depth(depth + 1);
+    pub fn swap(
+        &mut self,
+        depth: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
+        self.require_depth(depth + 1, span, operation)?;
         let len = self.stack.len();
         if depth > 0 && depth < len {
             let top_idx = len - 1;
             let other_idx = len - 1 - depth;
             self.stack.swap(top_idx, other_idx);
         }
+        Ok(())
     }
 
     /// Swap the top word (4 elements) with the nth word below it.
     ///
     /// The word index is 1-based: swapw(1) swaps the top word with the next word.
-    pub fn swapw(&mut self, word_index: usize) {
+    pub fn swapw(
+        &mut self,
+        word_index: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
         if word_index == 0 {
-            return;
+            return Ok(());
         }
-        self.ensure_depth((word_index + 1) * 4);
+        self.require_depth((word_index + 1) * 4, span, operation)?;
         let len = self.stack.len();
         let offset = word_index.saturating_mul(4);
         if offset + 4 > len {
-            return;
+            return Ok(());
         }
         for i in 0..4 {
             let top_idx = len - 1 - i;
             let other_idx = len - 1 - offset - i;
             self.stack.swap(top_idx, other_idx);
         }
+        Ok(())
     }
 
     /// Reverse the order of the top 4 stack elements (word).
-    pub fn reversew(&mut self) {
-        self.ensure_depth(4);
+    pub fn reversew(
+        &mut self,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
+        self.require_depth(4, span, operation)?;
         let len = self.stack.len();
         if len < 4 {
-            return;
+            return Ok(());
         }
         self.stack.swap(len - 4, len - 1);
         self.stack.swap(len - 3, len - 2);
+        Ok(())
     }
 
     /// Swap the first two words with the next two words.
     ///
     /// This models `swapdw`, which transforms `[D, C, B, A, ...]` into
     /// `[B, A, D, C, ...]`.
-    pub fn swapdw(&mut self) {
-        self.ensure_depth(16);
+    pub fn swapdw(&mut self, span: SourceSpan, operation: impl Into<String>) -> LiftingResult<()> {
+        self.require_depth(16, span, operation)?;
         let len = self.stack.len();
         if len < 16 {
-            return;
+            return Ok(());
         }
         for i in 0..8 {
             self.stack.swap(len - 16 + i, len - 8 + i);
         }
+        Ok(())
     }
 
     /// Move the element at the given depth to the top.
-    pub fn movup(&mut self, depth: usize) {
-        self.ensure_depth(depth + 1);
+    pub fn movup(
+        &mut self,
+        depth: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
+        self.require_depth(depth + 1, span, operation)?;
         let len = self.stack.len();
         if depth > 0 && depth < len {
             let idx = len - 1 - depth;
@@ -439,20 +536,26 @@ impl SymbolicStack {
                 self.stack.push_back(entry);
             }
         }
+        Ok(())
     }
 
     /// Move the word at the given 1-based word depth to the top word.
     ///
     /// Valid indices in MASM are 2 and 3 (matching `movupw.2`/`movupw.3`).
-    pub fn movupw(&mut self, word_index: usize) {
+    pub fn movupw(
+        &mut self,
+        word_index: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
         if word_index < 1 {
-            return;
+            return Ok(());
         }
-        self.ensure_depth((word_index + 1) * 4);
+        self.require_depth((word_index + 1) * 4, span, operation)?;
         let len = self.stack.len();
         let offset = word_index.saturating_mul(4);
         if offset + 4 > len {
-            return;
+            return Ok(());
         }
         let start = len - offset - 4;
         let mut moved = Vec::with_capacity(4);
@@ -464,11 +567,17 @@ impl SymbolicStack {
         for entry in moved {
             self.stack.push_back(entry);
         }
+        Ok(())
     }
 
     /// Move the top element down to the given depth.
-    pub fn movdn(&mut self, depth: usize) {
-        self.ensure_depth(depth + 1);
+    pub fn movdn(
+        &mut self,
+        depth: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
+        self.require_depth(depth + 1, span, operation)?;
         let len = self.stack.len();
         if depth > 0
             && depth < len
@@ -477,25 +586,32 @@ impl SymbolicStack {
             let idx = len - 1 - depth;
             self.stack.insert(idx, entry);
         }
+        Ok(())
     }
 
     /// Move the top word down to the given 2-indexed word position.
     ///
     /// Valid indices in MASM are 2 and 3 (matching `movdnw.2`/`movdnw.3`).
-    pub fn movdnw(&mut self, word_index: usize) {
-        self.ensure_depth((word_index + 1) * 4);
+    pub fn movdnw(
+        &mut self,
+        word_index: usize,
+        span: SourceSpan,
+        operation: impl Into<String>,
+    ) -> LiftingResult<()> {
+        self.require_depth((word_index + 1) * 4, span, operation)?;
         match word_index {
             2 => {
-                self.swapw(2);
-                self.swapw(1);
+                self.swapw(2, span, "movdnw.2")?;
+                self.swapw(1, span, "movdnw.2")?;
             }
             3 => {
-                self.swapw(3);
-                self.swapw(2);
-                self.swapw(1);
+                self.swapw(3, span, "movdnw.3")?;
+                self.swapw(2, span, "movdnw.3")?;
+                self.swapw(1, span, "movdnw.3")?;
             }
             _ => {}
         }
+        Ok(())
     }
 
     /// Get an iterator over the stack from bottom to top.
@@ -566,7 +682,9 @@ mod tests {
         let mut stack = SymbolicStack::new();
         stack.push(Var::new(ValueId::from(0), 0));
         stack.push(Var::new(ValueId::from(1), 1));
-        stack.swap(1);
+        stack
+            .swap(1, SourceSpan::UNKNOWN, "swap.1")
+            .expect("swap should succeed");
         assert_eq!(stack.peek(0).unwrap().stack_depth, 0);
         assert_eq!(stack.peek(1).unwrap().stack_depth, 1);
     }
@@ -584,7 +702,9 @@ mod tests {
             stack.peek(11).cloned().expect("word bottom element"),
         ];
 
-        stack.movupw(2);
+        stack
+            .movupw(2, SourceSpan::UNKNOWN, "movupw.2")
+            .expect("movupw.2 should succeed");
         let top_after = stack.top_n(4);
         assert_eq!(top_after, moved_before);
         assert_ne!(top_after, top_before);
@@ -596,7 +716,9 @@ mod tests {
         stack.ensure_depth(16);
 
         let before_top = stack.top_n(16);
-        stack.swapdw();
+        stack
+            .swapdw(SourceSpan::UNKNOWN, "swapdw")
+            .expect("swapdw should succeed");
         let after_top = stack.top_n(16);
 
         let expected = before_top
@@ -614,7 +736,9 @@ mod tests {
         stack.ensure_depth(12);
 
         let before = stack.top_n(12);
-        stack.movdnw(2);
+        stack
+            .movdnw(2, SourceSpan::UNKNOWN, "movdnw.2")
+            .expect("movdnw.2 should succeed");
         let after = stack.top_n(12);
 
         let expected = before[4..12]
@@ -631,7 +755,9 @@ mod tests {
         stack.ensure_depth(16);
 
         let before = stack.top_n(16);
-        stack.movdnw(3);
+        stack
+            .movdnw(3, SourceSpan::UNKNOWN, "movdnw.3")
+            .expect("movdnw.3 should succeed");
         let after = stack.top_n(16);
 
         let expected = before[4..16]
@@ -652,7 +778,9 @@ mod tests {
         let bottom_slot = before[0].slot_id;
         let top_slot = before[1].slot_id;
 
-        stack.swap(1);
+        stack
+            .swap(1, SourceSpan::UNKNOWN, "swap.1")
+            .expect("swap should succeed");
         let after = stack.to_entries();
         assert_eq!(after[0].slot_id, top_slot);
         assert_eq!(after[1].slot_id, bottom_slot);
