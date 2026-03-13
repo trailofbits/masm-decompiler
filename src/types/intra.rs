@@ -260,6 +260,8 @@ impl<'a> ProcTypeAnalyzer<'a> {
     fn intrinsic_result_type(&self, name: &str) -> InferredType {
         if name.starts_with("u32") {
             InferredType::U32
+        } else if name == "sdepth" {
+            InferredType::U32
         } else if name.starts_with("locaddr.") {
             InferredType::Address
         } else {
@@ -325,9 +327,13 @@ impl<'a> ProcTypeAnalyzer<'a> {
     fn infer_unary_expr_type(&self, op: UnOp, _inner: &Expr) -> InferredType {
         match op {
             UnOp::Not => InferredType::Bool,
-            UnOp::U32Cast | UnOp::U32Clz | UnOp::U32Ctz | UnOp::U32Clo | UnOp::U32Cto => {
-                InferredType::U32
-            }
+            UnOp::U32Test => InferredType::Bool,
+            UnOp::U32Cast
+            | UnOp::U32Not
+            | UnOp::U32Clz
+            | UnOp::U32Ctz
+            | UnOp::U32Clo
+            | UnOp::U32Cto => InferredType::U32,
             UnOp::Neg | UnOp::Inv | UnOp::Pow2 => InferredType::Felt,
         }
     }
@@ -353,6 +359,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
             | BinOp::U32Xor
             | BinOp::U32Shl
             | BinOp::U32Shr
+            | BinOp::U32Rotr
             | BinOp::U32WrappingAdd
             | BinOp::U32WrappingSub
             | BinOp::U32WrappingMul => InferredType::U32,
@@ -479,8 +486,8 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 let mut changed = self.seed_requirements_in_expr(inner);
                 match op {
                     UnOp::Not => changed |= self.require_bool_expr(inner),
-                    UnOp::U32Cast => {}
-                    UnOp::U32Clz | UnOp::U32Ctz | UnOp::U32Clo | UnOp::U32Cto => {
+                    UnOp::U32Cast | UnOp::U32Test => {}
+                    UnOp::U32Not | UnOp::U32Clz | UnOp::U32Ctz | UnOp::U32Clo | UnOp::U32Cto => {
                         changed |= self.require_u32_expr_if_not_guaranteed(inner);
                     }
                     UnOp::Neg | UnOp::Inv | UnOp::Pow2 => {
@@ -498,6 +505,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     | BinOp::U32Xor
                     | BinOp::U32Shl
                     | BinOp::U32Shr
+                    | BinOp::U32Rotr
                     | BinOp::U32Lt
                     | BinOp::U32Lte
                     | BinOp::U32Gt

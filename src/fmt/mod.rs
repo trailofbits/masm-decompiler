@@ -1128,6 +1128,8 @@ fn fmt_expr(f: &CodeWriter, expr: &Expr, parent_prec: u8) -> String {
                     expr_str
                 }
             }
+            UnOp::U32Test => format!("is_u32({})", fmt_expr(f, inner, 0)),
+            UnOp::U32Not => format!("not_u32({})", fmt_expr(f, inner, 0)),
             UnOp::U32Clz => format!("clz_u32({})", fmt_expr(f, inner, 0)),
             UnOp::U32Ctz => format!("ctz_u32({})", fmt_expr(f, inner, 0)),
             UnOp::U32Clo => format!("clo_u32({})", fmt_expr(f, inner, 0)),
@@ -1160,6 +1162,14 @@ fn fmt_expr(f: &CodeWriter, expr: &Expr, parent_prec: u8) -> String {
             }
         }
         Expr::Binary(op, a, b) => {
+            if matches!(op, BinOp::U32Rotr) {
+                let expr_str = format!("rotr_u32({}, {})", fmt_expr(f, a, 0), fmt_expr(f, b, 0));
+                return if 0 < parent_prec {
+                    format!("({expr_str})")
+                } else {
+                    expr_str
+                };
+            }
             let (prec, sym) = match op {
                 BinOp::Mul | BinOp::Div => (
                     10,
@@ -1197,6 +1207,7 @@ fn fmt_expr(f: &CodeWriter, expr: &Expr, parent_prec: u8) -> String {
                 BinOp::U32WrappingAdd => (9, "+_u32"),
                 BinOp::U32WrappingSub => (9, "-_u32"),
                 BinOp::U32Exp => (11, "^_u32"),
+                BinOp::U32Rotr => unreachable!("handled as function-style formatting above"),
             };
             let lhs = fmt_expr(f, a, prec);
             let rhs = fmt_expr(f, b, prec + 1);

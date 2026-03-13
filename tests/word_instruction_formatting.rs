@@ -67,6 +67,13 @@ fn formats_u32wrapping_add3_intrinsic() {
 }
 
 #[test]
+fn formats_u32widening_add3_intrinsic() {
+    let source = include_str!("fixtures/word_mem_stack_ops.masm");
+    let formatted = format_proc(source, "uses_u32widening_add3");
+    assert!(formatted.contains("u32widening_add3("), "{formatted}");
+}
+
+#[test]
 fn formats_u32shift_ops_with_infix_u32_operators() {
     let source = include_str!("fixtures/word_mem_stack_ops.masm");
 
@@ -77,6 +84,50 @@ fn formats_u32shift_ops_with_infix_u32_operators() {
     let binary_fmt = format_proc(source, "uses_u32shift_binary");
     assert!(binary_fmt.contains(">>_u32"), "{binary_fmt}");
     assert!(binary_fmt.contains("<<_u32"), "{binary_fmt}");
+}
+
+#[test]
+fn formats_u32rotr_u32test_and_u32not_with_readable_forms() {
+    let source = include_str!("fixtures/word_mem_stack_ops.masm");
+
+    let rotr_imm_fmt = format_proc(source, "uses_u32rotr_imm");
+    assert!(rotr_imm_fmt.contains("rotr_u32("), "{rotr_imm_fmt}");
+
+    let rotr_binary_fmt = format_proc(source, "uses_u32rotr_binary");
+    assert!(rotr_binary_fmt.contains("rotr_u32("), "{rotr_binary_fmt}");
+
+    let test_fmt = format_proc(source, "uses_u32test");
+    assert!(test_fmt.contains("is_u32("), "{test_fmt}");
+
+    let not_fmt = format_proc(source, "uses_u32not");
+    assert!(not_fmt.contains("not_u32("), "{not_fmt}");
+}
+
+#[test]
+fn formats_u32widening_add_and_mod_as_intrinsics() {
+    let source = include_str!("fixtures/word_mem_stack_ops.masm");
+
+    let widening_fmt = format_proc(source, "uses_u32widening_add");
+    assert!(widening_fmt.contains("u32widening_add("), "{widening_fmt}");
+
+    let mod_fmt = format_proc(source, "uses_u32mod_imm");
+    assert!(mod_fmt.contains("u32mod.8("), "{mod_fmt}");
+}
+
+#[test]
+fn formats_sdepth_and_decompiles_movdnw() {
+    let source = include_str!("fixtures/word_mem_stack_ops.masm");
+
+    let sdepth_fmt = format_proc(source, "uses_sdepth");
+    assert!(sdepth_fmt.contains("sdepth()"), "{sdepth_fmt}");
+
+    let movdnw2_fmt = format_proc(source, "uses_movdnw2");
+    assert!(movdnw2_fmt.contains("return"), "{movdnw2_fmt}");
+    assert!(!movdnw2_fmt.contains("movdnw"), "{movdnw2_fmt}");
+
+    let movdnw3_fmt = format_proc(source, "uses_movdnw3");
+    assert!(movdnw3_fmt.contains("return"), "{movdnw3_fmt}");
+    assert!(!movdnw3_fmt.contains("movdnw"), "{movdnw3_fmt}");
 }
 
 #[test]

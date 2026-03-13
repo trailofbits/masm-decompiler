@@ -111,8 +111,12 @@ fn infers_word_memory_and_stack_op_signatures() {
         "word_mem_stack_ops::uses_swapdw",
         "word_mem_stack_ops::uses_locaddr",
         "word_mem_stack_ops::uses_u32wrapping_add3",
+        "word_mem_stack_ops::uses_u32widening_add3",
         "word_mem_stack_ops::uses_u32shift_imm",
         "word_mem_stack_ops::uses_u32shift_binary",
+        "word_mem_stack_ops::uses_sdepth",
+        "word_mem_stack_ops::uses_movdnw2",
+        "word_mem_stack_ops::uses_movdnw3",
     ] {
         let sig = sigs
             .get(proc_name)

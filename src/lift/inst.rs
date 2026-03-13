@@ -146,8 +146,10 @@ fn lift_u32_inst(
         Instruction::U32Xor => lift_binop(span, BinOp::U32Xor, stack),
         Instruction::U32Shl => lift_binop(span, BinOp::U32Shl, stack),
         Instruction::U32Shr => lift_binop(span, BinOp::U32Shr, stack),
+        Instruction::U32Rotr => lift_binop(span, BinOp::U32Rotr, stack),
         Instruction::U32ShlImm(imm) => lift_binop_u8_imm(span, BinOp::U32Shl, imm, stack),
         Instruction::U32ShrImm(imm) => lift_binop_u8_imm(span, BinOp::U32Shr, imm, stack),
+        Instruction::U32RotrImm(imm) => lift_binop_u8_imm(span, BinOp::U32Rotr, imm, stack),
         Instruction::U32Lt => lift_binop(span, BinOp::U32Lt, stack),
         Instruction::U32Lte => lift_binop(span, BinOp::U32Lte, stack),
         Instruction::U32Gt => lift_binop(span, BinOp::U32Gt, stack),
@@ -165,10 +167,32 @@ fn lift_u32_inst(
             lift_binop_u32_imm(span, BinOp::U32WrappingMul, imm, stack)
         }
         Instruction::U32Cast => lift_unop(span, UnOp::U32Cast, stack),
+        Instruction::U32Test => {
+            return Ok(Some(vec![lift_non_consuming_unop(
+                span,
+                UnOp::U32Test,
+                stack,
+            )]));
+        }
+        Instruction::U32Not => lift_unop(span, UnOp::U32Not, stack),
         Instruction::U32Clz => lift_unop(span, UnOp::U32Clz, stack),
         Instruction::U32Ctz => lift_unop(span, UnOp::U32Ctz, stack),
         Instruction::U32Clo => lift_unop(span, UnOp::U32Clo, stack),
         Instruction::U32Cto => lift_unop(span, UnOp::U32Cto, stack),
+        Instruction::U32WideningAdd => {
+            return lift_u32_intrinsic(inst, span, "u32widening_add", resolver, sigs, stack);
+        }
+        Instruction::U32WideningAddImm(imm) => {
+            return lift_u32_intrinsic_imm(
+                inst,
+                span,
+                "u32widening_add",
+                imm,
+                resolver,
+                sigs,
+                stack,
+            );
+        }
         Instruction::U32OverflowingAdd => {
             return lift_u32_intrinsic(inst, span, "u32overflowing_add", resolver, sigs, stack);
         }
@@ -185,6 +209,9 @@ fn lift_u32_inst(
         }
         Instruction::U32OverflowingAdd3 => {
             return lift_u32_intrinsic(inst, span, "u32overflowing_add3", resolver, sigs, stack);
+        }
+        Instruction::U32WideningAdd3 => {
+            return lift_u32_intrinsic(inst, span, "u32widening_add3", resolver, sigs, stack);
         }
         Instruction::U32WrappingAdd3 => {
             return lift_u32_intrinsic(inst, span, "u32wrapping_add3", resolver, sigs, stack);
@@ -225,6 +252,12 @@ fn lift_u32_inst(
         }
         Instruction::U32DivModImm(imm) => {
             return lift_u32_intrinsic_imm(inst, span, "u32divmod", imm, resolver, sigs, stack);
+        }
+        Instruction::U32Mod => {
+            return lift_u32_intrinsic(inst, span, "u32mod", resolver, sigs, stack);
+        }
+        Instruction::U32ModImm(imm) => {
+            return lift_u32_intrinsic_imm(inst, span, "u32mod", imm, resolver, sigs, stack);
         }
         Instruction::U32Split => {
             return Ok(Some(vec![lift_u32split(span, stack)]));
@@ -272,10 +305,12 @@ fn lift_stack_inst(
 ) -> LiftingResult<Option<Vec<Stmt>>> {
     match inst {
         Instruction::Drop => {
+            stack.ensure_depth(1);
             stack.pop();
             Ok(Some(Vec::new()))
         }
         Instruction::DropW => {
+            stack.ensure_depth(4);
             for _ in 0..4 {
                 stack.pop();
             }
@@ -486,6 +521,14 @@ fn lift_stack_inst(
         }
         Instruction::MovDn12 => {
             stack.movdn(12);
+            Ok(Some(Vec::new()))
+        }
+        Instruction::MovDnW2 => {
+            stack.movdnw(2);
+            Ok(Some(Vec::new()))
+        }
+        Instruction::MovDnW3 => {
+            stack.movdnw(3);
             Ok(Some(Vec::new()))
         }
         Instruction::MovDn13 => {
@@ -984,6 +1027,7 @@ fn lift_intrinsic_inst(
         Instruction::MTreeVerifyWithError(err) => format!("mtree_verify.{err}"),
         Instruction::Emit => "emit".to_string(),
         Instruction::EmitImm(imm) => format!("emit.{imm}"),
+        Instruction::Sdepth => "sdepth".to_string(),
         Instruction::Trace(kind) => format!("trace_{kind}"),
         _ => return Ok(None),
     };
@@ -1104,6 +1148,17 @@ fn lift_unop(span: SourceSpan, op: UnOp, stack: &mut SymbolicStack) -> Stmt {
         span,
         dest,
         expr: Expr::Unary(op, Box::new(Expr::Var(a.var))),
+    }
+}
+
+fn lift_non_consuming_unop(span: SourceSpan, op: UnOp, stack: &mut SymbolicStack) -> Stmt {
+    stack.ensure_depth(1);
+    let a = stack.peek(0).cloned().expect("non-consuming unary stack");
+    let dest = stack.push_fresh();
+    Stmt::Assign {
+        span,
+        dest,
+        expr: Expr::Unary(op, Box::new(Expr::Var(a))),
     }
 }
 
@@ -1426,6 +1481,32 @@ mod tests {
         assert_eq!(top.len(), 2);
         assert_eq!(top[0], hi);
         assert_eq!(top[1], lo);
+    }
+
+    /// Ensure u32test preserves the tested value and pushes a boolean result on top.
+    #[test]
+    fn test_lift_u32test_order() {
+        let mut stack = SymbolicStack::new();
+        stack.ensure_depth(1);
+        let input = stack.peek(0).cloned().expect("input var");
+
+        let stmt = lift_non_consuming_unop(SourceSpan::UNKNOWN, UnOp::U32Test, &mut stack);
+        let result = match stmt {
+            Stmt::Assign {
+                expr: Expr::Unary(UnOp::U32Test, inner),
+                dest,
+                ..
+            } => {
+                assert_eq!(*inner, Expr::Var(input.clone()));
+                dest
+            }
+            _ => panic!("expected u32test assignment"),
+        };
+
+        let top = stack.top_n(2);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0], result);
+        assert_eq!(top[1], input);
     }
 
     /// Ensure cswap emits two ternary assignments and preserves stack order.

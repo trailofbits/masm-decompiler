@@ -215,6 +215,44 @@ fn setup_decompiler() -> Decompiler<'static> {
             u32cast
         end
 
+        pub proc test_only
+            u32test
+            drop
+        end
+
+        pub proc test_outputs
+            u32test
+        end
+
+        pub proc not_only
+            u32not
+        end
+
+        pub proc rotr_only
+            push.1
+            u32rotr
+        end
+
+        pub proc widening_add_only
+            push.1
+            u32widening_add
+        end
+
+        pub proc widening_add3_only
+            push.1
+            push.2
+            u32widening_add3
+        end
+
+        pub proc mod_only
+            push.8
+            u32mod
+        end
+
+        pub proc sdepth_only
+            sdepth
+        end
+
         pub proc cast_then_add
             u32cast
             push.1
@@ -241,6 +279,14 @@ fn setup_decompiler() -> Decompiler<'static> {
             push.1.1
             eq
             u32cast
+            drop
+        end
+
+        pub proc bool_to_u32test
+            push.1.1
+            eq
+            u32test
+            drop
             drop
         end
         "#,
@@ -543,6 +589,16 @@ fn u32_assert_split_and_cast_do_not_seed_u32_input_requirements() {
         .expect("cast_only summary");
     assert_eq!(cast_only.inputs, vec![TypeRequirement::Unknown]);
     assert_eq!(cast_only.outputs, vec![InferredType::U32]);
+
+    let test_only = summaries
+        .get(&SymbolPath::new("typecheck::test_only"))
+        .expect("test_only summary");
+    assert_eq!(test_only.inputs, vec![TypeRequirement::Unknown]);
+
+    let test_outputs = summaries
+        .get(&SymbolPath::new("typecheck::test_outputs"))
+        .expect("test_outputs summary");
+    assert_eq!(test_outputs.outputs, vec![InferredType::Bool]);
 }
 
 #[test]
@@ -572,6 +628,54 @@ fn u32_postconditions_discharge_downstream_u32_requirements() {
 }
 
 #[test]
+fn u32_not_rotr_widening_add_and_mod_infer_u32_types() {
+    let decompiler = setup_decompiler();
+    let summaries = decompiler.type_summaries();
+
+    let not_only = summaries
+        .get(&SymbolPath::new("typecheck::not_only"))
+        .expect("not_only summary");
+    assert_eq!(not_only.inputs, vec![TypeRequirement::U32]);
+    assert_eq!(not_only.outputs, vec![InferredType::U32]);
+
+    let rotr_only = summaries
+        .get(&SymbolPath::new("typecheck::rotr_only"))
+        .expect("rotr_only summary");
+    assert_eq!(rotr_only.inputs, vec![TypeRequirement::U32]);
+    assert_eq!(rotr_only.outputs, vec![InferredType::U32]);
+
+    let widening_add_only = summaries
+        .get(&SymbolPath::new("typecheck::widening_add_only"))
+        .expect("widening_add_only summary");
+    assert_eq!(widening_add_only.inputs, vec![TypeRequirement::U32]);
+    assert_eq!(
+        widening_add_only.outputs,
+        vec![InferredType::U32, InferredType::U32]
+    );
+
+    let widening_add3_only = summaries
+        .get(&SymbolPath::new("typecheck::widening_add3_only"))
+        .expect("widening_add3_only summary");
+    assert_eq!(widening_add3_only.inputs, vec![TypeRequirement::U32]);
+    assert_eq!(
+        widening_add3_only.outputs,
+        vec![InferredType::U32, InferredType::U32]
+    );
+
+    let mod_only = summaries
+        .get(&SymbolPath::new("typecheck::mod_only"))
+        .expect("mod_only summary");
+    assert_eq!(mod_only.inputs, vec![TypeRequirement::U32]);
+    assert_eq!(mod_only.outputs, vec![InferredType::U32]);
+
+    let sdepth_only = summaries
+        .get(&SymbolPath::new("typecheck::sdepth_only"))
+        .expect("sdepth_only summary");
+    assert_eq!(sdepth_only.inputs, vec![]);
+    assert_eq!(sdepth_only.outputs, vec![InferredType::U32]);
+}
+
+#[test]
 fn u32_assert_split_and_cast_skip_argument_mismatch_diagnostics() {
     let decompiler = setup_decompiler();
 
@@ -591,5 +695,11 @@ fn u32_assert_split_and_cast_skip_argument_mismatch_diagnostics() {
     assert!(
         cast_diags.is_empty(),
         "u32cast should not require U32 input, got: {cast_diags:?}"
+    );
+
+    let test_diags = diagnostics_for(&decompiler, "typecheck::bool_to_u32test");
+    assert!(
+        test_diags.is_empty(),
+        "u32test should not require U32 input, got: {test_diags:?}"
     );
 }

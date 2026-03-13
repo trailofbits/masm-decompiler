@@ -208,6 +208,7 @@ pub enum BinOp {
     U32Xor,
     U32Shl,
     U32Shr,
+    U32Rotr,
     U32Lt,
     U32Lte,
     U32Gt,
@@ -230,6 +231,10 @@ pub enum UnOp {
     Inv,
     /// Cast to a 32-bit unsigned value (`x mod 2^32`).
     U32Cast,
+    /// Test whether the value is representable as a 32-bit unsigned integer.
+    U32Test,
+    /// Bitwise NOT on a 32-bit unsigned value.
+    U32Not,
     /// Count leading zeros in a 32-bit word.
     U32Clz,
     /// Count trailing zeros in a 32-bit word.

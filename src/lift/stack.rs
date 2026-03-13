@@ -374,6 +374,7 @@ impl SymbolicStack {
 
     /// Swap the top element with the element at the given depth.
     pub fn swap(&mut self, depth: usize) {
+        self.ensure_depth(depth + 1);
         let len = self.stack.len();
         if depth > 0 && depth < len {
             let top_idx = len - 1;
@@ -389,6 +390,7 @@ impl SymbolicStack {
         if word_index == 0 {
             return;
         }
+        self.ensure_depth((word_index + 1) * 4);
         let len = self.stack.len();
         let offset = word_index.saturating_mul(4);
         if offset + 4 > len {
@@ -403,6 +405,7 @@ impl SymbolicStack {
 
     /// Reverse the order of the top 4 stack elements (word).
     pub fn reversew(&mut self) {
+        self.ensure_depth(4);
         let len = self.stack.len();
         if len < 4 {
             return;
@@ -416,6 +419,7 @@ impl SymbolicStack {
     /// This models `swapdw`, which transforms `[D, C, B, A, ...]` into
     /// `[B, A, D, C, ...]`.
     pub fn swapdw(&mut self) {
+        self.ensure_depth(16);
         let len = self.stack.len();
         if len < 16 {
             return;
@@ -427,6 +431,7 @@ impl SymbolicStack {
 
     /// Move the element at the given depth to the top.
     pub fn movup(&mut self, depth: usize) {
+        self.ensure_depth(depth + 1);
         let len = self.stack.len();
         if depth > 0 && depth < len {
             let idx = len - 1 - depth;
@@ -443,6 +448,7 @@ impl SymbolicStack {
         if word_index < 1 {
             return;
         }
+        self.ensure_depth((word_index + 1) * 4);
         let len = self.stack.len();
         let offset = word_index.saturating_mul(4);
         if offset + 4 > len {
@@ -462,6 +468,7 @@ impl SymbolicStack {
 
     /// Move the top element down to the given depth.
     pub fn movdn(&mut self, depth: usize) {
+        self.ensure_depth(depth + 1);
         let len = self.stack.len();
         if depth > 0
             && depth < len
@@ -469,6 +476,25 @@ impl SymbolicStack {
         {
             let idx = len - 1 - depth;
             self.stack.insert(idx, entry);
+        }
+    }
+
+    /// Move the top word down to the given 2-indexed word position.
+    ///
+    /// Valid indices in MASM are 2 and 3 (matching `movdnw.2`/`movdnw.3`).
+    pub fn movdnw(&mut self, word_index: usize) {
+        self.ensure_depth((word_index + 1) * 4);
+        match word_index {
+            2 => {
+                self.swapw(2);
+                self.swapw(1);
+            }
+            3 => {
+                self.swapw(3);
+                self.swapw(2);
+                self.swapw(1);
+            }
+            _ => {}
         }
     }
 
@@ -580,6 +606,40 @@ mod tests {
             .chain(before_top.iter().take(8).cloned())
             .collect::<Vec<_>>();
         assert_eq!(after_top, expected);
+    }
+
+    #[test]
+    fn test_movdnw_two() {
+        let mut stack = SymbolicStack::new();
+        stack.ensure_depth(12);
+
+        let before = stack.top_n(12);
+        stack.movdnw(2);
+        let after = stack.top_n(12);
+
+        let expected = before[4..12]
+            .iter()
+            .cloned()
+            .chain(before[0..4].iter().cloned())
+            .collect::<Vec<_>>();
+        assert_eq!(after, expected);
+    }
+
+    #[test]
+    fn test_movdnw_three() {
+        let mut stack = SymbolicStack::new();
+        stack.ensure_depth(16);
+
+        let before = stack.top_n(16);
+        stack.movdnw(3);
+        let after = stack.top_n(16);
+
+        let expected = before[4..16]
+            .iter()
+            .cloned()
+            .chain(before[0..4].iter().cloned())
+            .collect::<Vec<_>>();
+        assert_eq!(after, expected);
     }
 
     #[test]

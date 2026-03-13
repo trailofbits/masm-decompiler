@@ -293,11 +293,14 @@ impl From<&Instruction> for StackEffect {
             // Remaining U32 operations
             U32OverflowingAdd => StackEffect::known(2, 2),
             U32OverflowingAddImm(_) => StackEffect::known(1, 2),
+            U32WideningAdd => StackEffect::known(2, 2),
+            U32WideningAddImm(_) => StackEffect::known(1, 2),
             U32OverflowingSub => StackEffect::known(2, 2),
             U32OverflowingSubImm(_) => StackEffect::known(1, 2),
             U32WideningMul => StackEffect::known(2, 2),
             U32WideningMulImm(_) => StackEffect::known(1, 2),
             U32WideningMadd => StackEffect::known(3, 2),
+            U32WideningAdd3 => StackEffect::known(3, 2),
             U32OverflowingAdd3 => StackEffect::known(3, 2),
             U32WrappingAdd3 => StackEffect::known(3, 1),
             U32WrappingMadd => StackEffect::known(3, 1),
@@ -363,7 +366,7 @@ impl From<&Instruction> for StackEffect {
 
             MemStream => StackEffect::known(13, 13).with_required_depth(13),
 
-            Push(_) | Locaddr(_) => StackEffect::known(0, 1),
+            Push(_) | Locaddr(_) | Sdepth => StackEffect::known(0, 1),
             PushSlice(_, range) => StackEffect::known(0, range.len()),
             PushFeltList(values) => StackEffect::known(0, values.len()),
 
@@ -412,6 +415,22 @@ mod tests {
         assert_eq!(
             StackEffect::from(&Instruction::U32AssertW),
             StackEffect::known(0, 0).with_required_depth(4)
+        );
+    }
+
+    #[test]
+    fn u32widening_add_pushes_sum_and_carry() {
+        assert_eq!(
+            StackEffect::from(&Instruction::U32WideningAdd),
+            StackEffect::known(2, 2)
+        );
+    }
+
+    #[test]
+    fn u32widening_add3_pushes_sum_and_carry() {
+        assert_eq!(
+            StackEffect::from(&Instruction::U32WideningAdd3),
+            StackEffect::known(3, 2)
         );
     }
 

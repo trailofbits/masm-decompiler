@@ -86,6 +86,11 @@ proc uses_u32wrapping_add3
     u32wrapping_add3
 end
 
+proc uses_u32widening_add3
+    push.1.2.3
+    u32widening_add3
+end
+
 proc uses_u32shift_imm
     push.2147483648
     u32shr.31
@@ -97,6 +102,50 @@ proc uses_u32shift_binary
     u32shl
     push.1
     u32shr
+end
+
+proc uses_u32rotr_imm
+    push.8
+    u32rotr.2
+end
+
+proc uses_u32rotr_binary
+    push.8.2
+    u32rotr
+end
+
+proc uses_u32test
+    push.1
+    u32test
+end
+
+proc uses_u32not
+    push.1
+    u32not
+end
+
+proc uses_u32widening_add
+    push.1.2
+    u32widening_add
+end
+
+proc uses_u32mod_imm
+    push.17
+    u32mod.8
+end
+
+proc uses_sdepth
+    sdepth
+end
+
+proc uses_movdnw2
+    push.1.2.3.4.5.6.7.8.9.10.11.12
+    movdnw.2
+end
+
+proc uses_movdnw3
+    push.1.2.3.4.5.6.7.8.9.10.11.12.13.14.15.16
+    movdnw.3
 end
 
 proc uses_exp_u32
