@@ -212,7 +212,7 @@ fn lift_op(
         } => lift_if(op_span, then_blk, else_blk, stack, loop_ctx, resolver, sigs),
         Op::Repeat { count, body, .. } => lift_repeat(
             op_span,
-            *count as usize,
+            count.expect_value() as usize,
             body,
             stack,
             loop_ctx,
@@ -1325,7 +1325,7 @@ fn simulate_op_slots(
             Ok(())
         }
         Op::Repeat { count, body, .. } => {
-            for _ in 0..*count {
+            for _ in 0..count.expect_value() {
                 simulate_block_slots(body, stack, resolver, sigs)?;
             }
             Ok(())
@@ -1755,7 +1755,7 @@ fn simulate_op_tags(
             Ok(())
         }
         Op::Repeat { count, body, .. } => {
-            for _ in 0..*count {
+            for _ in 0..count.expect_value() {
                 simulate_block_tags(body, stack, resolver, sigs)?;
             }
             Ok(())

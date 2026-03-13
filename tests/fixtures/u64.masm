@@ -87,14 +87,14 @@ end
 pub proc wrapping_mul(b: u64, a: u64) -> u64
     dup.3
     dup.2
-    u32overflowing_mul
+    u32widening_mul
     movup.4
     movup.4
-    u32overflowing_madd
+    u32widening_madd
     drop
     movup.3
     movup.3
-    u32overflowing_madd
+    u32widening_madd
     drop
 end
 
@@ -106,17 +106,17 @@ end
 pub proc overflowing_mul(b: u64, a: u64) -> (i1, u64)
     dup.3
     dup.2
-    u32overflowing_mul
+    u32widening_mul
     dup.4
     movup.4
-    u32overflowing_madd
+    u32widening_madd
     swap
     movup.5
     dup.4
-    u32overflowing_madd
+    u32widening_madd
     movup.5
     movup.5
-    u32overflowing_madd
+    u32widening_madd
     movup.3
     movup.2
     u32overflowing_add
@@ -273,15 +273,15 @@ pub proc div(b: u64, a: u64) -> u64
 
     dup.3               # multiply quotient by the divisor and make sure the resulting value
     dup.2               # fits into 2 32-bit limbs
-    u32overflowing_mul
+    u32widening_mul
     dup.4
     dup.4
-    u32overflowing_madd
+    u32widening_madd
     eq.0
     assert
     dup.5
     dup.3
-    u32overflowing_madd
+    u32widening_madd
     eq.0
     assert
     dup.4
@@ -330,15 +330,15 @@ pub proc mod(b: u64, a: u64) -> u64
 
     dup.3               # multiply quotient by the divisor and make sure the resulting value
     dup.2               # fits into 2 32-bit limbs
-    u32overflowing_mul
+    u32widening_mul
     dup.4
     movup.4
-    u32overflowing_madd
+    u32widening_madd
     eq.0
     assert
     dup.4
     dup.3
-    u32overflowing_madd
+    u32widening_madd
     eq.0
     assert
     dup.3
@@ -387,15 +387,15 @@ pub proc divmod(b: u64, a: u64) -> (remainder: u64, quotient: u64)
 
     dup.3               # multiply quotient by the divisor and make sure the resulting value
     dup.2               # fits into 2 32-bit limbs
-    u32overflowing_mul
+    u32widening_mul
     dup.4
     dup.4
-    u32overflowing_madd
+    u32widening_madd
     eq.0
     assert
     dup.5
     dup.3
-    u32overflowing_madd
+    u32widening_madd
     eq.0
     assert
     dup.4
@@ -547,12 +547,12 @@ pub proc rotl(b: u64, a: u64) -> u64
     pow2
     dup
     movup.3
-    u32overflowing_mul
+    u32widening_mul
 
     # Shift the high limb.
     movup.3
     movup.3
-    u32overflowing_madd
+    u32widening_madd
 
     # Carry the overflow shift to the low bits.
     movup.2

@@ -280,7 +280,7 @@ impl std::fmt::Display for DecompiledProc {
 /// Result of decompiling a module (collection of procedures).
 #[derive(Debug, Clone)]
 pub struct DecompiledModule {
-    /// Module path (e.g., "std::math").
+    /// Module path (e.g., "miden::core::math").
     pub module_path: String,
     /// Decompiled procedures in this module.
     pub procedures: Vec<DecompiledProc>,

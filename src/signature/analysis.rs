@@ -90,7 +90,9 @@ impl<'a> Analysis<'a> {
             Op::If {
                 then_blk, else_blk, ..
             } => self.visit_if(then_blk, else_blk, stack),
-            Op::Repeat { count, body, .. } => self.visit_repeat(*count as usize, body, stack),
+            Op::Repeat { count, body, .. } => {
+                self.visit_repeat(count.expect_value() as usize, body, stack)
+            }
             Op::While { body, .. } => self.visit_while(body, stack),
         }
     }

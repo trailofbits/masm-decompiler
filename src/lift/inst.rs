@@ -203,22 +203,22 @@ fn lift_u32_inst(
                 stack,
             );
         }
-        Instruction::U32OverflowingMul => {
-            return lift_u32_intrinsic(inst, span, "u32overflowing_mul", resolver, sigs, stack);
+        Instruction::U32WideningMul => {
+            return lift_u32_intrinsic(inst, span, "u32widening_mul", resolver, sigs, stack);
         }
-        Instruction::U32OverflowingMulImm(imm) => {
+        Instruction::U32WideningMulImm(imm) => {
             return lift_u32_intrinsic_imm(
                 inst,
                 span,
-                "u32overflowing_mul",
+                "u32widening_mul",
                 imm,
                 resolver,
                 sigs,
                 stack,
             );
         }
-        Instruction::U32OverflowingMadd => {
-            return lift_u32_intrinsic(inst, span, "u32overflowing_madd", resolver, sigs, stack);
+        Instruction::U32WideningMadd => {
+            return lift_u32_intrinsic(inst, span, "u32widening_madd", resolver, sigs, stack);
         }
         Instruction::U32DivMod => {
             return lift_u32_intrinsic(inst, span, "u32divmod", resolver, sigs, stack);

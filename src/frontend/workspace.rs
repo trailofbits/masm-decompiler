@@ -97,7 +97,7 @@ impl Workspace {
         self.collect_unloaded_dependency_modules()
     }
 
-    /// Load a module by its absolute MASM path (e.g., `std::math::u64`) if it exists on disk.
+    /// Load a module by its absolute MASM path (e.g., `miden::core::math::u64`) if it exists on disk.
     /// Returns `None` if no matching file could be found.
     pub fn load_module_by_path(&mut self, module_path: &str) -> Option<usize> {
         let key = SymbolPath::new(module_path);
@@ -202,22 +202,11 @@ fn as_str(path: &MasmPathBuf) -> &str {
 /// Given a fully-qualified module path and library roots, locate the corresponding file on disk.
 /// Tries `<root>/<components>.masm` and `<root>/<components>/<name>/mod.masm`.
 pub fn find_module_file(module_path: &str, roots: &[LibraryRoot]) -> Option<FsPathBuf> {
-    let comps: Vec<&str> = module_path.split("::").filter(|c| !c.is_empty()).collect();
-    if comps.is_empty() {
-        return None;
-    }
     for root in roots {
-        let (ns_match, rest) = if !root.namespace.is_empty() {
-            if comps.first()? != &root.namespace {
-                continue;
-            }
-            (true, &comps[1..])
-        } else {
-            (true, comps.as_slice())
-        };
-        if !ns_match {
+        let Some(relative) = root.module_relative_path(module_path) else {
             continue;
-        }
+        };
+        let rest: Vec<&str> = relative.split("::").filter(|c| !c.is_empty()).collect();
         if rest.is_empty() {
             continue;
         }
@@ -271,6 +260,12 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use super::*;
     use crate::frontend::testing::workspace_from_modules;
 
@@ -280,7 +275,7 @@ mod tests {
         let ws = workspace_from_modules(&[(
             "entry",
             r#"
-            use std::stark::random_coin
+            use miden::core::stark::random_coin
 
             proc caller
                 exec.random_coin::reseed
@@ -290,7 +285,7 @@ mod tests {
 
         assert_eq!(
             ws.unresolved_module_paths(),
-            vec![SymbolPath::new("std::stark::random_coin")]
+            vec![SymbolPath::new("miden::core::stark::random_coin")]
         );
     }
 
@@ -301,7 +296,7 @@ mod tests {
             (
                 "entry",
                 r#"
-                use std::stark::random_coin
+                use miden::core::stark::random_coin
 
                 proc caller
                     exec.random_coin::reseed
@@ -309,7 +304,7 @@ mod tests {
                 "#,
             ),
             (
-                "std::stark::random_coin",
+                "miden::core::stark::random_coin",
                 r#"
                 proc reseed
                     drop
@@ -340,5 +335,39 @@ mod tests {
             .expect("constant should be indexed");
         assert_eq!(program.module_path().to_string(), "entry");
         assert_eq!(constant.name().as_str(), "FOO");
+    }
+
+    /// Ensure `find_module_file` honors multi-segment library namespace prefixes.
+    #[test]
+    fn find_module_file_supports_multi_segment_library_namespaces() {
+        let root_path = unique_temp_dir("find-module-file");
+        let module_dir = root_path.join(PathBuf::from("stark"));
+        fs::create_dir_all(&module_dir).expect("create module dir");
+        let module_file = module_dir.join("random_coin.masm");
+        fs::write(&module_file, "proc reseed\n    dropw\nend\n").expect("write module");
+
+        let roots = vec![LibraryRoot::new("miden::core", root_path.clone())];
+        assert_eq!(
+            find_module_file("miden::core::stark::random_coin", &roots),
+            Some(module_file)
+        );
+        assert_eq!(
+            find_module_file("miden::corex::stark::random_coin", &roots),
+            None
+        );
+
+        fs::remove_dir_all(root_path).expect("remove temp dir");
+    }
+
+    /// Create a unique temporary directory path for a test case.
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "masm-decompiler-{prefix}-{}-{unique}",
+            std::process::id()
+        ))
     }
 }

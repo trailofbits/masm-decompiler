@@ -6,6 +6,7 @@ use log::{error, info, warn};
 use masm_decompiler::{
     decompile::{DecompilationConfig, Decompiler},
     frontend::{LibraryRoot, Workspace},
+    symbol::path::SymbolPath,
 };
 
 #[derive(Parser, Debug)]
@@ -34,7 +35,7 @@ struct Cli {
     #[arg(long)]
     no_simplification: bool,
 
-    /// Register an additional library root: <namespace>:<path>
+    /// Register an additional library root: <namespace>=<path>
     #[arg(long = "library", value_parser = parse_library_spec)]
     libraries: Vec<LibraryRoot>,
 
@@ -119,8 +120,11 @@ fn run(cli: Cli) -> Result<(), String> {
 
 fn parse_library_spec(spec: &str) -> Result<LibraryRoot, String> {
     let (ns, path) = spec
-        .split_once(':')
-        .ok_or_else(|| "library spec must be <namespace>:<path>".to_string())?;
+        .split_once('=')
+        .ok_or_else(|| "library spec must be <namespace>=<path>".to_string())?;
+    if ns.is_empty() {
+        return Err("library namespace cannot be empty".to_string());
+    }
     if path.is_empty() {
         return Err("library path cannot be empty".to_string());
     }
@@ -166,13 +170,6 @@ fn emit_unresolved_dependency_warnings(workspace: &Workspace) {
         unresolved.len()
     );
 
-    let configured_namespaces = workspace
-        .roots()
-        .iter()
-        .filter(|root| !root.namespace.is_empty())
-        .map(|root| root.namespace.as_str())
-        .collect::<HashSet<_>>();
-
     let rendered_roots = workspace
         .roots()
         .iter()
@@ -181,32 +178,81 @@ fn emit_unresolved_dependency_warnings(workspace: &Workspace) {
         .join(", ");
     warn!("Configured library roots: {rendered_roots}");
 
-    let mut seen_namespaces = HashSet::new();
+    let mut seen_configured_namespaces = HashSet::new();
+    let mut seen_unconfigured_modules = HashSet::new();
     for module in unresolved {
-        let Some(namespace) = module.segments().next() else {
-            continue;
-        };
-        if !seen_namespaces.insert(namespace.to_string()) {
-            continue;
-        }
-
-        if configured_namespaces.contains(namespace) {
+        if let Some(namespace) = configured_namespace_for_module(&module, workspace.roots()) {
+            if !seen_configured_namespaces.insert(namespace.to_string()) {
+                continue;
+            }
             warn!(
                 "Namespace `{namespace}` is configured, but some referenced modules were not found under its roots"
             );
         } else {
+            if !seen_unconfigured_modules.insert(module.as_str().to_string()) {
+                continue;
+            }
             warn!(
-                "No library root configured for namespace `{namespace}`. Add `--library {namespace}:<path>`"
+                "No library root configured for referenced module `{module}`. Add `--library <namespace>=<path>` using the exact MASM path prefix for that module tree"
             );
         }
     }
 }
 
+/// Return the longest configured namespace that matches `module`.
+fn configured_namespace_for_module<'a>(
+    module: &SymbolPath,
+    roots: &'a [LibraryRoot],
+) -> Option<&'a str> {
+    roots
+        .iter()
+        .filter(|root| !root.namespace.is_empty())
+        .filter(|root| root.matches_module_path(module.as_str()))
+        .map(|root| root.namespace.as_str())
+        .max_by_key(|namespace| namespace.len())
+}
+
 /// Render a library root for diagnostics.
 fn format_library_root(root: &LibraryRoot) -> String {
     if root.namespace.is_empty() {
-        format!("<default>:{}", root.path.display())
+        format!("<default>={}", root.path.display())
     } else {
-        format!("{}:{}", root.namespace, root.path.display())
+        format!("{}={}", root.namespace, root.path.display())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ensure CLI parsing accepts multi-segment namespaces with `=` separators.
+    #[test]
+    fn parse_library_spec_supports_multi_segment_namespaces() {
+        let root = parse_library_spec("miden::core=../path/to/miden/core").expect("library root");
+        assert_eq!(root.namespace, "miden::core");
+        assert_eq!(root.path, PathBuf::from("../path/to/miden/core"));
+    }
+
+    /// Ensure legacy `:` separators are rejected because they are ambiguous with `::`.
+    #[test]
+    fn parse_library_spec_rejects_colon_separator() {
+        let err = parse_library_spec("miden::core:../path/to/miden/core")
+            .expect_err("legacy separator should be rejected");
+        assert_eq!(err, "library spec must be <namespace>=<path>");
+    }
+
+    /// Ensure diagnostics prefer the longest configured namespace prefix.
+    #[test]
+    fn configured_namespace_for_module_prefers_longest_match() {
+        let roots = vec![
+            LibraryRoot::new("miden", PathBuf::from("/tmp/miden")),
+            LibraryRoot::new("miden::core", PathBuf::from("/tmp/miden-core")),
+        ];
+        let module = SymbolPath::new("miden::core::stark::random_coin");
+
+        assert_eq!(
+            configured_namespace_for_module(&module, &roots),
+            Some("miden::core")
+        );
     }
 }

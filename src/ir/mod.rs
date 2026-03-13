@@ -292,7 +292,7 @@ impl Constant {
 impl From<miden_assembly_syntax::ast::ImmFelt> for Constant {
     fn from(imm: miden_assembly_syntax::ast::ImmFelt) -> Self {
         match imm {
-            Immediate::Value(span) => Constant::Felt(span.inner().as_int()),
+            Immediate::Value(span) => Constant::Felt(span.inner().as_canonical_u64()),
             Immediate::Constant(id) => Constant::Defined(id.to_string()),
         }
     }
@@ -305,13 +305,15 @@ impl From<PushValue> for Constant {
                 miden_assembly_syntax::parser::IntValue::U8(v) => Constant::Felt(v as u64),
                 miden_assembly_syntax::parser::IntValue::U16(v) => Constant::Felt(v as u64),
                 miden_assembly_syntax::parser::IntValue::U32(v) => Constant::Felt(v as u64),
-                miden_assembly_syntax::parser::IntValue::Felt(f) => Constant::Felt(f.as_int()),
+                miden_assembly_syntax::parser::IntValue::Felt(f) => {
+                    Constant::Felt(f.as_canonical_u64())
+                }
             },
             PushValue::Word(w) => Constant::Word([
-                w.0[0].as_int(),
-                w.0[1].as_int(),
-                w.0[2].as_int(),
-                w.0[3].as_int(),
+                w.0[0].as_canonical_u64(),
+                w.0[1].as_canonical_u64(),
+                w.0[2].as_canonical_u64(),
+                w.0[3].as_canonical_u64(),
             ]),
         }
     }
@@ -347,7 +349,9 @@ impl From<&Immediate<PushValue>> for Expr {
 impl From<&ImmFelt> for Expr {
     fn from(imm: &ImmFelt) -> Self {
         match imm {
-            Immediate::Value(span) => Expr::Constant(Constant::Felt(span.inner().as_int())),
+            Immediate::Value(span) => {
+                Expr::Constant(Constant::Felt(span.inner().as_canonical_u64()))
+            }
             Immediate::Constant(id) => Expr::Constant(Constant::Defined(id.to_string())),
         }
     }

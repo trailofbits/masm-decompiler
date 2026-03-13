@@ -41,22 +41,22 @@ impl SymbolPath {
 
     /// Get the last segment of the path (the symbol name).
     ///
-    /// For path `std::crypto::sha256::hash`, returns `"hash"`.
+    /// For path `miden::core::crypto::sha256::hash`, returns `"hash"`.
     pub fn name(&self) -> &str {
         self.0.rsplit("::").next().unwrap_or(&self.0)
     }
 
     /// Get the module path (everything before the last segment).
     ///
-    /// For path `std::crypto::sha256::hash`, returns `Some("std::crypto::sha256")`.
+    /// For path `miden::core::crypto::sha256::hash`, returns `Some("miden::core::crypto::sha256")`.
     pub fn module_path(&self) -> Option<&str> {
         self.0.rsplit_once("::").map(|(prefix, _)| prefix)
     }
 
     /// Iterate over path segments.
     ///
-    /// For path `std::crypto::sha256::hash`, yields `[
-    ///   "std", "crypto", "sha256", "hash"
+    /// For path `miden::core::crypto::sha256::hash`, yields `[
+    ///   "miden", "core", "crypto", "sha256", "hash"
     /// ]`.
     pub fn segments(&self) -> impl Iterator<Item = &str> {
         self.0.split("::").filter(|s| !s.is_empty())
@@ -116,26 +116,26 @@ mod tests {
 
     #[test]
     fn name_extraction() {
-        let path = SymbolPath::new("std::crypto::sha256::hash");
+        let path = SymbolPath::new("miden::core::crypto::sha256::hash");
         assert_eq!(path.name(), "hash");
     }
 
     #[test]
     fn module_path_extraction() {
-        let path = SymbolPath::new("std::crypto::sha256::hash");
-        assert_eq!(path.module_path(), Some("std::crypto::sha256"));
+        let path = SymbolPath::new("miden::core::crypto::sha256::hash");
+        assert_eq!(path.module_path(), Some("miden::core::crypto::sha256"));
     }
 
     #[test]
     fn segments_iter() {
-        let path = SymbolPath::new("std::crypto::sha256::hash");
+        let path = SymbolPath::new("miden::core::crypto::sha256::hash");
         let segments: Vec<_> = path.segments().collect();
-        assert_eq!(segments, vec!["std", "crypto", "sha256", "hash"]);
+        assert_eq!(segments, vec!["miden", "core", "crypto", "sha256", "hash"]);
     }
 
     #[test]
     fn ends_with_suffix() {
-        let path = SymbolPath::new("std::crypto::sha256::hash");
+        let path = SymbolPath::new("miden::core::crypto::sha256::hash");
         assert!(path.ends_with("hash"));
         assert!(path.ends_with("sha256::hash"));
         assert!(!path.ends_with("foo"));
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn normalize_leading_colons() {
-        let path = SymbolPath::new("::std::crypto::hash");
-        assert_eq!(path.as_str(), "std::crypto::hash");
+        let path = SymbolPath::new("::miden::core::crypto::hash");
+        assert_eq!(path.as_str(), "miden::core::crypto::hash");
     }
 }

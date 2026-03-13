@@ -233,7 +233,7 @@ fn repeat_strategy(max_count: usize, config: StrategyConfig) -> BoxedStrategy<(O
             block_with_effect_strategy(body_pops, body_pushes, config).prop_map(move |body| {
                 let op = Op::Repeat {
                     span: SourceSpan::default(),
-                    count: count as u32,
+                    count: (count as u32).into(),
                     body,
                 };
                 // Effect is body effect multiplied by count
@@ -395,7 +395,7 @@ pub fn compute_op_effect(op: &Op) -> StackEffect {
         Op::Repeat { count, body, .. } => {
             let body_effect = compute_block_effect(body);
             let mut total_effect = StackEffect::known(0, 0);
-            for _ in 0..*count {
+            for _ in 0..count.expect_value() {
                 total_effect = total_effect.then(body_effect);
             }
             total_effect

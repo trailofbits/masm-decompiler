@@ -13,7 +13,7 @@ mod workspace;
 pub use workspace::Workspace;
 pub mod testing;
 
-/// A library root maps a namespace (e.g. "std") to a filesystem directory.
+/// A library root maps a MASM path prefix (e.g. `miden::core`) to a filesystem directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryRoot {
     pub namespace: String,
@@ -21,11 +21,31 @@ pub struct LibraryRoot {
 }
 
 impl LibraryRoot {
+    /// Create a new library root mapping.
     pub fn new(namespace: impl Into<String>, path: FsPathBuf) -> Self {
         Self {
-            namespace: namespace.into(),
+            namespace: normalize_namespace(namespace.into()),
             path,
         }
+    }
+
+    /// Return true if `module_path` is equal to this root's namespace or nested beneath it.
+    pub fn matches_module_path(&self, module_path: &str) -> bool {
+        self.module_relative_path(module_path).is_some()
+    }
+
+    /// Strip this root's namespace prefix from a fully-qualified module path.
+    pub fn module_relative_path<'a>(&self, module_path: &'a str) -> Option<&'a str> {
+        let module_path = strip_leading_path_separators(module_path);
+        if self.namespace.is_empty() {
+            return Some(module_path);
+        }
+        if module_path == self.namespace {
+            return Some("");
+        }
+        module_path
+            .strip_prefix(&self.namespace)
+            .and_then(|rest| rest.strip_prefix("::"))
     }
 }
 
@@ -102,7 +122,7 @@ impl Program {
     }
 }
 
-/// Derive a MASM module path (e.g. `std::math::u64`) from a filesystem path and library roots.
+/// Derive a MASM module path (e.g. `miden::core::math::u64`) from a filesystem path and library roots.
 ///
 /// Roots are searched in order; the first that contains `file_path` is used. If no root matches,
 /// returns an error.
@@ -167,6 +187,19 @@ fn normalize_path_for_matching(path: &FsPath) -> Result<FsPathBuf, String> {
     Ok(cwd.join(path))
 }
 
+/// Normalize a MASM namespace prefix used by a library root.
+fn normalize_namespace(namespace: String) -> String {
+    strip_leading_path_separators(&namespace).to_string()
+}
+
+/// Strip leading absolute-path separators from a MASM path string.
+fn strip_leading_path_separators(mut path: &str) -> &str {
+    while let Some(stripped) = path.strip_prefix("::") {
+        path = stripped;
+    }
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +228,20 @@ mod tests {
             module_path.to_string(),
             "examples::stdlib::pcs::fri::helper"
         );
+    }
+
+    /// Ensure library roots treat namespaces as exact multi-segment prefixes.
+    #[test]
+    fn library_root_matches_multi_segment_prefixes_exactly() {
+        let root = LibraryRoot::new("miden::core", FsPathBuf::from("/tmp/miden-core"));
+
+        assert!(root.matches_module_path("miden::core::stark::random_coin"));
+        assert_eq!(
+            root.module_relative_path("miden::core::stark::random_coin"),
+            Some("stark::random_coin")
+        );
+        assert!(root.matches_module_path("::miden::core::stark::random_coin"));
+        assert!(!root.matches_module_path("miden::corex::stark::random_coin"));
+        assert!(!root.matches_module_path("miden"));
     }
 }

@@ -205,7 +205,7 @@ end
 
 proc mulstep
     movdn.2
-    u32overflowing_madd
+    u32widening_madd
     movdn.2
     u32overflowing_add
     movup.2

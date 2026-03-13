@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use masm_decompiler::{SymbolPath, frontend::testing::workspace_from_modules};
 
-/// Ensure unresolved dependency reporting captures missing `std` modules.
+/// Ensure unresolved dependency reporting captures missing `miden::core` modules.
 #[test]
 fn unresolved_module_paths_report_missing_import_modules() {
     let ws = workspace_from_modules(&[(
@@ -16,8 +16,8 @@ fn unresolved_module_paths_report_missing_import_modules() {
     assert_eq!(
         unresolved,
         HashSet::from([
-            SymbolPath::new("std::stark::constants"),
-            SymbolPath::new("std::stark::random_coin"),
+            SymbolPath::new("miden::core::stark::constants"),
+            SymbolPath::new("miden::core::stark::random_coin"),
         ])
     );
 }
@@ -31,7 +31,7 @@ fn unresolved_module_paths_empty_when_import_modules_are_loaded() {
             include_str!("fixtures/library_resolution.masm"),
         ),
         (
-            "std::stark::constants",
+            "miden::core::stark::constants",
             r#"
             proc get_lde_domain_info_word
                 push.0
@@ -39,7 +39,7 @@ fn unresolved_module_paths_empty_when_import_modules_are_loaded() {
             "#,
         ),
         (
-            "std::stark::random_coin",
+            "miden::core::stark::random_coin",
             r#"
             proc reseed
                 dropw

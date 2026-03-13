@@ -7,7 +7,7 @@ edition = "2024"
 clap = { version = "4.5", features = ["derive"] }
 log = "0.4"
 lovely_env_logger = "0.6"
-miden-assembly-syntax = { version = "0.20", default-features = false, features = ["std", "arbitrary"] }
+miden-assembly-syntax = { path = "../miden-vm/crates/assembly-syntax", default-features = false, features = ["std", "arbitrary"] }
 yansi = "1.0"
 
 [dev-dependencies]
