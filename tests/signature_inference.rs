@@ -117,6 +117,8 @@ fn infers_word_memory_and_stack_op_signatures() {
         "word_mem_stack_ops::uses_sdepth",
         "word_mem_stack_ops::uses_movdnw2",
         "word_mem_stack_ops::uses_movdnw3",
+        "word_mem_stack_ops::uses_horner_eval_base",
+        "word_mem_stack_ops::uses_horner_eval_ext",
     ] {
         let sig = sigs
             .get(proc_name)

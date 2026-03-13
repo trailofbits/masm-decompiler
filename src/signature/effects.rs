@@ -334,8 +334,8 @@ impl From<&Instruction> for StackEffect {
 
             // Polynomial/circuit operations
             EvalCircuit => StackEffect::known(0, 0).with_required_depth(3),
-            HornerBase => StackEffect::known(0, 0).with_required_depth(16),
-            HornerExt => StackEffect::known(0, 0).with_required_depth(16),
+            HornerBase => StackEffect::known(16, 16),
+            HornerExt => StackEffect::known(16, 16),
             LogPrecompile => StackEffect::known(12, 12).with_required_depth(12),
 
             // FRI folding
@@ -431,6 +431,18 @@ mod tests {
         assert_eq!(
             StackEffect::from(&Instruction::U32WideningAdd3),
             StackEffect::known(3, 2)
+        );
+    }
+
+    #[test]
+    fn horner_eval_clobbers_the_full_window() {
+        assert_eq!(
+            StackEffect::from(&Instruction::HornerBase),
+            StackEffect::known(16, 16)
+        );
+        assert_eq!(
+            StackEffect::from(&Instruction::HornerExt),
+            StackEffect::known(16, 16)
         );
     }
 

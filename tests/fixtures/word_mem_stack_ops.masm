@@ -148,6 +148,16 @@ proc uses_movdnw3
     movdnw.3
 end
 
+proc uses_horner_eval_base
+    push.1.2.3.4.5.6.7.8.9.10.11.12.13.14.15.16
+    horner_eval_base
+end
+
+proc uses_horner_eval_ext
+    push.1.2.3.4.5.6.7.8.9.10.11.12.13.14.15.16
+    horner_eval_ext
+end
+
 proc uses_exp_u32
     push.3.5
     exp.u32

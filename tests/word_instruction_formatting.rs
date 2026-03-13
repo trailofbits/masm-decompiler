@@ -131,6 +131,19 @@ fn formats_sdepth_and_decompiles_movdnw() {
 }
 
 #[test]
+fn formats_horner_eval_intrinsics() {
+    let source = include_str!("fixtures/word_mem_stack_ops.masm");
+
+    let base_fmt = format_proc(source, "uses_horner_eval_base");
+    assert!(base_fmt.contains("horner_eval_base("), "{base_fmt}");
+    assert!(base_fmt.contains(" = horner_eval_base("), "{base_fmt}");
+
+    let ext_fmt = format_proc(source, "uses_horner_eval_ext");
+    assert!(ext_fmt.contains("horner_eval_ext("), "{ext_fmt}");
+    assert!(ext_fmt.contains(" = horner_eval_ext("), "{ext_fmt}");
+}
+
+#[test]
 fn formats_u32_exp_with_infix_operator() {
     let source = include_str!("fixtures/word_mem_stack_ops.masm");
     let formatted = format_proc(source, "uses_exp_u32");

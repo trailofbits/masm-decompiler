@@ -1025,6 +1025,8 @@ fn lift_intrinsic_inst(
         Instruction::MTreeMerge => "mtree_merge".to_string(),
         Instruction::MTreeVerify => "mtree_verify".to_string(),
         Instruction::MTreeVerifyWithError(err) => format!("mtree_verify.{err}"),
+        Instruction::HornerBase => "horner_eval_base".to_string(),
+        Instruction::HornerExt => "horner_eval_ext".to_string(),
         Instruction::Emit => "emit".to_string(),
         Instruction::EmitImm(imm) => format!("emit.{imm}"),
         Instruction::Sdepth => "sdepth".to_string(),
