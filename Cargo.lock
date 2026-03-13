@@ -1016,7 +1016,7 @@ dependencies = [
 
 [[package]]
 name = "masm-decompiler"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "log",
@@ -1044,6 +1044,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 [[package]]
 name = "miden-assembly-syntax"
 version = "0.22.0"
+source = "git+https://github.com/0xMiden/miden-vm?rev=821990729b83112fafe6de38377d55323c2db9c5#821990729b83112fafe6de38377d55323c2db9c5"
 dependencies = [
  "aho-corasick",
  "lalrpop",
@@ -1065,6 +1066,7 @@ dependencies = [
 [[package]]
 name = "miden-core"
 version = "0.22.0"
+source = "git+https://github.com/0xMiden/miden-vm?rev=821990729b83112fafe6de38377d55323c2db9c5#821990729b83112fafe6de38377d55323c2db9c5"
 dependencies = [
  "derive_more",
  "itertools",
@@ -1136,6 +1138,7 @@ dependencies = [
 [[package]]
 name = "miden-debug-types"
 version = "0.22.0"
+source = "git+https://github.com/0xMiden/miden-vm?rev=821990729b83112fafe6de38377d55323c2db9c5#821990729b83112fafe6de38377d55323c2db9c5"
 dependencies = [
  "memchr",
  "miden-crypto",
@@ -1225,6 +1228,7 @@ dependencies = [
 [[package]]
 name = "miden-utils-core-derive"
 version = "0.22.0"
+source = "git+https://github.com/0xMiden/miden-vm?rev=821990729b83112fafe6de38377d55323c2db9c5#821990729b83112fafe6de38377d55323c2db9c5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1234,6 +1238,7 @@ dependencies = [
 [[package]]
 name = "miden-utils-diagnostics"
 version = "0.22.0"
+source = "git+https://github.com/0xMiden/miden-vm?rev=821990729b83112fafe6de38377d55323c2db9c5#821990729b83112fafe6de38377d55323c2db9c5"
 dependencies = [
  "miden-crypto",
  "miden-debug-types",
@@ -1245,6 +1250,7 @@ dependencies = [
 [[package]]
 name = "miden-utils-indexing"
 version = "0.22.0"
+source = "git+https://github.com/0xMiden/miden-vm?rev=821990729b83112fafe6de38377d55323c2db9c5#821990729b83112fafe6de38377d55323c2db9c5"
 dependencies = [
  "miden-crypto",
  "thiserror",
@@ -1253,6 +1259,7 @@ dependencies = [
 [[package]]
 name = "miden-utils-sync"
 version = "0.22.0"
+source = "git+https://github.com/0xMiden/miden-vm?rev=821990729b83112fafe6de38377d55323c2db9c5#821990729b83112fafe6de38377d55323c2db9c5"
 dependencies = [
  "lock_api",
  "loom",

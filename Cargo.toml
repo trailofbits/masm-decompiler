@@ -7,7 +7,7 @@ edition = "2024"
 clap = { version = "4.5", features = ["derive"] }
 log = "0.4"
 lovely_env_logger = "0.6"
-miden-assembly-syntax = { path = "../miden-vm/crates/assembly-syntax", default-features = false, features = [
+miden-assembly-syntax = { version = "=0.22.0", git = "https://github.com/0xMiden/miden-vm", rev = "821990729b83112fafe6de38377d55323c2db9c5", default-features = false, features = [
     "std",
     "arbitrary",
 ] }
