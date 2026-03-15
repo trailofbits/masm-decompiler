@@ -1,4 +1,5 @@
 use miden_assembly_syntax::ast::{Immediate, Instruction};
+use miden_assembly_syntax::parser::PushValue;
 
 /// Describes the local stack effect of a single instruction or operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,7 +367,11 @@ impl From<&Instruction> for StackEffect {
 
             MemStream => StackEffect::known(13, 13).with_required_depth(13),
 
-            Push(_) | Locaddr(_) | Sdepth => StackEffect::known(0, 1),
+            Push(Immediate::Value(spanned)) => match spanned.inner() {
+                PushValue::Word(_) => StackEffect::known(0, 4),
+                PushValue::Int(_) => StackEffect::known(0, 1),
+            },
+            Push(Immediate::Constant(_)) | Locaddr(_) | Sdepth => StackEffect::known(0, 1),
             PushSlice(_, range) => StackEffect::known(0, range.len()),
             PushFeltList(values) => StackEffect::known(0, values.len()),
 

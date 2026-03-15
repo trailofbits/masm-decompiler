@@ -1,0 +1,40 @@
+# ===== PUSH WORD TESTS ========================================================================
+#
+# The `push.[a, b, c, d]` instruction pushes a word (4 felt elements) onto the stack.
+# After execution, the stack contains [a, b, c, d, ...] with `a` at position 0 (top).
+#
+# This is semantically equivalent to `push.d.c.b.a` (dot-separated in reverse order),
+# since the dot notation pushes values left-to-right and the last value ends up on top.
+
+#! Pushes a word constant onto the stack and returns all four elements.
+#!
+#! Inputs:  []
+#! Outputs: [1, 2, 3, 4]
+#!
+proc push_word_identity
+    push.[1, 2, 3, 4]
+end
+
+#! Pushes a word constant and sums all four elements.
+#!
+#! Inputs:  []
+#! Outputs: [10]
+#!
+#! Equivalent to: push.4.3.2.1 add add add
+proc push_word_sum
+    push.[1, 2, 3, 4]
+    add
+    add
+    add
+end
+
+#! Uses a word push followed by an operation that consumes the top two elements.
+#! This verifies that the individual elements are accessible as separate stack entries.
+#!
+#! Inputs:  []
+#! Outputs: [3, 3, 4]
+#!
+proc push_word_partial_add
+    push.[1, 2, 3, 4]
+    add
+end

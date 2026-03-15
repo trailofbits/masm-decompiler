@@ -4,6 +4,7 @@ use miden_assembly_syntax::ast::{
     ImmFelt, ImmU8, ImmU32, Immediate, Instruction, InvocationTarget,
 };
 use miden_assembly_syntax::debuginfo::SourceSpan;
+use miden_assembly_syntax::parser::PushValue;
 
 use crate::ir::{
     AdvLoad, BinOp, Call, Constant, Expr, Intrinsic, LocalAccessKind, LocalLoad, LocalStore,
@@ -1145,11 +1146,31 @@ fn lift_push_inst(
     stack: &mut SymbolicStack,
 ) -> LiftingResult<Option<Vec<Stmt>>> {
     match inst {
-        Instruction::Push(imm) => {
-            let dest = stack.push_fresh();
-            let expr: Expr = imm.into();
-            Ok(Some(vec![Stmt::Assign { span, dest, expr }]))
-        }
+        Instruction::Push(imm) => match imm {
+            Immediate::Value(spanned) => match spanned.inner() {
+                PushValue::Word(word) => {
+                    let mut stmts = Vec::with_capacity(4);
+                    // Push elements in reverse so that word[0] ends up on top,
+                    // matching the Miden VM semantics for `push.[a, b, c, d]`.
+                    for i in (0..4).rev() {
+                        let dest = stack.push_fresh();
+                        let expr = Expr::Constant(Constant::Felt(word.0[i].as_canonical_u64()));
+                        stmts.push(Stmt::Assign { span, dest, expr });
+                    }
+                    Ok(Some(stmts))
+                }
+                PushValue::Int(_) => {
+                    let dest = stack.push_fresh();
+                    let expr: Expr = imm.into();
+                    Ok(Some(vec![Stmt::Assign { span, dest, expr }]))
+                }
+            },
+            Immediate::Constant(_) => {
+                let dest = stack.push_fresh();
+                let expr: Expr = imm.into();
+                Ok(Some(vec![Stmt::Assign { span, dest, expr }]))
+            }
+        },
         Instruction::Locaddr(index) => {
             let (_, pushed) = stack.apply_checked(0, 1, 0, span, "locaddr")?;
             Ok(Some(vec![Stmt::Intrinsic {
