@@ -204,3 +204,49 @@ fn formats_mem_stream_and_adv_pipe_intrinsics() {
     let adv_pipe_fmt = format_proc(source, "uses_adv_pipe");
     assert!(adv_pipe_fmt.contains("adv_pipe("), "{adv_pipe_fmt}");
 }
+
+#[test]
+fn parenthesizes_multi_output_intrinsics() {
+    let source = include_str!("fixtures/word_mem_stack_ops.masm");
+
+    // u32widening_add returns 2 values — outputs must be parenthesized.
+    let widening_fmt = format_proc(source, "uses_u32widening_add");
+    assert!(
+        widening_fmt.contains(") = u32widening_add("),
+        "multi-output intrinsic should parenthesize LHS: {widening_fmt}"
+    );
+
+    // u32wrapping_add3 returns 1 value — output must NOT be parenthesized.
+    let wrapping_fmt = format_proc(source, "uses_u32wrapping_add3");
+    assert!(
+        !wrapping_fmt.contains("(") || !wrapping_fmt.contains(") = u32wrapping_add3("),
+        "single-output intrinsic should not parenthesize LHS: {wrapping_fmt}"
+    );
+
+    // mem_stream returns 13 values — outputs must be parenthesized.
+    let mem_stream_fmt = format_proc(source, "uses_mem_stream");
+    assert!(
+        mem_stream_fmt.contains(") = mem_stream("),
+        "multi-output intrinsic should parenthesize LHS: {mem_stream_fmt}"
+    );
+}
+
+#[test]
+fn parenthesizes_multi_output_calls() {
+    let source = include_str!("fixtures/word_mem_stack_ops.masm");
+
+    // exec returning 2 values — outputs must be parenthesized.
+    let multi_fmt = format_proc(source, "uses_exec_multi_output");
+    assert!(
+        multi_fmt.contains(") = exec helper_two_outputs("),
+        "multi-output call should parenthesize LHS: {multi_fmt}"
+    );
+
+    // exec returning 1 value — output must NOT be parenthesized.
+    let single_fmt = format_proc(source, "uses_exec_single_output");
+    assert!(
+        single_fmt.contains(" = exec helper_one_output(")
+            && !single_fmt.contains(") = exec helper_one_output("),
+        "single-output call should not parenthesize LHS: {single_fmt}"
+    );
+}

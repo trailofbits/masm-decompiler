@@ -887,6 +887,8 @@ impl CodeDisplay for Stmt {
                     .join(", ");
                 if outs.is_empty() {
                     f.write_line(&format!("{}();", function_name("adv_load")));
+                } else if outputs.len() > 1 {
+                    f.write_line(&format!("({outs}) = {}();", function_name("adv_load")));
                 } else {
                     f.write_line(&format!("{outs} = {}();", function_name("adv_load")));
                 }
@@ -970,6 +972,8 @@ impl CodeDisplay for Stmt {
                     .join(", ");
                 if outs.is_empty() {
                     f.write_line(&format!("{}({args});", function_name("dyncall")));
+                } else if results.len() > 1 {
+                    f.write_line(&format!("({outs}) = {}({args});", function_name("dyncall")));
                 } else {
                     f.write_line(&format!("{outs} = {}({args});", function_name("dyncall")));
                 }
@@ -1006,6 +1010,8 @@ impl CodeDisplay for Stmt {
                 }
                 if outs.is_empty() {
                     f.write_line(&format!("{}({args});", function_name(name)));
+                } else if results.len() > 1 {
+                    f.write_line(&format!("({outs}) = {}({args});", function_name(name)));
                 } else {
                     f.write_line(&format!("{outs} = {}({args});", function_name(name)));
                 }
@@ -1292,6 +1298,8 @@ fn write_call_like(kind: &str, call: &Call, f: &mut CodeWriter) {
     let head = format!("{} {}", keyword(kind), function_name(&call.target));
     if outs.is_empty() {
         f.write_line(&format!("{head}({args});"));
+    } else if call.results.len() > 1 {
+        f.write_line(&format!("({outs}) = {head}({args});"));
     } else {
         f.write_line(&format!("{outs} = {head}({args});"));
     }

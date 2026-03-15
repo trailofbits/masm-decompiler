@@ -214,3 +214,23 @@ proc uses_adv_pipe
     push.0
     adv_pipe
 end
+
+#! Helper that returns two values.
+proc helper_two_outputs
+    push.1.2
+end
+
+#! Calls a helper that returns two values.
+proc uses_exec_multi_output
+    exec.helper_two_outputs
+end
+
+#! Helper that returns one value.
+proc helper_one_output
+    push.42
+end
+
+#! Calls a helper that returns one value.
+proc uses_exec_single_output
+    exec.helper_one_output
+end
