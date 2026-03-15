@@ -327,7 +327,7 @@ impl From<&Instruction> for StackEffect {
             Hash => StackEffect::known(4, 4),
             HMerge => StackEffect::known(8, 4),
             HPerm => StackEffect::known(12, 12),
-            MTreeGet => StackEffect::known(2, 4).with_required_depth(6),
+            MTreeGet => StackEffect::known(6, 8),
             MTreeSet => StackEffect::known(10, 8),
             MTreeMerge => StackEffect::known(8, 4),
             MTreeVerify => StackEffect::known(0, 0).with_required_depth(10),
