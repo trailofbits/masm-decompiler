@@ -82,7 +82,7 @@ inside the examples folder that import other modules from the Miden stdlib, use
 the following command:
 
 ```sh
-cargo run -- --no-color --library miden::core=examples/stdlib examples/stdlib/path/to/file.masm
+cargo run -- --no-color --library miden::core=examples/core examples/core/path/to/file.masm
 ```
 
 Finally, use the `--no-dce`, `--no-propagation`, and `--no-simplification` to

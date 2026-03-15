@@ -258,9 +258,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
 
     /// Infer result type for an intrinsic operation.
     fn intrinsic_result_type(&self, name: &str) -> InferredType {
-        if name.starts_with("u32") {
-            InferredType::U32
-        } else if name == "sdepth" {
+        if name.starts_with("u32") || name == "sdepth" {
             InferredType::U32
         } else if name.starts_with("locaddr.") {
             InferredType::Address
