@@ -1456,7 +1456,10 @@ fn lift_eqw(
     Ok(Stmt::Assign {
         span,
         dest,
-        expr: Expr::EqW { lhs, rhs },
+        expr: Expr::EqW {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        },
     })
 }
 
@@ -1899,7 +1902,7 @@ mod tests {
         };
 
         assert_eq!(
-            lhs,
+            *lhs,
             [
                 before[0].clone(),
                 before[1].clone(),
@@ -1908,7 +1911,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            rhs,
+            *rhs,
             [
                 before[4].clone(),
                 before[5].clone(),

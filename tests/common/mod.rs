@@ -316,10 +316,10 @@ fn check_expr_defined(
             check_expr_defined(else_expr, names, defined, errors);
         }
         Expr::EqW { lhs, rhs } => {
-            for v in lhs {
+            for v in lhs.iter() {
                 check_var_defined(v, names, defined, errors);
             }
-            for v in rhs {
+            for v in rhs.iter() {
                 check_var_defined(v, names, defined, errors);
             }
         }
@@ -509,10 +509,10 @@ fn collect_expr_ids(expr: &Expr, used: &mut HashSet<ValueId>) {
             collect_expr_ids(else_expr, used);
         }
         Expr::EqW { lhs, rhs } => {
-            for v in lhs {
+            for v in lhs.iter() {
                 record_var_id(v, used);
             }
-            for v in rhs {
+            for v in rhs.iter() {
                 record_var_id(v, used);
             }
         }

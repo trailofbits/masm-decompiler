@@ -96,7 +96,7 @@ impl VarKey {
 ///
 /// This replaces variable uses with their defining expressions where safe,
 /// respecting loop boundaries to ensure semantic correctness.
-pub fn propagate_expressions(code: &mut Vec<Stmt>) {
+pub fn propagate_expressions(code: &mut [Stmt]) {
     for _ in 0..MAX_PROPAGATION_PASSES {
         if !propagate_one_pass(code) {
             break;
@@ -110,7 +110,7 @@ pub fn propagate_expressions(code: &mut Vec<Stmt>) {
 
 /// Perform one pass of expression propagation.
 /// Returns true if any propagation was performed.
-fn propagate_one_pass(code: &mut Vec<Stmt>) -> bool {
+fn propagate_one_pass(code: &mut [Stmt]) -> bool {
     // Process definitions in order, trying to propagate each one.
     // This handles cases where a variable is defined multiple times -
     // we try to propagate each definition to its uses before the next redefinition.
@@ -412,7 +412,7 @@ fn is_propagation_barrier(stmt: &Stmt, var_index: &VarKey, used_vars: &HashSet<V
 // ============================================================================
 
 /// Substitute variable `var_key` with `expr` at the given path.
-fn substitute_at_path(code: &mut Vec<Stmt>, path: &[usize], var_key: &VarKey, expr: &Expr) {
+fn substitute_at_path(code: &mut [Stmt], path: &[usize], var_key: &VarKey, expr: &Expr) {
     if path.is_empty() {
         return;
     }
@@ -501,14 +501,14 @@ fn substitute_in_expr(expr: &mut Expr, var_key: &VarKey, with: &Expr) {
             substitute_in_expr(else_expr, var_key, with);
         }
         Expr::EqW { lhs, rhs } => {
-            for var in lhs {
+            for var in lhs.iter_mut() {
                 if VarKey::from_var(var) == *var_key
                     && let Expr::Var(replacement) = with
                 {
                     *var = replacement.clone();
                 }
             }
-            for var in rhs {
+            for var in rhs.iter_mut() {
                 if VarKey::from_var(var) == *var_key
                     && let Expr::Var(replacement) = with
                 {
@@ -635,10 +635,10 @@ fn collect_expr_vars(expr: &Expr, vars: &mut Vec<VarKey>) {
             collect_expr_vars(else_expr, vars);
         }
         Expr::EqW { lhs, rhs } => {
-            for var in lhs {
+            for var in lhs.iter() {
                 vars.push(VarKey::from_var(var));
             }
-            for var in rhs {
+            for var in rhs.iter() {
                 vars.push(VarKey::from_var(var));
             }
         }

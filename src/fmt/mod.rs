@@ -309,10 +309,10 @@ fn collect_expr_usage(expr: &Expr, usage: &mut VarUsage) {
             collect_expr_usage(else_expr, usage);
         }
         Expr::EqW { lhs, rhs } => {
-            for v in lhs {
+            for v in lhs.iter() {
                 usage.record_use(v);
             }
-            for v in rhs {
+            for v in rhs.iter() {
                 usage.record_use(v);
             }
         }

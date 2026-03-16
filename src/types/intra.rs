@@ -540,10 +540,10 @@ impl<'a> ProcTypeAnalyzer<'a> {
             }
             Expr::EqW { lhs, rhs } => {
                 let mut changed = false;
-                for var in lhs {
+                for var in lhs.iter() {
                     changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
                 }
-                for var in rhs {
+                for var in rhs.iter() {
                     changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
                 }
                 changed
@@ -707,10 +707,10 @@ impl<'a> ProcTypeAnalyzer<'a> {
             }
             Expr::EqW { lhs, rhs } => {
                 let mut changed = false;
-                for var in lhs {
+                for var in lhs.iter() {
                     changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
                 }
-                for var in rhs {
+                for var in rhs.iter() {
                     changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
                 }
                 changed
@@ -767,10 +767,10 @@ impl<'a> ProcTypeAnalyzer<'a> {
             }
             Expr::EqW { lhs, rhs } => {
                 let mut changed = false;
-                for var in lhs {
+                for var in lhs.iter() {
                     changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
                 }
-                for var in rhs {
+                for var in rhs.iter() {
                     changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
                 }
                 changed

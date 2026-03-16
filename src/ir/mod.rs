@@ -181,9 +181,9 @@ pub enum Expr {
     /// Word equality comparison `(lhs0..lhs3) == (rhs0..rhs3)`.
     EqW {
         /// Left-hand side word values.
-        lhs: [Var; 4],
+        lhs: Box<[Var; 4]>,
         /// Right-hand side word values.
-        rhs: [Var; 4],
+        rhs: Box<[Var; 4]>,
     },
 }
 

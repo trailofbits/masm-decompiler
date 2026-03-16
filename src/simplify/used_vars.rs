@@ -732,10 +732,10 @@ fn expr_used_vars(expr: &Expr, loop_stack: &[LoopBinding]) -> Vec<ConcreteVar> {
         }
         Expr::EqW { lhs, rhs } => {
             let mut result = Vec::with_capacity(8);
-            for var in lhs {
+            for var in lhs.iter() {
                 result.extend(expand_var(var, loop_stack));
             }
-            for var in rhs {
+            for var in rhs.iter() {
                 result.extend(expand_var(var, loop_stack));
             }
             result

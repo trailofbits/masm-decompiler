@@ -131,13 +131,13 @@ impl CopyState {
 }
 
 /// Propagate copy assignments into var-only use sites.
-pub fn propagate_copies(code: &mut Vec<Stmt>) {
+pub fn propagate_copies(code: &mut [Stmt]) {
     let mut state = CopyState::new();
     propagate_block(code, &mut state);
 }
 
 /// Propagate copies within a block of statements.
-fn propagate_block(stmts: &mut Vec<Stmt>, state: &mut CopyState) -> bool {
+fn propagate_block(stmts: &mut [Stmt], state: &mut CopyState) -> bool {
     let mut changed = false;
     for stmt in stmts.iter_mut() {
         match stmt {
@@ -284,14 +284,14 @@ fn rewrite_expr(expr: &mut Expr, state: &CopyState) -> bool {
         }
         Expr::EqW { lhs, rhs } => {
             let mut changed = false;
-            for var in lhs {
+            for var in lhs.iter_mut() {
                 let resolved = state.resolve_var(var);
                 if resolved != *var {
                     *var = resolved;
                     changed = true;
                 }
             }
-            for var in rhs {
+            for var in rhs.iter_mut() {
                 let resolved = state.resolve_var(var);
                 if resolved != *var {
                     *var = resolved;

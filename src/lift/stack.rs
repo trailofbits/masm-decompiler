@@ -378,15 +378,11 @@ impl SymbolicStack {
 
         // Push new variables with their birth depth.
         let mut pushed = Vec::with_capacity(pushes);
-        let reuse_count = reuse_slots.len().min(pushes);
-        for idx in 0..pushes {
+        let mut slot_iter = reuse_slots.into_iter();
+        for _ in 0..pushes {
             let depth = self.stack.len();
             let var = self.fresh_var(depth);
-            let slot_id = if idx < reuse_count {
-                reuse_slots[idx]
-            } else {
-                self.slots.next()
-            };
+            let slot_id = slot_iter.next().unwrap_or_else(|| self.slots.next());
             self.register_value_slot(&var, slot_id);
             self.stack.push_back(StackEntry::new(var.clone(), slot_id));
             pushed.push(var);
@@ -418,15 +414,11 @@ impl SymbolicStack {
             .collect::<Vec<_>>();
 
         let mut pushed = Vec::with_capacity(pushes);
-        let reuse_count = reuse_slots.len().min(pushes);
-        for idx in 0..pushes {
+        let mut slot_iter = reuse_slots.into_iter();
+        for _ in 0..pushes {
             let depth = self.stack.len();
             let var = self.fresh_var(depth);
-            let slot_id = if idx < reuse_count {
-                reuse_slots[idx]
-            } else {
-                self.slots.next()
-            };
+            let slot_id = slot_iter.next().unwrap_or_else(|| self.slots.next());
             self.register_value_slot(&var, slot_id);
             self.stack.push_back(StackEntry::new(var.clone(), slot_id));
             pushed.push(var);

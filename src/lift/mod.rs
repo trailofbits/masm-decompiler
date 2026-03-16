@@ -864,7 +864,7 @@ fn transform_expr_loop_subscripts(
             )),
         },
         Expr::EqW { lhs, rhs } => Expr::EqW {
-            lhs: lhs.map(|var| {
+            lhs: Box::new((*lhs).map(|var| {
                 transform_var_loop_subscripts(
                     var,
                     loop_var_id,
@@ -874,8 +874,8 @@ fn transform_expr_loop_subscripts(
                     produced_value_ids,
                     produced_stride,
                 )
-            }),
-            rhs: rhs.map(|var| {
+            })),
+            rhs: Box::new((*rhs).map(|var| {
                 transform_var_loop_subscripts(
                     var,
                     loop_var_id,
@@ -885,7 +885,7 @@ fn transform_expr_loop_subscripts(
                     produced_value_ids,
                     produced_stride,
                 )
-            }),
+            })),
         },
         other => other,
     }
@@ -1211,6 +1211,7 @@ fn simulate_repeat_slots_from_ids(
 }
 
 /// Update the stack after a repeat loop using slot-based simulation.
+#[allow(clippy::too_many_arguments)]
 fn update_stack_after_repeat(
     op_span: SourceSpan,
     count: usize,
@@ -2141,8 +2142,12 @@ fn transform_expr_loop_input(
             )),
         },
         Expr::EqW { lhs, rhs } => Expr::EqW {
-            lhs: lhs.map(|var| transform_var_loop_input(var, entry_value_ids, loop_depth)),
-            rhs: rhs.map(|var| transform_var_loop_input(var, entry_value_ids, loop_depth)),
+            lhs: Box::new(
+                (*lhs).map(|var| transform_var_loop_input(var, entry_value_ids, loop_depth)),
+            ),
+            rhs: Box::new(
+                (*rhs).map(|var| transform_var_loop_input(var, entry_value_ids, loop_depth)),
+            ),
         },
         other => other,
     }
