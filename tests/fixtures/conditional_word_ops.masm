@@ -1,0 +1,55 @@
+# ===== CONDITIONAL WORD OPERATIONS ============================================================
+#
+# Tests for `cdropw` and `cswapw` instructions.
+#
+# `cdropw` takes a condition and two words, and conditionally drops one word.
+#   Stack: [A3, A2, A1, A0, B3, B2, B1, B0, C, ...] (C on top)
+#   If C = 1: result is word B (drop A)
+#   If C = 0: result is word A (drop B)
+#
+# `cswapw` takes a condition and two words, and conditionally swaps them.
+#   Stack: [A3, A2, A1, A0, B3, B2, B1, B0, C, ...] (C on top)
+#   If C != 0: result is [B, A] (swapped)
+#   If C = 0: result is [A, B] (unchanged)
+
+#! Conditionally drops one of two constant words.
+#!
+#! Inputs:  [cond]
+#! Outputs: [w0, w1, w2, w3]
+#!
+proc uses_cdropw
+    push.[1, 2, 3, 4]
+    push.[5, 6, 7, 8]
+    movup.8
+    cdropw
+end
+
+#! Conditionally swaps two constant words.
+#!
+#! Inputs:  [cond]
+#! Outputs: [w0, w1, w2, w3, w4, w5, w6, w7]
+#!
+proc uses_cswapw
+    push.[1, 2, 3, 4]
+    push.[5, 6, 7, 8]
+    movup.8
+    cswapw
+end
+
+#! Uses cdropw with inputs from the caller.
+#!
+#! Inputs:  [a0, a1, a2, a3, b0, b1, b2, b3, cond]
+#! Outputs: [w0, w1, w2, w3]
+#!
+proc cdropw_passthrough
+    cdropw
+end
+
+#! Uses cswapw with inputs from the caller.
+#!
+#! Inputs:  [a0, a1, a2, a3, b0, b1, b2, b3, cond]
+#! Outputs: [w0, w1, w2, w3, w4, w5, w6, w7]
+#!
+proc cswapw_passthrough
+    cswapw
+end

@@ -1,0 +1,44 @@
+# ===== PUSH SLICE TESTS =======================================================================
+#
+# Tests for `push.[a, b, c, d][i]` and `push.[a, b, c, d][i..j]` instructions.
+#
+# `PushSlice` pushes a contiguous sub-range of a word constant onto the stack.
+# The element ordering follows the same convention as `push.[a, b, c, d]`:
+# the first element of the slice ends up on top of the stack.
+
+#! Pushes a single element from a word constant.
+#!
+#! Inputs:  []
+#! Outputs: [3]
+#!
+proc push_slice_single
+    push.[1, 2, 3, 4][2]
+end
+
+#! Pushes two elements from a word constant.
+#!
+#! Inputs:  []
+#! Outputs: [2, 3]
+#!
+proc push_slice_range
+    push.[1, 2, 3, 4][1..3]
+end
+
+#! Pushes a slice and then sums the elements.
+#!
+#! Inputs:  []
+#! Outputs: [5]
+#!
+proc push_slice_and_add
+    push.[1, 2, 3, 4][1..3]
+    add
+end
+
+#! Pushes all four elements via a full-range slice.
+#!
+#! Inputs:  []
+#! Outputs: [1, 2, 3, 4]
+#!
+proc push_slice_full
+    push.[1, 2, 3, 4][0..4]
+end

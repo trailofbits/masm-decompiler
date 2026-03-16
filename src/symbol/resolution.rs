@@ -11,6 +11,12 @@ use miden_assembly_syntax::{
 use crate::frontend::Workspace;
 use crate::symbol::path::SymbolPath;
 
+/// Result type alias for symbol resolution operations.
+///
+/// The error is boxed to keep `Result` sizes small, since `ResolutionError`
+/// variants can be large (176+ bytes).
+pub type ResolutionResult<T> = Result<T, Box<ResolutionError>>;
+
 /// Error returned when symbol resolution fails.
 #[derive(Debug, Clone)]
 pub enum ResolutionError {
@@ -82,7 +88,7 @@ pub fn resolve_target(
     module: &Module,
     source_manager: Arc<dyn SourceManager>,
     target: &InvocationTarget,
-) -> Result<Option<SymbolPath>, ResolutionError> {
+) -> ResolutionResult<Option<SymbolPath>> {
     create_resolver(module, source_manager).resolve_target(target)
 }
 
@@ -93,7 +99,7 @@ pub fn resolve_symbol(
     module: &Module,
     source_manager: Arc<dyn SourceManager>,
     name: &str,
-) -> Result<SymbolPath, ResolutionError> {
+) -> ResolutionResult<SymbolPath> {
     create_resolver(module, source_manager).resolve_symbol(name)
 }
 
@@ -107,7 +113,7 @@ pub fn resolve_path(
     module: &Module,
     source_manager: Arc<dyn SourceManager>,
     path_str: &str,
-) -> Result<SymbolPath, ResolutionError> {
+) -> ResolutionResult<SymbolPath> {
     create_resolver(module, source_manager).resolve_path(path_str)
 }
 
@@ -146,7 +152,7 @@ impl<'a> SymbolResolver<'a> {
     pub fn resolve_target(
         &self,
         target: &InvocationTarget,
-    ) -> Result<Option<SymbolPath>, ResolutionError> {
+    ) -> ResolutionResult<Option<SymbolPath>> {
         match target {
             InvocationTarget::MastRoot(_) => Ok(None),
             InvocationTarget::Symbol(ident) => resolve_symbol_span_to_option(
@@ -161,7 +167,7 @@ impl<'a> SymbolResolver<'a> {
     }
 
     /// Resolve a simple symbol name.
-    pub fn resolve_symbol(&self, name: &str) -> Result<SymbolPath, ResolutionError> {
+    pub fn resolve_symbol(&self, name: &str) -> ResolutionResult<SymbolPath> {
         resolve_symbol_span(
             self.module,
             &self.resolver,
@@ -170,7 +176,7 @@ impl<'a> SymbolResolver<'a> {
     }
 
     /// Resolve a qualified path.
-    pub fn resolve_path(&self, path_str: &str) -> Result<SymbolPath, ResolutionError> {
+    pub fn resolve_path(&self, path_str: &str) -> ResolutionResult<SymbolPath> {
         let path = Path::new(path_str);
         resolve_path_span(
             self.module,
@@ -198,13 +204,9 @@ pub trait WorkspaceSymbolResolver {
         &self,
         module: &SymbolPath,
         target: &InvocationTarget,
-    ) -> Result<Option<SymbolPath>, ResolutionError>;
-    fn resolve_symbol(
-        &self,
-        module: &SymbolPath,
-        name: &str,
-    ) -> Result<SymbolPath, ResolutionError>;
-    fn resolve_path(&self, module: &SymbolPath, path: &str) -> Result<SymbolPath, ResolutionError>;
+    ) -> ResolutionResult<Option<SymbolPath>>;
+    fn resolve_symbol(&self, module: &SymbolPath, name: &str) -> ResolutionResult<SymbolPath>;
+    fn resolve_path(&self, module: &SymbolPath, path: &str) -> ResolutionResult<SymbolPath>;
 }
 
 impl WorkspaceSymbolResolver for Workspace {
@@ -212,36 +214,32 @@ impl WorkspaceSymbolResolver for Workspace {
         &self,
         module: &SymbolPath,
         target: &InvocationTarget,
-    ) -> Result<Option<SymbolPath>, ResolutionError> {
-        let program =
-            self.lookup_module(module)
-                .ok_or_else(|| ResolutionError::ModuleNotLoaded {
-                    module: module.clone(),
-                })?;
+    ) -> ResolutionResult<Option<SymbolPath>> {
+        let program = self.lookup_module(module).ok_or_else(|| {
+            Box::new(ResolutionError::ModuleNotLoaded {
+                module: module.clone(),
+            })
+        })?;
         let resolver = create_resolver(program.module(), self.source_manager());
         resolver.resolve_target(target)
     }
 
-    fn resolve_symbol(
-        &self,
-        module: &SymbolPath,
-        name: &str,
-    ) -> Result<SymbolPath, ResolutionError> {
-        let program =
-            self.lookup_module(module)
-                .ok_or_else(|| ResolutionError::ModuleNotLoaded {
-                    module: module.clone(),
-                })?;
+    fn resolve_symbol(&self, module: &SymbolPath, name: &str) -> ResolutionResult<SymbolPath> {
+        let program = self.lookup_module(module).ok_or_else(|| {
+            Box::new(ResolutionError::ModuleNotLoaded {
+                module: module.clone(),
+            })
+        })?;
         let resolver = create_resolver(program.module(), self.source_manager());
         resolver.resolve_symbol(name)
     }
 
-    fn resolve_path(&self, module: &SymbolPath, path: &str) -> Result<SymbolPath, ResolutionError> {
-        let program =
-            self.lookup_module(module)
-                .ok_or_else(|| ResolutionError::ModuleNotLoaded {
-                    module: module.clone(),
-                })?;
+    fn resolve_path(&self, module: &SymbolPath, path: &str) -> ResolutionResult<SymbolPath> {
+        let program = self.lookup_module(module).ok_or_else(|| {
+            Box::new(ResolutionError::ModuleNotLoaded {
+                module: module.clone(),
+            })
+        })?;
         let resolver = create_resolver(program.module(), self.source_manager());
         resolver.resolve_path(path)
     }
@@ -252,7 +250,7 @@ pub fn resolve_constant_symbol(
     workspace: &Workspace,
     module: &SymbolPath,
     name: &str,
-) -> Result<SymbolPath, ResolutionError> {
+) -> ResolutionResult<SymbolPath> {
     let resolved = workspace.resolve_symbol(module, name)?;
     ensure_constant_target(workspace, module, name.to_string(), resolved)
 }
@@ -262,7 +260,7 @@ pub fn resolve_constant_path(
     workspace: &Workspace,
     module: &SymbolPath,
     path: &str,
-) -> Result<SymbolPath, ResolutionError> {
+) -> ResolutionResult<SymbolPath> {
     let resolved = workspace.resolve_path(module, path)?;
     ensure_constant_target(workspace, module, path.to_string(), resolved)
 }
@@ -275,18 +273,19 @@ fn resolve_symbol_span(
     module: &Module,
     resolver: &LocalSymbolResolver,
     name: Span<&str>,
-) -> Result<SymbolPath, ResolutionError> {
-    let resolution =
-        resolver
-            .resolve(name)
-            .map_err(|source| ResolutionError::SymbolResolution {
-                module: SymbolPath::new(module.path().to_string()),
-                reference: (*name.inner()).to_string(),
-                source,
-            })?;
-    resolution_to_path(module, resolution).ok_or_else(|| ResolutionError::NonPathResolution {
-        module: SymbolPath::new(module.path().to_string()),
-        reference: (*name.inner()).to_string(),
+) -> ResolutionResult<SymbolPath> {
+    let resolution = resolver.resolve(name).map_err(|source| {
+        Box::new(ResolutionError::SymbolResolution {
+            module: SymbolPath::new(module.path().to_string()),
+            reference: (*name.inner()).to_string(),
+            source,
+        })
+    })?;
+    resolution_to_path(module, resolution).ok_or_else(|| {
+        Box::new(ResolutionError::NonPathResolution {
+            module: SymbolPath::new(module.path().to_string()),
+            reference: (*name.inner()).to_string(),
+        })
     })
 }
 
@@ -294,15 +293,14 @@ fn resolve_symbol_span_to_option(
     module: &Module,
     resolver: &LocalSymbolResolver,
     name: Span<&str>,
-) -> Result<Option<SymbolPath>, ResolutionError> {
-    let resolution =
-        resolver
-            .resolve(name)
-            .map_err(|source| ResolutionError::SymbolResolution {
-                module: SymbolPath::new(module.path().to_string()),
-                reference: (*name.inner()).to_string(),
-                source,
-            })?;
+) -> ResolutionResult<Option<SymbolPath>> {
+    let resolution = resolver.resolve(name).map_err(|source| {
+        Box::new(ResolutionError::SymbolResolution {
+            module: SymbolPath::new(module.path().to_string()),
+            reference: (*name.inner()).to_string(),
+            source,
+        })
+    })?;
     Ok(resolution_to_path(module, resolution))
 }
 
@@ -310,7 +308,7 @@ fn resolve_path_span(
     module: &Module,
     resolver: &LocalSymbolResolver,
     path: Span<&Path>,
-) -> Result<SymbolPath, ResolutionError> {
+) -> ResolutionResult<SymbolPath> {
     if path.inner().is_absolute() {
         return Ok(SymbolPath::new(path.as_str()));
     }
@@ -321,16 +319,18 @@ fn resolve_path_span(
             return Ok(SymbolPath::new(path.as_str()));
         }
         Err(source) => {
-            return Err(ResolutionError::SymbolResolution {
+            return Err(Box::new(ResolutionError::SymbolResolution {
                 module: SymbolPath::new(module.path().to_string()),
                 reference: path.as_str().to_string(),
                 source,
-            });
+            }));
         }
     };
-    resolution_to_path(module, resolution).ok_or_else(|| ResolutionError::NonPathResolution {
-        module: SymbolPath::new(module.path().to_string()),
-        reference: path.as_str().to_string(),
+    resolution_to_path(module, resolution).ok_or_else(|| {
+        Box::new(ResolutionError::NonPathResolution {
+            module: SymbolPath::new(module.path().to_string()),
+            reference: path.as_str().to_string(),
+        })
     })
 }
 
@@ -338,7 +338,7 @@ fn resolve_path_span_to_option(
     module: &Module,
     resolver: &LocalSymbolResolver,
     path: Span<&Path>,
-) -> Result<Option<SymbolPath>, ResolutionError> {
+) -> ResolutionResult<Option<SymbolPath>> {
     if path.inner().is_absolute() {
         return Ok(Some(SymbolPath::new(path.as_str())));
     }
@@ -349,11 +349,11 @@ fn resolve_path_span_to_option(
             return Ok(Some(SymbolPath::new(path.as_str())));
         }
         Err(source) => {
-            return Err(ResolutionError::SymbolResolution {
+            return Err(Box::new(ResolutionError::SymbolResolution {
                 module: SymbolPath::new(module.path().to_string()),
                 reference: path.as_str().to_string(),
                 source,
-            });
+            }));
         }
     };
     Ok(resolution_to_path(module, resolution))
@@ -373,7 +373,7 @@ fn ensure_constant_target(
     module: &SymbolPath,
     reference: String,
     resolved: SymbolPath,
-) -> Result<SymbolPath, ResolutionError> {
+) -> ResolutionResult<SymbolPath> {
     if workspace.lookup_constant_entry(&resolved).is_some() {
         return Ok(resolved);
     }
@@ -381,17 +381,17 @@ fn ensure_constant_target(
     if let Some(module_path) = resolved.module_path() {
         let module_path = SymbolPath::new(module_path);
         if workspace.lookup_module(&module_path).is_none() {
-            return Err(ResolutionError::ModuleNotLoaded {
+            return Err(Box::new(ResolutionError::ModuleNotLoaded {
                 module: module_path,
-            });
+            }));
         }
     }
 
-    Err(ResolutionError::NonConstantSymbol {
+    Err(Box::new(ResolutionError::NonConstantSymbol {
         module: module.clone(),
         reference,
         resolved,
-    })
+    }))
 }
 
 /// Convert a `SymbolResolution` to a `SymbolPath`.
@@ -431,7 +431,7 @@ mod tests {
 
         let err = resolve_symbol(module.module(), ws.source_manager(), "MISSING")
             .expect_err("expected strict resolution failure");
-        assert!(matches!(err, ResolutionError::SymbolResolution { .. }));
+        assert!(matches!(*err, ResolutionError::SymbolResolution { .. }));
     }
 
     /// Ensure unknown unqualified path names fail explicitly.
@@ -449,7 +449,7 @@ mod tests {
 
         let err = resolve_path(module.module(), ws.source_manager(), "missing")
             .expect_err("expected strict resolution failure");
-        assert!(matches!(err, ResolutionError::SymbolResolution { .. }));
+        assert!(matches!(*err, ResolutionError::SymbolResolution { .. }));
     }
 
     /// Ensure workspace resolution requires an existing module context.
@@ -467,7 +467,7 @@ mod tests {
         let err = ws
             .resolve_symbol(&SymbolPath::new("does::not::exist"), "foo")
             .expect_err("expected missing module error");
-        assert!(matches!(err, ResolutionError::ModuleNotLoaded { .. }));
+        assert!(matches!(*err, ResolutionError::ModuleNotLoaded { .. }));
     }
 
     /// Ensure local constants resolve to their fully-qualified definitions.
@@ -530,6 +530,6 @@ mod tests {
 
         let err = resolve_constant_symbol(&ws, &SymbolPath::new("entry"), "foo")
             .expect_err("procedure should not resolve as constant");
-        assert!(matches!(err, ResolutionError::NonConstantSymbol { .. }));
+        assert!(matches!(*err, ResolutionError::NonConstantSymbol { .. }));
     }
 }

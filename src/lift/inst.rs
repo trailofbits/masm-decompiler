@@ -320,7 +320,9 @@ fn lift_stack_inst(
         }
         Instruction::PadW => Ok(Some(lift_padw(span, stack))),
         Instruction::CDrop => Ok(Some(vec![lift_cdrop(span, inst.to_string(), stack)?])),
+        Instruction::CDropW => Ok(Some(lift_cdropw(span, inst.to_string(), stack)?)),
         Instruction::CSwap => Ok(Some(lift_cswap(span, inst.to_string(), stack)?)),
+        Instruction::CSwapW => Ok(Some(lift_cswapw(span, inst.to_string(), stack)?)),
         Instruction::Dup0 => lift_dup(span, 0, stack),
         Instruction::Dup1 => lift_dup(span, 1, stack),
         Instruction::Dup2 => lift_dup(span, 2, stack),
@@ -1174,6 +1176,29 @@ fn lift_push_inst(
                 Ok(Some(vec![Stmt::Assign { span, dest, expr }]))
             }
         },
+        Instruction::PushSlice(imm, range) => match imm {
+            Immediate::Value(spanned) => Ok(Some(lift_push_word_slice(
+                span,
+                &spanned.inner().0,
+                range.clone(),
+                stack,
+            ))),
+            Immediate::Constant(id) => Err(LiftingError::UnsupportedInstruction {
+                span,
+                instruction: Instruction::PushSlice(Immediate::Constant(id.clone()), range.clone()),
+            }),
+        },
+        Instruction::PushFeltList(values) => {
+            let mut stmts = Vec::with_capacity(values.len());
+            // Push in reverse so that values[0] ends up on top, matching
+            // the convention used for `push.[a, b, c, d]`.
+            for felt in values.iter().rev() {
+                let dest = stack.push_fresh();
+                let expr = Expr::Constant(Constant::Felt(felt.as_canonical_u64()));
+                stmts.push(Stmt::Assign { span, dest, expr });
+            }
+            Ok(Some(stmts))
+        }
         Instruction::Locaddr(index) => {
             let (_, pushed) = stack.apply_checked(0, 1, 0, span, "locaddr")?;
             Ok(Some(vec![Stmt::Intrinsic {
@@ -1187,6 +1212,25 @@ fn lift_push_inst(
         }
         _ => Ok(None),
     }
+}
+
+/// Push a sub-range of a word's felt elements onto the symbolic stack.
+///
+/// Elements are pushed in reverse order so that `word[range.start]` ends up
+/// on top, matching the Miden VM convention for `push.[a, b, c, d]`.
+fn lift_push_word_slice(
+    span: SourceSpan,
+    word: &[miden_assembly_syntax::Felt; 4],
+    range: std::ops::Range<usize>,
+    stack: &mut SymbolicStack,
+) -> Vec<Stmt> {
+    let mut stmts = Vec::with_capacity(range.len());
+    for i in range.rev() {
+        let dest = stack.push_fresh();
+        let expr = Expr::Constant(Constant::Felt(word[i].as_canonical_u64()));
+        stmts.push(Stmt::Assign { span, dest, expr });
+    }
+    stmts
 }
 
 // Helper functions
@@ -1449,6 +1493,97 @@ fn lift_cswap(
         },
     };
     Ok(vec![first, second])
+}
+
+/// Lift the `cdropw` instruction into four ternary expression assignments.
+///
+/// Stack: `[A3, A2, A1, A0, B3, B2, B1, B0, C, ...]` (C on top).
+/// If `C = 1`: result is word B; if `C = 0`: result is word A.
+fn lift_cdropw(
+    span: SourceSpan,
+    operation: impl Into<String>,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Vec<Stmt>> {
+    stack.require_depth(9, span, operation)?;
+    let cond = stack.pop_entry();
+
+    let mut b = Vec::with_capacity(4);
+    for _ in 0..4 {
+        b.push(stack.pop_entry());
+    }
+
+    let mut a = Vec::with_capacity(4);
+    for _ in 0..4 {
+        a.push(stack.pop_entry());
+    }
+
+    let mut stmts = Vec::with_capacity(4);
+    for i in 0..4 {
+        let dest = stack.push_fresh_with_slot_like(a[i].slot_id, &a[i].var);
+        stmts.push(Stmt::Assign {
+            span,
+            dest,
+            expr: Expr::Ternary {
+                cond: Box::new(Expr::Var(cond.var.clone())),
+                then_expr: Box::new(Expr::Var(b[i].var.clone())),
+                else_expr: Box::new(Expr::Var(a[i].var.clone())),
+            },
+        });
+    }
+    Ok(stmts)
+}
+
+/// Lift the `cswapw` instruction into eight ternary expression assignments.
+///
+/// Stack: `[A3, A2, A1, A0, B3, B2, B1, B0, C, ...]` (C on top).
+/// If `C != 0`: words are swapped (result is `[B, A]`);
+/// if `C = 0`: words are unchanged (result is `[A, B]`).
+fn lift_cswapw(
+    span: SourceSpan,
+    operation: impl Into<String>,
+    stack: &mut SymbolicStack,
+) -> LiftingResult<Vec<Stmt>> {
+    stack.require_depth(9, span, operation)?;
+    let cond = stack.pop_entry();
+
+    let mut b = Vec::with_capacity(4);
+    for _ in 0..4 {
+        b.push(stack.pop_entry());
+    }
+
+    let mut a = Vec::with_capacity(4);
+    for _ in 0..4 {
+        a.push(stack.pop_entry());
+    }
+
+    let mut stmts = Vec::with_capacity(8);
+    // First word: when swapped this is B, when not swapped this is A.
+    for i in 0..4 {
+        let dest = stack.push_fresh_with_slot_like(a[i].slot_id, &a[i].var);
+        stmts.push(Stmt::Assign {
+            span,
+            dest,
+            expr: Expr::Ternary {
+                cond: Box::new(Expr::Var(cond.var.clone())),
+                then_expr: Box::new(Expr::Var(b[i].var.clone())),
+                else_expr: Box::new(Expr::Var(a[i].var.clone())),
+            },
+        });
+    }
+    // Second word: when swapped this is A, when not swapped this is B.
+    for i in 0..4 {
+        let dest = stack.push_fresh_with_slot_like(b[i].slot_id, &b[i].var);
+        stmts.push(Stmt::Assign {
+            span,
+            dest,
+            expr: Expr::Ternary {
+                cond: Box::new(Expr::Var(cond.var.clone())),
+                then_expr: Box::new(Expr::Var(a[i].var.clone())),
+                else_expr: Box::new(Expr::Var(b[i].var.clone())),
+            },
+        });
+    }
+    Ok(stmts)
 }
 
 /// Lift the `u32split` instruction into an intrinsic assignment.
