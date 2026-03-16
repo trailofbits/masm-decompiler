@@ -3,11 +3,11 @@ mod common;
 use common::decompile_no_optimizations;
 use masm_decompiler::{frontend::testing::workspace_from_modules, ir::Stmt};
 
-/// Verify that mtree_get surfaces the Merkle root as both an input and output.
+/// Verify that mtree_get surfaces the Merkle root as an input but not an output.
 ///
-/// The mtree_get instruction takes 6 inputs (depth, index, R₀..R₃) and
-/// produces 8 outputs (V₀..V₃, R₀..R₃). The root R is left unchanged on
-/// the stack but is still a genuine input to the operation.
+/// The mtree_get instruction reads 6 inputs (depth, index, R₀..R₃) and
+/// produces 4 new outputs (V₀..V₃). The root R is a passthrough: it is
+/// read by the instruction but left unchanged on the stack.
 #[test]
 fn mtree_get_shows_root_as_argument() {
     let ws = workspace_from_modules(&[(
@@ -40,8 +40,8 @@ fn mtree_get_shows_root_as_argument() {
     );
     assert_eq!(
         intrinsic.results.len(),
-        8,
-        "mtree_get should have 8 results (V₀..V₃, R₀..R₃), got {}",
+        4,
+        "mtree_get should have 4 results (V₀..V₃), got {}",
         intrinsic.results.len()
     );
 }

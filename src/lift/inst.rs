@@ -1122,7 +1122,10 @@ fn lift_intrinsic_inst(
         _ => return Ok(None),
     };
     let effect = effect_for_inst(inst, span, resolver, sigs)?;
-    let (args, results) = stack.apply_checked(
+    // Use required_depth for intrinsic args so that passthrough inputs
+    // (read but not consumed) are visible in the decompiled output.
+    let args = stack.top_n_checked(effect.required_depth(), span, name.as_str())?;
+    let (_, results) = stack.apply_checked(
         effect.pops(),
         effect.pushes(),
         effect.required_depth(),
@@ -1224,7 +1227,10 @@ where
     F: Fn(Call) -> Stmt,
 {
     let (name, effect) = resolve_call_target_and_effect(target, span, resolver, sigs)?;
-    let (args, results) = stack.apply_checked(
+    // Use required_depth for call args so that passthrough inputs
+    // (read but not consumed) are visible in the decompiled output.
+    let args = stack.top_n_checked(effect.required_depth(), span, target.to_string())?;
+    let (_, results) = stack.apply_checked(
         effect.pops(),
         effect.pushes(),
         effect.required_depth(),
