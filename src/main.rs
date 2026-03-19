@@ -5,6 +5,7 @@ use clap::Parser;
 use log::{error, info, warn};
 use masm_decompiler::{
     decompile::{DecompilationConfig, Decompiler},
+    fmt::FormattingConfig,
     frontend::{LibraryRoot, Workspace},
     symbol::path::SymbolPath,
 };
@@ -109,7 +110,10 @@ fn run(cli: Cli) -> Result<(), String> {
 
             let fq = format!("{}::{}", module.module_path(), proc.name());
             match decompiler.decompile_proc(&fq) {
-                Ok(decompiled) => println!("{decompiled}"),
+                Ok(decompiled) => print!(
+                    "{}",
+                    decompiled.render(FormattingConfig::default().with_color(!cli.no_color))
+                ),
                 Err(error) => error!("Error: {error}"),
             }
         }

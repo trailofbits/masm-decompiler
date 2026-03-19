@@ -2,16 +2,14 @@
 
 use masm_decompiler::{
     decompile::{DecompilationConfig, DecompiledProc, Decompiler},
-    fmt::{CodeWriter, FormattingConfig},
+    fmt::FormattingConfig,
     frontend::testing::workspace_from_modules,
     ir::Stmt,
 };
 
 /// Render a decompiled procedure without ANSI color codes.
 fn render_proc(proc: &DecompiledProc) -> String {
-    let mut writer = CodeWriter::with_config(FormattingConfig::new().with_color(false));
-    writer.write(proc);
-    writer.finish()
+    proc.render(FormattingConfig::new().with_color(false))
 }
 
 #[test]
@@ -296,24 +294,18 @@ fn formatter_prints_typed_signatures() {
     let sink = decompiler.decompile_proc("typed::sink").unwrap();
     let unknown_out = decompiler.decompile_proc("typed::unknown_out").unwrap();
 
-    let mut writer = CodeWriter::with_config(FormattingConfig::new().with_color(false));
-    writer.write(&typed_header);
-    let typed_output = writer.finish();
+    let typed_output = typed_header.render(FormattingConfig::new().with_color(false));
     let typed_first_line = typed_output.lines().next().unwrap_or_default();
     assert_eq!(
         typed_first_line,
         "proc typed_header(v_0: Bool, v_1: Felt, v_2: Address) -> (Bool, Felt) {"
     );
 
-    let mut writer = CodeWriter::with_config(FormattingConfig::new().with_color(false));
-    writer.write(&sink);
-    let sink_output = writer.finish();
+    let sink_output = sink.render(FormattingConfig::new().with_color(false));
     let sink_first_line = sink_output.lines().next().unwrap_or_default();
     assert_eq!(sink_first_line, "proc sink(v_0: Felt) {");
 
-    let mut writer = CodeWriter::with_config(FormattingConfig::new().with_color(false));
-    writer.write(&unknown_out);
-    let unknown_out_output = writer.finish();
+    let unknown_out_output = unknown_out.render(FormattingConfig::new().with_color(false));
     let unknown_out_first_line = unknown_out_output.lines().next().unwrap_or_default();
     assert_eq!(unknown_out_first_line, "proc unknown_out() -> Felt {");
 }

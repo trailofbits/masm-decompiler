@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::{
     callgraph::CallGraph,
-    fmt::{CodeWriter, assign_var_names},
+    fmt::{CodeWriter, FormattingConfig},
     frontend::Workspace,
     ir::{Stmt, Var},
     lift::{self, LiftingError},
@@ -252,6 +252,13 @@ impl DecompiledProc {
             output_types,
         }
     }
+
+    /// Render this procedure using the provided formatting configuration.
+    pub fn render(&self, config: FormattingConfig) -> String {
+        let mut writer = CodeWriter::with_config(config);
+        writer.write(self);
+        writer.finish()
+    }
 }
 
 /// Normalize inferred input types to exactly match the known input arity.
@@ -280,10 +287,7 @@ fn normalized_output_types(types: &[InferredType], expected_len: usize) -> Vec<I
 
 impl std::fmt::Display for DecompiledProc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let var_names = assign_var_names(self.stmts());
-        let mut writer = CodeWriter::with_var_names(var_names);
-        writer.write(self);
-        write!(f, "{}", writer.finish())
+        write!(f, "{}", self.render(FormattingConfig::default()))
     }
 }
 

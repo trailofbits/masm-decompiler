@@ -583,6 +583,13 @@ impl CodeWriter {
         self.var_names.clone()
     }
 
+    /// Ensure canonical variable names exist for a full procedure body.
+    fn ensure_var_names(&mut self, stmts: &[Stmt]) {
+        for (var, name) in assign_var_names(stmts) {
+            self.var_names.entry(var).or_insert(name);
+        }
+    }
+
     pub fn write_line(&mut self, line: &str) {
         let spaces = " ".repeat(self.config.indent_size);
         for _ in 0..self.indent {
@@ -697,6 +704,7 @@ impl CodeWriter {
 
 impl CodeDisplay for &DecompiledProc {
     fn fmt_code(&self, f: &mut CodeWriter) {
+        f.ensure_var_names(self.stmts());
         f.register_loop_vars(self.stmts());
 
         // Write procedure header
