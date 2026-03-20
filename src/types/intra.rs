@@ -314,8 +314,13 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Infer type for a constant expression.
+    ///
+    /// `Felt(0)` and `Felt(1)` are inferred as `Bool` since they are the
+    /// most precise type for these values. The lattice `Bool <: U32 <: Felt`
+    /// ensures they widen correctly in arithmetic or u32 contexts.
     fn infer_constant_type(&self, constant: &Constant) -> InferredType {
         match constant {
+            Constant::Felt(0 | 1) => InferredType::Bool,
             Constant::Felt(_) | Constant::Defined(_) => InferredType::Felt,
             Constant::Word(_) => InferredType::Unknown,
         }

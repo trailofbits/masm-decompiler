@@ -64,7 +64,7 @@ fn setup_decompiler() -> Decompiler<'static> {
         end
 
         pub proc caller_bad_and_bool
-            push.1
+            push.3
             push.2
             exec.needs_and_bool
         end
@@ -116,13 +116,12 @@ fn setup_decompiler() -> Decompiler<'static> {
             push.2
             push.3
             u32wrapping_add
-            push.1.1
-            eq
+            push.2
             exec.needs_bool_u32
         end
 
         pub proc out_mixed
-            push.1
+            push.2
             push.1.1
             eq
         end

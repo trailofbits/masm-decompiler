@@ -23,11 +23,14 @@ impl InferredType {
     /// Combine two values from different control-flow paths.
     ///
     /// `Unknown` means at least one path is opaque, so the result is unknown.
-    /// Distinct known subtypes join to `Felt`.
+    /// Distinct known subtypes join to their least upper bound in the lattice
+    /// `Bool <: U32 <: Felt`, with `Address` as a sibling of `U32`.
     pub fn combine_paths(self, other: Self) -> Self {
         match (self, other) {
             (a, b) if a == b => a,
             (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            // Bool <: U32
+            (Self::Bool, Self::U32) | (Self::U32, Self::Bool) => Self::U32,
             _ => Self::Felt,
         }
     }
@@ -35,12 +38,16 @@ impl InferredType {
     /// Refine a stored type with newly inferred information.
     ///
     /// Existing `Unknown` values are replaced by `new_type`. Existing known
-    /// values are widened conservatively if they disagree.
+    /// values are widened to their least upper bound in the lattice
+    /// `Bool <: U32 <: Felt` if they disagree, with `Address` as a sibling
+    /// of `U32`.
     pub fn refine(self, new_type: Self) -> Self {
         match (self, new_type) {
             (Self::Unknown, t) => t,
             (t, Self::Unknown) => t,
             (a, b) if a == b => a,
+            // Bool <: U32
+            (Self::Bool, Self::U32) | (Self::U32, Self::Bool) => Self::U32,
             _ => Self::Felt,
         }
     }
@@ -140,7 +147,7 @@ pub fn check_compatibility(actual: InferredType, expected: TypeRequirement) -> C
         },
         TypeRequirement::U32 => match actual {
             InferredType::Unknown => Compatibility::Indeterminate,
-            InferredType::U32 => Compatibility::Compatible,
+            InferredType::U32 | InferredType::Bool => Compatibility::Compatible,
             _ => Compatibility::Incompatible,
         },
         TypeRequirement::Address => match actual {
@@ -187,6 +194,8 @@ impl VarKey {
 mod tests {
     use super::*;
 
+    // -- check_compatibility --------------------------------------------------
+
     #[test]
     fn felt_accepts_promotable_types() {
         assert_eq!(
@@ -204,13 +213,33 @@ mod tests {
     }
 
     #[test]
+    fn bool_is_compatible_with_u32() {
+        assert_eq!(
+            check_compatibility(InferredType::Bool, TypeRequirement::U32),
+            Compatibility::Compatible
+        );
+    }
+
+    #[test]
     fn mismatched_exact_types_are_incompatible() {
         assert_eq!(
             check_compatibility(InferredType::Felt, TypeRequirement::Bool),
             Compatibility::Incompatible
         );
         assert_eq!(
+            check_compatibility(InferredType::Felt, TypeRequirement::U32),
+            Compatibility::Incompatible
+        );
+        assert_eq!(
+            check_compatibility(InferredType::U32, TypeRequirement::Bool),
+            Compatibility::Incompatible
+        );
+        assert_eq!(
             check_compatibility(InferredType::Bool, TypeRequirement::Address),
+            Compatibility::Incompatible
+        );
+        assert_eq!(
+            check_compatibility(InferredType::Address, TypeRequirement::Bool),
             Compatibility::Incompatible
         );
     }
@@ -224,6 +253,126 @@ mod tests {
         assert_eq!(
             check_compatibility(InferredType::Unknown, TypeRequirement::Felt),
             Compatibility::Indeterminate
+        );
+    }
+
+    // -- combine_paths --------------------------------------------------------
+
+    #[test]
+    fn combine_paths_same_type() {
+        assert_eq!(
+            InferredType::Bool.combine_paths(InferredType::Bool),
+            InferredType::Bool
+        );
+        assert_eq!(
+            InferredType::U32.combine_paths(InferredType::U32),
+            InferredType::U32
+        );
+        assert_eq!(
+            InferredType::Felt.combine_paths(InferredType::Felt),
+            InferredType::Felt
+        );
+    }
+
+    #[test]
+    fn combine_paths_bool_u32_yields_u32() {
+        assert_eq!(
+            InferredType::Bool.combine_paths(InferredType::U32),
+            InferredType::U32
+        );
+        assert_eq!(
+            InferredType::U32.combine_paths(InferredType::Bool),
+            InferredType::U32
+        );
+    }
+
+    #[test]
+    fn combine_paths_with_felt_yields_felt() {
+        assert_eq!(
+            InferredType::Bool.combine_paths(InferredType::Felt),
+            InferredType::Felt
+        );
+        assert_eq!(
+            InferredType::U32.combine_paths(InferredType::Felt),
+            InferredType::Felt
+        );
+        assert_eq!(
+            InferredType::Address.combine_paths(InferredType::Felt),
+            InferredType::Felt
+        );
+    }
+
+    #[test]
+    fn combine_paths_address_siblings_yield_felt() {
+        assert_eq!(
+            InferredType::Bool.combine_paths(InferredType::Address),
+            InferredType::Felt
+        );
+        assert_eq!(
+            InferredType::U32.combine_paths(InferredType::Address),
+            InferredType::Felt
+        );
+    }
+
+    #[test]
+    fn combine_paths_unknown_yields_unknown() {
+        assert_eq!(
+            InferredType::Bool.combine_paths(InferredType::Unknown),
+            InferredType::Unknown
+        );
+        assert_eq!(
+            InferredType::Unknown.combine_paths(InferredType::U32),
+            InferredType::Unknown
+        );
+    }
+
+    // -- refine ---------------------------------------------------------------
+
+    #[test]
+    fn refine_unknown_takes_new() {
+        assert_eq!(
+            InferredType::Unknown.refine(InferredType::Bool),
+            InferredType::Bool
+        );
+        assert_eq!(
+            InferredType::Unknown.refine(InferredType::U32),
+            InferredType::U32
+        );
+    }
+
+    #[test]
+    fn refine_bool_u32_yields_u32() {
+        assert_eq!(
+            InferredType::Bool.refine(InferredType::U32),
+            InferredType::U32
+        );
+        assert_eq!(
+            InferredType::U32.refine(InferredType::Bool),
+            InferredType::U32
+        );
+    }
+
+    #[test]
+    fn refine_with_felt_yields_felt() {
+        assert_eq!(
+            InferredType::Bool.refine(InferredType::Felt),
+            InferredType::Felt
+        );
+        assert_eq!(
+            InferredType::U32.refine(InferredType::Felt),
+            InferredType::Felt
+        );
+    }
+
+    #[test]
+    fn refine_address_siblings_yield_felt() {
+        assert_eq!(
+            InferredType::Bool.refine(InferredType::Address),
+            InferredType::Felt
+        );
+        assert_eq!(
+            InferredType::U32.refine(InferredType::Address),
+            InferredType::Felt
         );
     }
 }
