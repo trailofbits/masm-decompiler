@@ -674,6 +674,219 @@ fn u32_not_rotr_widening_add_and_mod_infer_u32_types() {
     assert_eq!(sdepth_only.outputs, vec![InferredType::U32]);
 }
 
+fn setup_storage_decompiler() -> Decompiler<'static> {
+    let ws = Box::new(workspace_from_modules(&[(
+        "storage",
+        r#"
+        # U32 value round-trips through a local and is used in a u32 operation.
+        # Before fix: loc_load produces Felt, u32wrapping_add triggers diagnostic.
+        # After fix: loc_load produces U32, no diagnostic.
+        @locals(1)
+        pub proc u32_local_roundtrip
+            push.1
+            push.2
+            u32wrapping_add
+            loc_store.0
+            loc_load.0
+            push.1
+            u32wrapping_add
+            drop
+        end
+
+        # Address from locaddr round-trips through a local and is used as mem_load address.
+        # Before fix: loc_load produces Felt, mem_load address triggers diagnostic.
+        # After fix: loc_load produces Address, no diagnostic.
+        @locals(1)
+        pub proc address_local_roundtrip
+            locaddr.0
+            loc_store.0
+            loc_load.0
+            mem_load
+            drop
+        end
+
+        # A Felt value stored and loaded should remain Felt (no regression).
+        @locals(1)
+        pub proc felt_local_roundtrip
+            push.999
+            loc_store.0
+            loc_load.0
+            drop
+        end
+
+        # Word store/load: all 4 elements of a U32 word should preserve type.
+        @locals(1)
+        pub proc u32_word_local_roundtrip
+            push.1.2.3.4
+            u32assertw
+            loc_storew_be.0
+            loc_loadw_be.0
+            push.1
+            u32wrapping_add
+            drop drop drop drop
+        end
+
+        # U32 stored to memory at immediate address and loaded back.
+        # Both mem_store.100 and mem_load.100 use the same immediate address.
+        # Before fix: mem_load produces Felt, u32wrapping_add triggers diagnostic.
+        # After fix: mem_load produces U32, no diagnostic.
+        pub proc u32_mem_roundtrip
+            push.1
+            push.2
+            u32wrapping_add
+            mem_store.100
+            mem_load.100
+            push.1
+            u32wrapping_add
+            drop
+        end
+
+        # Address stored to memory at immediate address and loaded back.
+        @locals(1)
+        pub proc address_mem_roundtrip
+            locaddr.0
+            mem_store.100
+            mem_load.100
+            mem_load
+            drop
+        end
+
+        # U32 stored via locaddr and loaded back.
+        # locaddr.0 is used for both store and load but produces different SSA
+        # variables — the MemAddressKey::LocalAddr(0) abstraction connects them.
+        @locals(1)
+        pub proc u32_mem_locaddr_roundtrip
+            push.1
+            push.2
+            u32wrapping_add
+            locaddr.0
+            mem_store
+            locaddr.0
+            mem_load
+            push.1
+            u32wrapping_add
+            drop
+        end
+
+        # Procedure stores its input to a local, loads it, uses it in u32 op.
+        # Without back-propagation: input requirement stays Unknown.
+        # With back-propagation: U32 requirement propagates from u32wrapping_add
+        # back through the load/store to the procedure input.
+        @locals(1)
+        pub proc u32_req_through_local
+            loc_store.0
+            loc_load.0
+            push.1
+            u32wrapping_add
+            drop
+        end
+
+        # Same pattern through memory with immediate address.
+        pub proc u32_req_through_mem
+            mem_store.200
+            mem_load.200
+            push.1
+            u32wrapping_add
+            drop
+        end
+
+        # locaddr.0 followed by add.1 to address element 1 of the word.
+        # Before fix: Add produces Felt, mem_load address triggers diagnostic.
+        # After fix: Add produces Address, no diagnostic.
+        @locals(1)
+        pub proc address_offset_no_warning
+            locaddr.0
+            push.1
+            add
+            mem_load
+            drop
+        end
+        "#,
+    )]));
+
+    let ws: &'static _ = Box::leak(ws);
+    Decompiler::new(ws)
+}
+
+#[test]
+fn u32_type_preserved_through_local_roundtrip() {
+    let decompiler = setup_storage_decompiler();
+    let diagnostics = diagnostics_for(&decompiler, "storage::u32_local_roundtrip");
+    assert!(
+        diagnostics.is_empty(),
+        "U32 type should survive local store/load roundtrip: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn address_type_preserved_through_local_roundtrip() {
+    let decompiler = setup_storage_decompiler();
+    let diagnostics = diagnostics_for(&decompiler, "storage::address_local_roundtrip");
+    assert!(
+        diagnostics.is_empty(),
+        "Address type should survive local store/load roundtrip: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn u32_type_preserved_through_word_local_roundtrip() {
+    let decompiler = setup_storage_decompiler();
+    let diagnostics = diagnostics_for(&decompiler, "storage::u32_word_local_roundtrip");
+    assert!(
+        diagnostics.is_empty(),
+        "U32 type should survive local word store/load roundtrip: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn felt_type_unchanged_through_local_roundtrip() {
+    let decompiler = setup_storage_decompiler();
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("storage::felt_local_roundtrip"))
+        .expect("felt_local_roundtrip summary");
+    // Procedure takes no stack inputs — the Felt comes from a push constant.
+    assert!(
+        summary.inputs.is_empty()
+            || summary
+                .inputs
+                .iter()
+                .all(|r| *r == TypeRequirement::Unknown),
+        "felt roundtrip should not introduce spurious requirements: {:?}",
+        summary.inputs
+    );
+}
+
+#[test]
+fn u32_type_preserved_through_mem_roundtrip() {
+    let decompiler = setup_storage_decompiler();
+    let diagnostics = diagnostics_for(&decompiler, "storage::u32_mem_roundtrip");
+    assert!(
+        diagnostics.is_empty(),
+        "U32 type should survive memory store/load roundtrip: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn address_type_preserved_through_mem_roundtrip() {
+    let decompiler = setup_storage_decompiler();
+    let diagnostics = diagnostics_for(&decompiler, "storage::address_mem_roundtrip");
+    assert!(
+        diagnostics.is_empty(),
+        "Address type should survive memory store/load roundtrip: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn u32_type_preserved_through_mem_locaddr_roundtrip() {
+    let decompiler = setup_storage_decompiler();
+    let diagnostics = diagnostics_for(&decompiler, "storage::u32_mem_locaddr_roundtrip");
+    assert!(
+        diagnostics.is_empty(),
+        "U32 type should survive locaddr-addressed memory roundtrip: {diagnostics:?}"
+    );
+}
+
 #[test]
 fn u32_assert_split_and_cast_skip_argument_mismatch_diagnostics() {
     let decompiler = setup_decompiler();
@@ -700,5 +913,43 @@ fn u32_assert_split_and_cast_skip_argument_mismatch_diagnostics() {
     assert!(
         test_diags.is_empty(),
         "u32test should not require U32 input, got: {test_diags:?}"
+    );
+}
+
+#[test]
+fn requirement_propagates_through_local_store() {
+    let decompiler = setup_storage_decompiler();
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("storage::u32_req_through_local"))
+        .expect("u32_req_through_local summary");
+    assert_eq!(
+        summary.inputs,
+        vec![TypeRequirement::U32],
+        "U32 requirement should propagate back through local store/load to input"
+    );
+}
+
+#[test]
+fn requirement_propagates_through_mem_store() {
+    let decompiler = setup_storage_decompiler();
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("storage::u32_req_through_mem"))
+        .expect("u32_req_through_mem summary");
+    assert_eq!(
+        summary.inputs,
+        vec![TypeRequirement::U32],
+        "U32 requirement should propagate back through memory store/load to input"
+    );
+}
+
+#[test]
+fn address_plus_offset_preserves_address_type() {
+    let decompiler = setup_storage_decompiler();
+    let diagnostics = diagnostics_for(&decompiler, "storage::address_offset_no_warning");
+    assert!(
+        diagnostics.is_empty(),
+        "Address + small offset should remain Address: {diagnostics:?}"
     );
 }

@@ -13,6 +13,20 @@ use super::summary::{TypeDiagnostic, TypeSummary, TypeSummaryMap};
 /// Maximum number of fixed-point iterations for local type inference.
 const MAX_TYPE_PASSES: usize = 128;
 
+/// Abstract memory address identity for type tracking.
+///
+/// Two memory operations target the same logical address when they share
+/// the same `MemAddressKey`. This is necessary because the lifter creates
+/// distinct SSA variables for each address operand, even when they refer
+/// to the same constant or `locaddr` result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MemAddressKey {
+    /// Immediate constant address (from `mem_store.N` / `mem_load.N`).
+    Constant(u64),
+    /// Local-mapped address (from `locaddr.N`).
+    LocalAddr(u16),
+}
+
 /// Output of type analysis for a single procedure.
 #[derive(Debug, Clone)]
 pub struct ProcTypeAnalysisResult {
@@ -55,6 +69,25 @@ struct ProcTypeAnalyzer<'a> {
     required: HashMap<VarKey, TypeRequirement>,
     /// Collected diagnostics.
     diagnostics: Vec<TypeDiagnostic>,
+    /// Inferred types for local variable slots.
+    ///
+    /// Updated on `LocalStore`/`LocalStoreW` and read on `LocalLoad`.
+    /// The fixed-point loop ensures convergence when stored types change
+    /// across iterations.
+    local_types: HashMap<u16, InferredType>,
+    /// Maps SSA variables to their abstract memory address identity.
+    ///
+    /// Populated during inference when a variable is defined as a constant
+    /// (`Assign { expr: Constant(Felt(n)) }`) or a `locaddr.N` intrinsic
+    /// result. Also propagated through variable copies
+    /// (`Assign { expr: Var(src) }`).
+    var_address_keys: HashMap<VarKey, MemAddressKey>,
+    /// Inferred types for memory locations, keyed by abstract address.
+    mem_types: HashMap<MemAddressKey, InferredType>,
+    /// Requirements propagated backward to local variable slots.
+    local_requirements: HashMap<u16, TypeRequirement>,
+    /// Requirements propagated backward to memory locations.
+    mem_requirements: HashMap<MemAddressKey, TypeRequirement>,
 }
 
 impl<'a> ProcTypeAnalyzer<'a> {
@@ -73,6 +106,11 @@ impl<'a> ProcTypeAnalyzer<'a> {
             inferred: HashMap::new(),
             required: HashMap::new(),
             diagnostics: Vec::new(),
+            local_types: HashMap::new(),
+            var_address_keys: HashMap::new(),
+            mem_types: HashMap::new(),
+            local_requirements: HashMap::new(),
+            mem_requirements: HashMap::new(),
         }
     }
 
@@ -153,19 +191,46 @@ impl<'a> ProcTypeAnalyzer<'a> {
     fn infer_types_in_stmt(&mut self, stmt: &Stmt) -> bool {
         match stmt {
             Stmt::Assign { dest, expr, .. } => {
-                self.set_inferred_type_for_var(dest, self.infer_expr_type(expr))
+                let changed = self.set_inferred_type_for_var(dest, self.infer_expr_type(expr));
+                // Track abstract address keys for memory type tracking.
+                match expr {
+                    Expr::Constant(Constant::Felt(n)) => {
+                        self.var_address_keys
+                            .insert(VarKey::from_var(dest), MemAddressKey::Constant(*n));
+                    }
+                    Expr::Var(src) => {
+                        if let Some(key) =
+                            self.var_address_keys.get(&VarKey::from_var(src)).copied()
+                        {
+                            self.var_address_keys.insert(VarKey::from_var(dest), key);
+                        }
+                    }
+                    _ => {}
+                }
+                changed
             }
             Stmt::MemLoad { load, .. } => {
+                let stored_ty = load
+                    .address
+                    .first()
+                    .and_then(|v| self.mem_address_key_for_var(v))
+                    .and_then(|key| self.mem_types.get(&key).copied())
+                    .unwrap_or(InferredType::Felt);
                 let mut changed = false;
                 for output in &load.outputs {
-                    changed |= self.set_inferred_type_for_var(output, InferredType::Felt);
+                    changed |= self.set_inferred_type_for_var(output, stored_ty);
                 }
                 changed
             }
             Stmt::LocalLoad { load, .. } => {
+                let stored_ty = self
+                    .local_types
+                    .get(&load.index)
+                    .copied()
+                    .unwrap_or(InferredType::Felt);
                 let mut changed = false;
                 for output in &load.outputs {
-                    changed |= self.set_inferred_type_for_var(output, InferredType::Felt);
+                    changed |= self.set_inferred_type_for_var(output, stored_ty);
                 }
                 changed
             }
@@ -195,6 +260,15 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 if Self::intrinsic_asserts_u32_args(&intrinsic.name) {
                     for arg in &intrinsic.args {
                         changed |= self.set_inferred_type_for_var(arg, InferredType::U32);
+                    }
+                }
+                // Track locaddr results for memory address key mapping.
+                if let Some(index_str) = intrinsic.name.strip_prefix("locaddr.")
+                    && let Ok(index) = index_str.parse::<u16>()
+                {
+                    for result in &intrinsic.results {
+                        self.var_address_keys
+                            .insert(VarKey::from_var(result), MemAddressKey::LocalAddr(index));
                     }
                 }
                 changed
@@ -227,11 +301,38 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 }
                 changed
             }
-            Stmt::MemStore { .. }
-            | Stmt::AdvStore { .. }
-            | Stmt::LocalStore { .. }
-            | Stmt::LocalStoreW { .. }
-            | Stmt::Return { .. } => false,
+            Stmt::LocalStore { store, .. } => {
+                self.record_local_store_type(store.index, &store.values)
+            }
+            Stmt::LocalStoreW { store, .. } => {
+                self.record_local_store_type(store.index, &store.values)
+            }
+            Stmt::MemStore { store, .. } => {
+                let mut changed = false;
+                if let Some(addr_key) = store
+                    .address
+                    .first()
+                    .and_then(|v| self.mem_address_key_for_var(v))
+                {
+                    let stored_ty = store
+                        .values
+                        .iter()
+                        .map(|v| self.inferred_type_for_var(v))
+                        .fold(InferredType::Unknown, InferredType::refine);
+                    let current = self
+                        .mem_types
+                        .get(&addr_key)
+                        .copied()
+                        .unwrap_or(InferredType::Unknown);
+                    let updated = current.refine(stored_ty);
+                    if updated != current {
+                        self.mem_types.insert(addr_key, updated);
+                        changed = true;
+                    }
+                }
+                changed
+            }
+            Stmt::AdvStore { .. } | Stmt::Return { .. } => false,
         }
     }
 
@@ -342,7 +443,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Infer type for a binary expression.
-    fn infer_binary_expr_type(&self, op: BinOp, _lhs: &Expr, _rhs: &Expr) -> InferredType {
+    fn infer_binary_expr_type(&self, op: BinOp, lhs: &Expr, rhs: &Expr) -> InferredType {
         match op {
             BinOp::Eq
             | BinOp::Neq
@@ -366,7 +467,18 @@ impl<'a> ProcTypeAnalyzer<'a> {
             | BinOp::U32WrappingAdd
             | BinOp::U32WrappingSub
             | BinOp::U32WrappingMul => InferredType::U32,
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::U32Exp => InferredType::Felt,
+            BinOp::Add | BinOp::Sub => {
+                let lhs_ty = self.infer_expr_type(lhs);
+                let rhs_ty = self.infer_expr_type(rhs);
+                match (lhs_ty, rhs_ty) {
+                    (InferredType::Address, InferredType::Bool | InferredType::U32)
+                    | (InferredType::Bool | InferredType::U32, InferredType::Address) => {
+                        InferredType::Address
+                    }
+                    _ => InferredType::Felt,
+                }
+            }
+            BinOp::Mul | BinOp::Div | BinOp::U32Exp => InferredType::Felt,
         }
     }
 
@@ -376,6 +488,55 @@ impl<'a> ProcTypeAnalyzer<'a> {
             .get(&VarKey::from_var(var))
             .copied()
             .unwrap_or(InferredType::Unknown)
+    }
+
+    /// Resolve the abstract memory address key for a variable, if known.
+    fn mem_address_key_for_var(&self, var: &Var) -> Option<MemAddressKey> {
+        self.var_address_keys.get(&VarKey::from_var(var)).copied()
+    }
+
+    /// Record the inferred type for a local variable slot from stored values.
+    ///
+    /// Combines the types of all stored values via [`InferredType::refine`] and
+    /// refines the existing slot type. Returns `true` if the type changed.
+    fn record_local_store_type(&mut self, index: u16, values: &[Var]) -> bool {
+        let stored_ty = values
+            .iter()
+            .map(|v| self.inferred_type_for_var(v))
+            .fold(InferredType::Unknown, InferredType::refine);
+        let current = self
+            .local_types
+            .get(&index)
+            .copied()
+            .unwrap_or(InferredType::Unknown);
+        let updated = current.refine(stored_ty);
+        if updated != current {
+            self.local_types.insert(index, updated);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Propagate a local slot's accumulated requirement to stored values.
+    ///
+    /// Looks up the requirement for `index` in [`local_requirements`] and
+    /// applies it to each stored value. Returns `true` if any requirement
+    /// changed.
+    fn propagate_local_store_requirement(&mut self, index: u16, values: &[Var]) -> bool {
+        let req = self
+            .local_requirements
+            .get(&index)
+            .copied()
+            .unwrap_or(TypeRequirement::Unknown);
+        if req == TypeRequirement::Unknown {
+            return false;
+        }
+        let mut changed = false;
+        for value in values {
+            changed |= self.apply_requirement_to_var(value, req);
+        }
+        changed
     }
 
     /// Update inferred type for a variable.
@@ -411,6 +572,9 @@ impl<'a> ProcTypeAnalyzer<'a> {
             Stmt::MemLoad { load, .. } => {
                 let mut changed = false;
                 for address in &load.address {
+                    if self.mem_address_key_for_var(address).is_some() {
+                        continue;
+                    }
                     changed |= self.apply_requirement_to_var(address, TypeRequirement::Address);
                 }
                 changed
@@ -418,6 +582,9 @@ impl<'a> ProcTypeAnalyzer<'a> {
             Stmt::MemStore { store, .. } => {
                 let mut changed = false;
                 for address in &store.address {
+                    if self.mem_address_key_for_var(address).is_some() {
+                        continue;
+                    }
                     changed |= self.apply_requirement_to_var(address, TypeRequirement::Address);
                 }
                 changed
@@ -617,13 +784,80 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 }
                 changed
             }
-            Stmt::MemLoad { .. }
-            | Stmt::MemStore { .. }
-            | Stmt::AdvLoad { .. }
+            Stmt::LocalLoad { load, .. } => {
+                let mut changed = false;
+                for output in &load.outputs {
+                    let req = self.requirement_for_var(output);
+                    if req == TypeRequirement::Unknown {
+                        continue;
+                    }
+                    let current = self
+                        .local_requirements
+                        .get(&load.index)
+                        .copied()
+                        .unwrap_or(TypeRequirement::Unknown);
+                    let updated = current.meet(req);
+                    if updated != current {
+                        self.local_requirements.insert(load.index, updated);
+                        changed = true;
+                    }
+                }
+                changed
+            }
+            Stmt::LocalStore { store, .. } => {
+                self.propagate_local_store_requirement(store.index, &store.values)
+            }
+            Stmt::LocalStoreW { store, .. } => {
+                self.propagate_local_store_requirement(store.index, &store.values)
+            }
+            Stmt::MemLoad { load, .. } => {
+                let mut changed = false;
+                if let Some(addr_key) = load
+                    .address
+                    .first()
+                    .and_then(|v| self.mem_address_key_for_var(v))
+                {
+                    for output in &load.outputs {
+                        let req = self.requirement_for_var(output);
+                        if req == TypeRequirement::Unknown {
+                            continue;
+                        }
+                        let current = self
+                            .mem_requirements
+                            .get(&addr_key)
+                            .copied()
+                            .unwrap_or(TypeRequirement::Unknown);
+                        let updated = current.meet(req);
+                        if updated != current {
+                            self.mem_requirements.insert(addr_key, updated);
+                            changed = true;
+                        }
+                    }
+                }
+                changed
+            }
+            Stmt::MemStore { store, .. } => {
+                let mut changed = false;
+                if let Some(addr_key) = store
+                    .address
+                    .first()
+                    .and_then(|v| self.mem_address_key_for_var(v))
+                {
+                    let req = self
+                        .mem_requirements
+                        .get(&addr_key)
+                        .copied()
+                        .unwrap_or(TypeRequirement::Unknown);
+                    if req != TypeRequirement::Unknown {
+                        for value in &store.values {
+                            changed |= self.apply_requirement_to_var(value, req);
+                        }
+                    }
+                }
+                changed
+            }
+            Stmt::AdvLoad { .. }
             | Stmt::AdvStore { .. }
-            | Stmt::LocalLoad { .. }
-            | Stmt::LocalStore { .. }
-            | Stmt::LocalStoreW { .. }
             | Stmt::Call { .. }
             | Stmt::Exec { .. }
             | Stmt::SysCall { .. }
@@ -801,6 +1035,13 @@ impl<'a> ProcTypeAnalyzer<'a> {
             }
             Stmt::MemLoad { span, load } => {
                 for address in &load.address {
+                    // Skip the address check if the variable is a known abstract
+                    // address (constant immediate or locaddr result) — these are
+                    // always valid memory addresses regardless of their inferred
+                    // scalar type.
+                    if self.mem_address_key_for_var(address).is_some() {
+                        continue;
+                    }
                     self.check_var_requirement(
                         address,
                         TypeRequirement::Address,
@@ -811,6 +1052,11 @@ impl<'a> ProcTypeAnalyzer<'a> {
             }
             Stmt::MemStore { span, store } => {
                 for address in &store.address {
+                    // Skip the address check if the variable is a known abstract
+                    // address (constant immediate or locaddr result).
+                    if self.mem_address_key_for_var(address).is_some() {
+                        continue;
+                    }
                     self.check_var_requirement(
                         address,
                         TypeRequirement::Address,
