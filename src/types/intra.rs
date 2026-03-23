@@ -13,6 +13,12 @@ use super::summary::{TypeDiagnostic, TypeSummary, TypeSummaryMap};
 /// Maximum number of fixed-point iterations for local type inference.
 const MAX_TYPE_PASSES: usize = 128;
 
+/// Upper bound (exclusive) of the valid Miden VM memory address range.
+///
+/// Memory addresses must be in `[0, 2^32)`. Operations like `mem_load`
+/// and `mem_store` trap at runtime if the address is `>= 2^32`.
+const MAX_MEMORY_ADDRESS: u64 = 1u64 << 32;
+
 /// Abstract memory address identity for type tracking.
 ///
 /// Two memory operations target the same logical address when they share
@@ -21,10 +27,22 @@ const MAX_TYPE_PASSES: usize = 128;
 /// to the same constant or `locaddr` result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum MemAddressKey {
-    /// Immediate constant address (from `mem_store.N` / `mem_load.N`).
-    Constant(u64),
+    /// Constant address known to be in the valid memory range `[0, 2^32)`.
+    ///
+    /// Stored as `u32` to enforce the range invariant at the type level.
+    /// Created from `Constant::Felt(n)` assignments where `n < 2^32`.
+    Constant(u32),
     /// Local-mapped address (from `locaddr.N`).
     LocalAddr(u16),
+    /// Local-mapped address offset by a known constant (from `locaddr.N + k`).
+    ///
+    /// Only created for `Add` operations (not `Sub`), because field `sub`
+    /// computes `(a - b) mod p` which can wrap to addresses outside the
+    /// procedure's local frame.
+    ///
+    /// The absolute address is not known at analysis time, but two operations
+    /// sharing the same `(local_index, offset)` target the same location.
+    LocalAddrOffset(u16, u32),
 }
 
 /// Output of type analysis for a single procedure.
@@ -117,11 +135,29 @@ impl<'a> ProcTypeAnalyzer<'a> {
     /// Run fixed-point inference and mismatch checks.
     fn analyze(&mut self, stmts: &[Stmt]) -> ProcTypeAnalysisResult {
         for _ in 0..MAX_TYPE_PASSES {
-            let mut changed = false;
-            changed |= self.infer_types_in_block(stmts);
-            changed |= self.seed_requirements_in_block(stmts);
-            changed |= self.propagate_requirements_in_block(stmts);
-            if !changed {
+            let prev_inferred = self.inferred.clone();
+            let prev_required = self.required.clone();
+            let prev_local_types = self.local_types.clone();
+            let prev_mem_types = self.mem_types.clone();
+            let prev_local_req = self.local_requirements.clone();
+            let prev_mem_req = self.mem_requirements.clone();
+            let prev_addr_keys = self.var_address_keys.clone();
+
+            // Return values are intentionally discarded: convergence is
+            // detected by comparing full state snapshots (below), not by
+            // per-call `changed` flags, which can oscillate within a pass.
+            let _ = self.infer_types_in_block(stmts);
+            let _ = self.seed_requirements_in_block(stmts);
+            let _ = self.propagate_requirements_in_block(stmts);
+
+            if self.inferred == prev_inferred
+                && self.required == prev_required
+                && self.local_types == prev_local_types
+                && self.mem_types == prev_mem_types
+                && self.local_requirements == prev_local_req
+                && self.mem_requirements == prev_mem_req
+                && self.var_address_keys == prev_addr_keys
+            {
                 break;
             }
         }
@@ -194,14 +230,30 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 let changed = self.set_inferred_type_for_var(dest, self.infer_expr_type(expr));
                 // Track abstract address keys for memory type tracking.
                 match expr {
-                    Expr::Constant(Constant::Felt(n)) => {
+                    Expr::Constant(Constant::Felt(n)) if *n < MAX_MEMORY_ADDRESS => {
                         self.var_address_keys
-                            .insert(VarKey::from_var(dest), MemAddressKey::Constant(*n));
+                            .insert(VarKey::from_var(dest), MemAddressKey::Constant(*n as u32));
                     }
                     Expr::Var(src) => {
                         if let Some(key) =
                             self.var_address_keys.get(&VarKey::from_var(src)).copied()
                         {
+                            self.var_address_keys.insert(VarKey::from_var(dest), key);
+                        }
+                    }
+                    Expr::Binary(BinOp::Add, lhs, rhs) => {
+                        // Propagate MemAddressKey through locaddr + constant offset.
+                        // Try both operand orderings since addition is commutative.
+                        // Sub is excluded: field sub computes (a - b) mod p, which
+                        // wraps to addresses outside the procedure's local frame.
+                        //
+                        // Uses `or` (eager) instead of `or_else` (lazy) because
+                        // a closure capturing `&self` conflicts with the outer
+                        // `&mut self` borrow.
+                        let key = self
+                            .resolve_addr_offset_key(lhs, rhs)
+                            .or(self.resolve_addr_offset_key(rhs, lhs));
+                        if let Some(key) = key {
                             self.var_address_keys.insert(VarKey::from_var(dest), key);
                         }
                     }
@@ -287,6 +339,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     let else_ty = self.inferred_type_for_var(&phi.else_var);
                     changed |=
                         self.set_inferred_type_for_var(&phi.dest, then_ty.combine_paths(else_ty));
+                    self.propagate_phi_address_key(&phi.dest, &phi.then_var, &phi.else_var);
                 }
                 changed
             }
@@ -298,6 +351,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     let step_ty = self.inferred_type_for_var(&phi.step);
                     changed |=
                         self.set_inferred_type_for_var(&phi.dest, init_ty.combine_paths(step_ty));
+                    self.propagate_phi_address_key(&phi.dest, &phi.init, &phi.step);
                 }
                 changed
             }
@@ -343,7 +397,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
             return false;
         };
         for (idx, result) in results.iter().enumerate() {
-            let ty = if summary.is_unknown() {
+            let ty = if summary.is_opaque() {
                 InferredType::Unknown
             } else {
                 summary
@@ -443,7 +497,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Infer type for a binary expression.
-    fn infer_binary_expr_type(&self, op: BinOp, lhs: &Expr, rhs: &Expr) -> InferredType {
+    fn infer_binary_expr_type(&self, op: BinOp, _lhs: &Expr, _rhs: &Expr) -> InferredType {
         match op {
             BinOp::Eq
             | BinOp::Neq
@@ -467,18 +521,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
             | BinOp::U32WrappingAdd
             | BinOp::U32WrappingSub
             | BinOp::U32WrappingMul => InferredType::U32,
-            BinOp::Add | BinOp::Sub => {
-                let lhs_ty = self.infer_expr_type(lhs);
-                let rhs_ty = self.infer_expr_type(rhs);
-                match (lhs_ty, rhs_ty) {
-                    (InferredType::Address, InferredType::Bool | InferredType::U32)
-                    | (InferredType::Bool | InferredType::U32, InferredType::Address) => {
-                        InferredType::Address
-                    }
-                    _ => InferredType::Felt,
-                }
-            }
-            BinOp::Mul | BinOp::Div | BinOp::U32Exp => InferredType::Felt,
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::U32Exp => InferredType::Felt,
         }
     }
 
@@ -493,6 +536,52 @@ impl<'a> ProcTypeAnalyzer<'a> {
     /// Resolve the abstract memory address key for a variable, if known.
     fn mem_address_key_for_var(&self, var: &Var) -> Option<MemAddressKey> {
         self.var_address_keys.get(&VarKey::from_var(var)).copied()
+    }
+
+    /// Propagate a `MemAddressKey` through a phi node when both incoming
+    /// values share the same key. If the keys disagree or either is absent,
+    /// no key is assigned (conservative).
+    fn propagate_phi_address_key(&mut self, dest: &Var, lhs: &Var, rhs: &Var) {
+        let lhs_key = self.mem_address_key_for_var(lhs);
+        let rhs_key = self.mem_address_key_for_var(rhs);
+        if let (Some(lk), Some(rk)) = (lhs_key, rhs_key)
+            && lk == rk
+        {
+            self.var_address_keys.insert(VarKey::from_var(dest), lk);
+        }
+    }
+
+    /// Resolve a `MemAddressKey` for an address-plus-offset expression.
+    ///
+    /// Returns `Some(LocalAddrOffset(index, offset))` when `base_expr`
+    /// resolves to a `LocalAddr` or `LocalAddrOffset` key and `offset_expr`
+    /// is a constant in `[0, 2^32)`. Returns `None` if the accumulated
+    /// offset overflows `u32` or the base is not a local address.
+    fn resolve_addr_offset_key(
+        &self,
+        base_expr: &Expr,
+        offset_expr: &Expr,
+    ) -> Option<MemAddressKey> {
+        let base_key = match base_expr {
+            Expr::Var(v) => self.mem_address_key_for_var(v)?,
+            _ => return None,
+        };
+        let offset: u32 = match offset_expr {
+            Expr::Constant(Constant::Felt(n)) if *n < MAX_MEMORY_ADDRESS => *n as u32,
+            Expr::Var(v) => match self.mem_address_key_for_var(v)? {
+                MemAddressKey::Constant(n) => n,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        match base_key {
+            MemAddressKey::LocalAddr(index) => Some(MemAddressKey::LocalAddrOffset(index, offset)),
+            MemAddressKey::LocalAddrOffset(index, base_offset) => {
+                let total = base_offset.checked_add(offset)?;
+                Some(MemAddressKey::LocalAddrOffset(index, total))
+            }
+            MemAddressKey::Constant(_) => None,
+        }
     }
 
     /// Record the inferred type for a local variable slot from stored values.
@@ -625,7 +714,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
         let Some(summary) = self.summary_for_target(target).cloned() else {
             return false;
         };
-        if summary.is_unknown() {
+        if summary.is_opaque() {
             return false;
         }
         let mut changed = false;
@@ -791,6 +880,16 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     if req == TypeRequirement::Unknown {
                         continue;
                     }
+                    // Sticky Unknown: once a slot's requirement collapses to
+                    // Unknown from a conflict (two incompatible non-Unknown
+                    // requirements), it stays Unknown for the rest of this pass.
+                    // This prevents order-dependent results when 3+ loads from
+                    // the same slot have conflicting requirements.
+                    if let Some(&TypeRequirement::Unknown) =
+                        self.local_requirements.get(&load.index)
+                    {
+                        continue;
+                    }
                     let current = self
                         .local_requirements
                         .get(&load.index)
@@ -820,6 +919,12 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     for output in &load.outputs {
                         let req = self.requirement_for_var(output);
                         if req == TypeRequirement::Unknown {
+                            continue;
+                        }
+                        // Sticky Unknown: see comment in LocalLoad handler.
+                        if let Some(&TypeRequirement::Unknown) =
+                            self.mem_requirements.get(&addr_key)
+                        {
                             continue;
                         }
                         let current = self
@@ -1127,7 +1232,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
         let Some(summary) = self.summary_for_target(target).cloned() else {
             return;
         };
-        if summary.is_unknown() {
+        if summary.is_opaque() {
             return;
         }
         let callee = SymbolPath::new(target.to_string());

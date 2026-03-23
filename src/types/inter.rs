@@ -48,23 +48,23 @@ fn infer_summary_for_node(
 ) -> TypeSummary {
     let proc_path = crate::symbol::path::SymbolPath::new(fq_name.to_string());
     let Some(signature) = signatures.get(&proc_path) else {
-        return TypeSummary::unknown();
+        return TypeSummary::opaque();
     };
 
     let (inputs, outputs) = match signature {
         ProcSignature::Known {
             inputs, outputs, ..
         } => (*inputs, *outputs),
-        ProcSignature::Unknown => return TypeSummary::unknown(),
+        ProcSignature::Unknown => return TypeSummary::opaque(),
     };
 
     let Some((program, proc)) = workspace.lookup_proc_entry(&proc_path) else {
-        return TypeSummary::unknown_with_arity(inputs, outputs);
+        return TypeSummary::opaque_with_arity(inputs, outputs);
     };
     let resolver = create_resolver(program.module(), workspace.source_manager());
     let stmts = match lift::lift_proc(proc, &proc_path, &resolver, signatures) {
         Ok(stmts) => stmts,
-        Err(_err) => return TypeSummary::unknown_with_arity(inputs, outputs),
+        Err(_err) => return TypeSummary::opaque_with_arity(inputs, outputs),
     };
 
     let analysis = analyze_proc_types(&proc_path, inputs, outputs, &stmts, callee_summaries);

@@ -21,7 +21,7 @@ pub struct TypeSummary {
     /// new return values on the stack).
     pub outputs: Vec<InferredType>,
     /// Indicates the summary is opaque and should not be used for mismatch checks.
-    pub unknown: bool,
+    pub opaque: bool,
 }
 
 impl TypeSummary {
@@ -30,33 +30,33 @@ impl TypeSummary {
         Self {
             inputs,
             outputs,
-            unknown: false,
+            opaque: false,
         }
     }
 
     /// Create an opaque summary with explicit input/output arity.
-    pub fn unknown_with_arity(inputs: usize, outputs: usize) -> Self {
+    pub fn opaque_with_arity(inputs: usize, outputs: usize) -> Self {
         Self {
             inputs: vec![TypeRequirement::Unknown; inputs],
             outputs: vec![InferredType::Unknown; outputs],
-            unknown: true,
+            opaque: true,
         }
     }
 
-    /// Create a fully unknown summary without arity information.
-    pub fn unknown() -> Self {
-        Self::unknown_with_arity(0, 0)
+    /// Create a fully opaque summary without arity information.
+    pub fn opaque() -> Self {
+        Self::opaque_with_arity(0, 0)
     }
 
     /// Returns true if this summary is opaque.
-    pub const fn is_unknown(&self) -> bool {
-        self.unknown
+    pub const fn is_opaque(&self) -> bool {
+        self.opaque
     }
 }
 
 impl Default for TypeSummary {
     fn default() -> Self {
-        Self::unknown()
+        Self::opaque()
     }
 }
 
