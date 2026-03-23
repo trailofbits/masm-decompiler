@@ -7,7 +7,7 @@ use miden_assembly_syntax::debuginfo::SourceSpan;
 use crate::ir::{BinOp, Constant, Expr, Stmt, UnOp, ValueId, Var};
 use crate::symbol::path::SymbolPath;
 
-use super::domain::{Compatibility, InferredType, TypeRequirement, VarKey, check_compatibility};
+use super::domain::{TypeFact, VarKey};
 use super::summary::{TypeDiagnostic, TypeSummary, TypeSummaryMap};
 
 /// Maximum number of fixed-point iterations for local type inference.
@@ -82,9 +82,9 @@ struct ProcTypeAnalyzer<'a> {
     /// Previously inferred summaries for callees.
     callee_summaries: &'a TypeSummaryMap,
     /// Inferred type guarantees for variables.
-    inferred: HashMap<VarKey, InferredType>,
+    inferred: HashMap<VarKey, TypeFact>,
     /// Inferred requirements for variables.
-    required: HashMap<VarKey, TypeRequirement>,
+    required: HashMap<VarKey, TypeFact>,
     /// Collected diagnostics.
     diagnostics: Vec<TypeDiagnostic>,
     /// Inferred types for local variable slots.
@@ -92,7 +92,7 @@ struct ProcTypeAnalyzer<'a> {
     /// Updated on `LocalStore`/`LocalStoreW` and read on `LocalLoad`.
     /// The fixed-point loop ensures convergence when stored types change
     /// across iterations.
-    local_types: HashMap<u16, InferredType>,
+    local_types: HashMap<u16, TypeFact>,
     /// Maps SSA variables to their abstract memory address identity.
     ///
     /// Populated during inference when a variable is defined as a constant
@@ -101,11 +101,11 @@ struct ProcTypeAnalyzer<'a> {
     /// (`Assign { expr: Var(src) }`).
     var_address_keys: HashMap<VarKey, MemAddressKey>,
     /// Inferred types for memory locations, keyed by abstract address.
-    mem_types: HashMap<MemAddressKey, InferredType>,
+    mem_types: HashMap<MemAddressKey, TypeFact>,
     /// Requirements propagated backward to local variable slots.
-    local_requirements: HashMap<u16, TypeRequirement>,
+    local_requirements: HashMap<u16, TypeFact>,
     /// Requirements propagated backward to memory locations.
-    mem_requirements: HashMap<MemAddressKey, TypeRequirement>,
+    mem_requirements: HashMap<MemAddressKey, TypeFact>,
 }
 
 impl<'a> ProcTypeAnalyzer<'a> {
@@ -177,12 +177,8 @@ impl<'a> ProcTypeAnalyzer<'a> {
         let mut inputs = Vec::with_capacity(self.input_count);
         for index in (0..self.input_count).rev() {
             let key = Self::input_var_key(index);
-            let req = self
-                .required
-                .get(&key)
-                .copied()
-                .unwrap_or(TypeRequirement::Unknown);
-            inputs.push(req);
+            let req = self.required.get(&key).copied().unwrap_or(TypeFact::Felt);
+            inputs.push(req.to_requirement());
         }
 
         let mut outputs = Vec::with_capacity(self.output_count);
@@ -191,8 +187,8 @@ impl<'a> ProcTypeAnalyzer<'a> {
             let ty = return_values
                 .and_then(|values| values.get(index))
                 .map(|var| self.inferred_type_for_var(var))
-                .unwrap_or(InferredType::Unknown);
-            outputs.push(ty);
+                .unwrap_or(TypeFact::Felt);
+            outputs.push(ty.to_inferred_type());
         }
 
         TypeSummary::new(inputs, outputs)
@@ -267,7 +263,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     .first()
                     .and_then(|v| self.mem_address_key_for_var(v))
                     .and_then(|key| self.mem_types.get(&key).copied())
-                    .unwrap_or(InferredType::Felt);
+                    .unwrap_or(TypeFact::Felt);
                 let mut changed = false;
                 for output in &load.outputs {
                     changed |= self.set_inferred_type_for_var(output, stored_ty);
@@ -279,7 +275,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     .local_types
                     .get(&load.index)
                     .copied()
-                    .unwrap_or(InferredType::Felt);
+                    .unwrap_or(TypeFact::Felt);
                 let mut changed = false;
                 for output in &load.outputs {
                     changed |= self.set_inferred_type_for_var(output, stored_ty);
@@ -289,7 +285,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
             Stmt::AdvLoad { load, .. } => {
                 let mut changed = false;
                 for output in &load.outputs {
-                    changed |= self.set_inferred_type_for_var(output, InferredType::Felt);
+                    changed |= self.set_inferred_type_for_var(output, TypeFact::Felt);
                 }
                 changed
             }
@@ -299,7 +295,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
             Stmt::DynCall { results, .. } => {
                 let mut changed = false;
                 for result in results {
-                    changed |= self.set_inferred_type_for_var(result, InferredType::Unknown);
+                    changed |= self.set_inferred_type_for_var(result, TypeFact::Felt);
                 }
                 changed
             }
@@ -311,7 +307,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 }
                 if Self::intrinsic_asserts_u32_args(&intrinsic.name) {
                     for arg in &intrinsic.args {
-                        changed |= self.set_inferred_type_for_var(arg, InferredType::U32);
+                        changed |= self.set_inferred_type_for_var(arg, TypeFact::U32);
                     }
                 }
                 // Track locaddr results for memory address key mapping.
@@ -337,8 +333,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 for phi in phis {
                     let then_ty = self.inferred_type_for_var(&phi.then_var);
                     let else_ty = self.inferred_type_for_var(&phi.else_var);
-                    changed |=
-                        self.set_inferred_type_for_var(&phi.dest, then_ty.combine_paths(else_ty));
+                    changed |= self.set_inferred_type_for_var(&phi.dest, then_ty.join(else_ty));
                     self.propagate_phi_address_key(&phi.dest, &phi.then_var, &phi.else_var);
                 }
                 changed
@@ -349,8 +344,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 for phi in phis {
                     let init_ty = self.inferred_type_for_var(&phi.init);
                     let step_ty = self.inferred_type_for_var(&phi.step);
-                    changed |=
-                        self.set_inferred_type_for_var(&phi.dest, init_ty.combine_paths(step_ty));
+                    changed |= self.set_inferred_type_for_var(&phi.dest, init_ty.join(step_ty));
                     self.propagate_phi_address_key(&phi.dest, &phi.init, &phi.step);
                 }
                 changed
@@ -372,14 +366,14 @@ impl<'a> ProcTypeAnalyzer<'a> {
                         .values
                         .iter()
                         .map(|v| self.inferred_type_for_var(v))
-                        .fold(InferredType::Unknown, InferredType::refine);
-                    let current = self
-                        .mem_types
-                        .get(&addr_key)
-                        .copied()
-                        .unwrap_or(InferredType::Unknown);
-                    let updated = current.refine(stored_ty);
-                    if updated != current {
+                        .reduce(TypeFact::glb)
+                        .unwrap_or(TypeFact::Felt);
+                    let current = self.mem_types.get(&addr_key).copied();
+                    let updated = match current {
+                        Some(existing) => existing.join(stored_ty),
+                        None => stored_ty,
+                    };
+                    if current != Some(updated) {
                         self.mem_types.insert(addr_key, updated);
                         changed = true;
                     }
@@ -398,13 +392,13 @@ impl<'a> ProcTypeAnalyzer<'a> {
         };
         for (idx, result) in results.iter().enumerate() {
             let ty = if summary.is_opaque() {
-                InferredType::Unknown
+                TypeFact::Felt
             } else {
                 summary
                     .outputs
                     .get(idx)
-                    .copied()
-                    .unwrap_or(InferredType::Unknown)
+                    .map(|t| TypeFact::from_inferred_type(*t))
+                    .unwrap_or(TypeFact::Felt)
             };
             changed |= self.set_inferred_type_for_var(result, ty);
         }
@@ -412,13 +406,15 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Infer result type for an intrinsic operation.
-    fn intrinsic_result_type(&self, name: &str) -> InferredType {
+    fn intrinsic_result_type(&self, name: &str) -> TypeFact {
         if name.starts_with("u32") || name == "sdepth" {
-            InferredType::U32
+            TypeFact::U32
         } else if name.starts_with("locaddr.") {
-            InferredType::Address
+            TypeFact::Address
+        } else if name == "is_odd" {
+            TypeFact::Bool
         } else {
-            InferredType::Unknown
+            TypeFact::Felt
         }
     }
 
@@ -448,14 +444,14 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Infer type for an expression.
-    fn infer_expr_type(&self, expr: &Expr) -> InferredType {
+    fn infer_expr_type(&self, expr: &Expr) -> TypeFact {
         match expr {
-            Expr::True | Expr::False => InferredType::Bool,
+            Expr::True | Expr::False => TypeFact::Bool,
             Expr::Var(var) => self.inferred_type_for_var(var),
             Expr::Constant(constant) => self.infer_constant_type(constant),
             Expr::Unary(op, inner) => self.infer_unary_expr_type(*op, inner),
             Expr::Binary(op, lhs, rhs) => self.infer_binary_expr_type(*op, lhs, rhs),
-            Expr::EqW { .. } => InferredType::Bool,
+            Expr::EqW { .. } => TypeFact::Bool,
             Expr::Ternary {
                 then_expr,
                 else_expr,
@@ -463,7 +459,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
             } => {
                 let then_ty = self.infer_expr_type(then_expr);
                 let else_ty = self.infer_expr_type(else_expr);
-                then_ty.combine_paths(else_ty)
+                then_ty.join(else_ty)
             }
         }
     }
@@ -471,33 +467,35 @@ impl<'a> ProcTypeAnalyzer<'a> {
     /// Infer type for a constant expression.
     ///
     /// `Felt(0)` and `Felt(1)` are inferred as `Bool` since they are the
-    /// most precise type for these values. The lattice `Bool <: U32 <: Felt`
-    /// ensures they widen correctly in arithmetic or u32 contexts.
-    fn infer_constant_type(&self, constant: &Constant) -> InferredType {
+    /// most precise type for these values. Constants in the u32 range are
+    /// inferred as `U32`. The chain lattice ensures they widen correctly
+    /// in arithmetic or felt contexts.
+    fn infer_constant_type(&self, constant: &Constant) -> TypeFact {
         match constant {
-            Constant::Felt(0 | 1) => InferredType::Bool,
-            Constant::Felt(_) | Constant::Defined(_) => InferredType::Felt,
-            Constant::Word(_) => InferredType::Unknown,
+            Constant::Felt(0 | 1) => TypeFact::Bool,
+            Constant::Felt(n) if *n < MAX_MEMORY_ADDRESS => TypeFact::U32,
+            Constant::Felt(_) | Constant::Defined(_) => TypeFact::Felt,
+            Constant::Word(_) => TypeFact::Felt,
         }
     }
 
     /// Infer type for a unary expression.
-    fn infer_unary_expr_type(&self, op: UnOp, _inner: &Expr) -> InferredType {
+    fn infer_unary_expr_type(&self, op: UnOp, _inner: &Expr) -> TypeFact {
         match op {
-            UnOp::Not => InferredType::Bool,
-            UnOp::U32Test => InferredType::Bool,
+            UnOp::Not => TypeFact::Bool,
+            UnOp::U32Test => TypeFact::Bool,
             UnOp::U32Cast
             | UnOp::U32Not
             | UnOp::U32Clz
             | UnOp::U32Ctz
             | UnOp::U32Clo
-            | UnOp::U32Cto => InferredType::U32,
-            UnOp::Neg | UnOp::Inv | UnOp::Pow2 => InferredType::Felt,
+            | UnOp::U32Cto => TypeFact::U32,
+            UnOp::Neg | UnOp::Inv | UnOp::Pow2 => TypeFact::Felt,
         }
     }
 
     /// Infer type for a binary expression.
-    fn infer_binary_expr_type(&self, op: BinOp, _lhs: &Expr, _rhs: &Expr) -> InferredType {
+    fn infer_binary_expr_type(&self, op: BinOp, _lhs: &Expr, _rhs: &Expr) -> TypeFact {
         match op {
             BinOp::Eq
             | BinOp::Neq
@@ -511,7 +509,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
             | BinOp::U32Lt
             | BinOp::U32Lte
             | BinOp::U32Gt
-            | BinOp::U32Gte => InferredType::Bool,
+            | BinOp::U32Gte => TypeFact::Bool,
             BinOp::U32And
             | BinOp::U32Or
             | BinOp::U32Xor
@@ -520,17 +518,17 @@ impl<'a> ProcTypeAnalyzer<'a> {
             | BinOp::U32Rotr
             | BinOp::U32WrappingAdd
             | BinOp::U32WrappingSub
-            | BinOp::U32WrappingMul => InferredType::U32,
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::U32Exp => InferredType::Felt,
+            | BinOp::U32WrappingMul => TypeFact::U32,
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::U32Exp => TypeFact::Felt,
         }
     }
 
     /// Read inferred type for a variable.
-    fn inferred_type_for_var(&self, var: &Var) -> InferredType {
+    fn inferred_type_for_var(&self, var: &Var) -> TypeFact {
         self.inferred
             .get(&VarKey::from_var(var))
             .copied()
-            .unwrap_or(InferredType::Unknown)
+            .unwrap_or(TypeFact::Felt)
     }
 
     /// Resolve the abstract memory address key for a variable, if known.
@@ -586,20 +584,20 @@ impl<'a> ProcTypeAnalyzer<'a> {
 
     /// Record the inferred type for a local variable slot from stored values.
     ///
-    /// Combines the types of all stored values via [`InferredType::refine`] and
-    /// refines the existing slot type. Returns `true` if the type changed.
+    /// Combines the types of all stored values via [`TypeFact::glb`] and
+    /// joins with the existing slot type. Returns `true` if the type changed.
     fn record_local_store_type(&mut self, index: u16, values: &[Var]) -> bool {
         let stored_ty = values
             .iter()
             .map(|v| self.inferred_type_for_var(v))
-            .fold(InferredType::Unknown, InferredType::refine);
-        let current = self
-            .local_types
-            .get(&index)
-            .copied()
-            .unwrap_or(InferredType::Unknown);
-        let updated = current.refine(stored_ty);
-        if updated != current {
+            .reduce(TypeFact::glb)
+            .unwrap_or(TypeFact::Felt);
+        let current = self.local_types.get(&index).copied();
+        let updated = match current {
+            Some(existing) => existing.join(stored_ty),
+            None => stored_ty,
+        };
+        if current != Some(updated) {
             self.local_types.insert(index, updated);
             true
         } else {
@@ -617,8 +615,8 @@ impl<'a> ProcTypeAnalyzer<'a> {
             .local_requirements
             .get(&index)
             .copied()
-            .unwrap_or(TypeRequirement::Unknown);
-        if req == TypeRequirement::Unknown {
+            .unwrap_or(TypeFact::Felt);
+        if req == TypeFact::Felt {
             return false;
         }
         let mut changed = false;
@@ -629,14 +627,10 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Update inferred type for a variable.
-    fn set_inferred_type_for_var(&mut self, var: &Var, new_type: InferredType) -> bool {
+    fn set_inferred_type_for_var(&mut self, var: &Var, new_type: TypeFact) -> bool {
         let key = VarKey::from_var(var);
-        let current = self
-            .inferred
-            .get(&key)
-            .copied()
-            .unwrap_or(InferredType::Unknown);
-        let updated = current.refine(new_type);
+        let current = self.inferred.get(&key).copied().unwrap_or(TypeFact::Felt);
+        let updated = current.glb(new_type);
         if updated != current {
             self.inferred.insert(key, updated);
             true
@@ -664,7 +658,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     if self.mem_address_key_for_var(address).is_some() {
                         continue;
                     }
-                    changed |= self.apply_requirement_to_var(address, TypeRequirement::Address);
+                    changed |= self.apply_requirement_to_var(address, TypeFact::Address);
                 }
                 changed
             }
@@ -674,7 +668,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     if self.mem_address_key_for_var(address).is_some() {
                         continue;
                     }
-                    changed |= self.apply_requirement_to_var(address, TypeRequirement::Address);
+                    changed |= self.apply_requirement_to_var(address, TypeFact::Address);
                 }
                 changed
             }
@@ -719,7 +713,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
         }
         let mut changed = false;
         for (arg, expected) in args.iter().zip(summary.inputs.iter().copied()) {
-            changed |= self.apply_requirement_to_var(arg, expected);
+            changed |= self.apply_requirement_to_var(arg, TypeFact::from_requirement(expected));
         }
         changed
     }
@@ -802,10 +796,10 @@ impl<'a> ProcTypeAnalyzer<'a> {
             Expr::EqW { lhs, rhs } => {
                 let mut changed = false;
                 for var in lhs.iter() {
-                    changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
+                    changed |= self.apply_requirement_to_var(var, TypeFact::Felt);
                 }
                 for var in rhs.iter() {
-                    changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
+                    changed |= self.apply_requirement_to_var(var, TypeFact::Felt);
                 }
                 changed
             }
@@ -836,7 +830,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
         match stmt {
             Stmt::Assign { dest, expr, .. } => {
                 let req = self.requirement_for_var(dest);
-                if req == TypeRequirement::Unknown {
+                if req == TypeFact::Felt {
                     return false;
                 }
                 self.apply_requirement_to_expr(expr, req)
@@ -852,7 +846,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 changed |= self.propagate_requirements_in_block(else_body);
                 for phi in phis {
                     let req = self.requirement_for_var(&phi.dest);
-                    if req == TypeRequirement::Unknown {
+                    if req == TypeFact::Felt {
                         continue;
                     }
                     changed |= self.apply_requirement_to_var(&phi.then_var, req);
@@ -865,7 +859,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 changed |= self.propagate_requirements_in_block(body);
                 for phi in phis {
                     let req = self.requirement_for_var(&phi.dest);
-                    if req == TypeRequirement::Unknown {
+                    if req == TypeFact::Felt {
                         continue;
                     }
                     changed |= self.apply_requirement_to_var(&phi.init, req);
@@ -877,25 +871,15 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 let mut changed = false;
                 for output in &load.outputs {
                     let req = self.requirement_for_var(output);
-                    if req == TypeRequirement::Unknown {
-                        continue;
-                    }
-                    // Sticky Unknown: once a slot's requirement collapses to
-                    // Unknown from a conflict (two incompatible non-Unknown
-                    // requirements), it stays Unknown for the rest of this pass.
-                    // This prevents order-dependent results when 3+ loads from
-                    // the same slot have conflicting requirements.
-                    if let Some(&TypeRequirement::Unknown) =
-                        self.local_requirements.get(&load.index)
-                    {
+                    if req == TypeFact::Felt {
                         continue;
                     }
                     let current = self
                         .local_requirements
                         .get(&load.index)
                         .copied()
-                        .unwrap_or(TypeRequirement::Unknown);
-                    let updated = current.meet(req);
+                        .unwrap_or(TypeFact::Felt);
+                    let updated = current.glb(req);
                     if updated != current {
                         self.local_requirements.insert(load.index, updated);
                         changed = true;
@@ -918,21 +902,15 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 {
                     for output in &load.outputs {
                         let req = self.requirement_for_var(output);
-                        if req == TypeRequirement::Unknown {
-                            continue;
-                        }
-                        // Sticky Unknown: see comment in LocalLoad handler.
-                        if let Some(&TypeRequirement::Unknown) =
-                            self.mem_requirements.get(&addr_key)
-                        {
+                        if req == TypeFact::Felt {
                             continue;
                         }
                         let current = self
                             .mem_requirements
                             .get(&addr_key)
                             .copied()
-                            .unwrap_or(TypeRequirement::Unknown);
-                        let updated = current.meet(req);
+                            .unwrap_or(TypeFact::Felt);
+                        let updated = current.glb(req);
                         if updated != current {
                             self.mem_requirements.insert(addr_key, updated);
                             changed = true;
@@ -952,8 +930,8 @@ impl<'a> ProcTypeAnalyzer<'a> {
                         .mem_requirements
                         .get(&addr_key)
                         .copied()
-                        .unwrap_or(TypeRequirement::Unknown);
-                    if req != TypeRequirement::Unknown {
+                        .unwrap_or(TypeFact::Felt);
+                    if req != TypeFact::Felt {
                         for value in &store.values {
                             changed |= self.apply_requirement_to_var(value, req);
                         }
@@ -973,7 +951,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Apply a requirement to an expression from a required destination.
-    fn apply_requirement_to_expr(&mut self, expr: &Expr, req: TypeRequirement) -> bool {
+    fn apply_requirement_to_expr(&mut self, expr: &Expr, req: TypeFact) -> bool {
         match expr {
             Expr::Var(var) => self.apply_requirement_to_var(var, req),
             Expr::Ternary {
@@ -994,25 +972,21 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Read the current requirement for a variable.
-    fn requirement_for_var(&self, var: &Var) -> TypeRequirement {
+    fn requirement_for_var(&self, var: &Var) -> TypeFact {
         self.required
             .get(&VarKey::from_var(var))
             .copied()
-            .unwrap_or(TypeRequirement::Unknown)
+            .unwrap_or(TypeFact::Felt)
     }
 
     /// Apply a requirement to a variable.
-    fn apply_requirement_to_var(&mut self, var: &Var, req: TypeRequirement) -> bool {
-        if req == TypeRequirement::Unknown {
+    fn apply_requirement_to_var(&mut self, var: &Var, req: TypeFact) -> bool {
+        if req == TypeFact::Felt {
             return false;
         }
         let key = VarKey::from_var(var);
-        let current = self
-            .required
-            .get(&key)
-            .copied()
-            .unwrap_or(TypeRequirement::Unknown);
-        let updated = current.meet(req);
+        let current = self.required.get(&key).copied().unwrap_or(TypeFact::Felt);
+        let updated = current.glb(req);
         if updated != current {
             self.required.insert(key, updated);
             true
@@ -1024,18 +998,17 @@ impl<'a> ProcTypeAnalyzer<'a> {
     /// Require a variable to be u32 only if it is not already guaranteed u32.
     fn require_u32_var_if_not_guaranteed(&mut self, var: &Var) -> bool {
         let actual = self.inferred_type_for_var(var);
-        match check_compatibility(actual, TypeRequirement::U32) {
-            Compatibility::Compatible => false,
-            Compatibility::Incompatible | Compatibility::Indeterminate => {
-                self.apply_requirement_to_var(var, TypeRequirement::U32)
-            }
+        if actual.satisfies(TypeFact::U32) {
+            false
+        } else {
+            self.apply_requirement_to_var(var, TypeFact::U32)
         }
     }
 
     /// Require that an expression is boolean.
     fn require_bool_expr(&mut self, expr: &Expr) -> bool {
         match expr {
-            Expr::Var(var) => self.apply_requirement_to_var(var, TypeRequirement::Bool),
+            Expr::Var(var) => self.apply_requirement_to_var(var, TypeFact::Bool),
             Expr::Unary(UnOp::Not, inner) => self.require_bool_expr(inner),
             Expr::Binary(BinOp::And | BinOp::Or, lhs, rhs) => {
                 self.require_bool_expr(lhs) | self.require_bool_expr(rhs)
@@ -1052,10 +1025,10 @@ impl<'a> ProcTypeAnalyzer<'a> {
             Expr::EqW { lhs, rhs } => {
                 let mut changed = false;
                 for var in lhs.iter() {
-                    changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
+                    changed |= self.apply_requirement_to_var(var, TypeFact::Felt);
                 }
                 for var in rhs.iter() {
-                    changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
+                    changed |= self.apply_requirement_to_var(var, TypeFact::Felt);
                 }
                 changed
             }
@@ -1068,7 +1041,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
     /// Require that an expression is U32.
     fn require_u32_expr(&mut self, expr: &Expr) -> bool {
         match expr {
-            Expr::Var(var) => self.apply_requirement_to_var(var, TypeRequirement::U32),
+            Expr::Var(var) => self.apply_requirement_to_var(var, TypeFact::U32),
             Expr::Ternary {
                 cond,
                 then_expr,
@@ -1088,18 +1061,17 @@ impl<'a> ProcTypeAnalyzer<'a> {
     /// Require an expression to be u32 only if it is not already guaranteed u32.
     fn require_u32_expr_if_not_guaranteed(&mut self, expr: &Expr) -> bool {
         let actual = self.infer_expr_type(expr);
-        match check_compatibility(actual, TypeRequirement::U32) {
-            Compatibility::Compatible => false,
-            Compatibility::Incompatible | Compatibility::Indeterminate => {
-                self.require_u32_expr(expr)
-            }
+        if actual.satisfies(TypeFact::U32) {
+            false
+        } else {
+            self.require_u32_expr(expr)
         }
     }
 
     /// Require that an expression is Felt-compatible.
     fn require_felt_expr(&mut self, expr: &Expr) -> bool {
         match expr {
-            Expr::Var(var) => self.apply_requirement_to_var(var, TypeRequirement::Felt),
+            Expr::Var(var) => self.apply_requirement_to_var(var, TypeFact::Felt),
             Expr::Ternary {
                 cond,
                 then_expr,
@@ -1112,10 +1084,10 @@ impl<'a> ProcTypeAnalyzer<'a> {
             Expr::EqW { lhs, rhs } => {
                 let mut changed = false;
                 for var in lhs.iter() {
-                    changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
+                    changed |= self.apply_requirement_to_var(var, TypeFact::Felt);
                 }
                 for var in rhs.iter() {
-                    changed |= self.apply_requirement_to_var(var, TypeRequirement::Felt);
+                    changed |= self.apply_requirement_to_var(var, TypeFact::Felt);
                 }
                 changed
             }
@@ -1149,7 +1121,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     }
                     self.check_var_requirement(
                         address,
-                        TypeRequirement::Address,
+                        TypeFact::Address,
                         *span,
                         "memory load address is not guaranteed Address",
                     );
@@ -1164,7 +1136,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     }
                     self.check_var_requirement(
                         address,
-                        TypeRequirement::Address,
+                        TypeFact::Address,
                         *span,
                         "memory store address is not guaranteed Address",
                     );
@@ -1180,7 +1152,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     for arg in &intrinsic.args {
                         self.check_var_requirement(
                             arg,
-                            TypeRequirement::U32,
+                            TypeFact::U32,
                             *span,
                             "u32 instruction argument is not guaranteed U32",
                         );
@@ -1196,7 +1168,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
             } => {
                 self.check_expr_requirement(
                     cond,
-                    TypeRequirement::Bool,
+                    TypeFact::Bool,
                     *span,
                     "if-condition is not guaranteed Bool",
                 );
@@ -1208,7 +1180,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
             } => {
                 self.check_expr_requirement(
                     cond,
-                    TypeRequirement::Bool,
+                    TypeFact::Bool,
                     *span,
                     "while-condition is not guaranteed Bool",
                 );
@@ -1228,35 +1200,12 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Collect diagnostics for call arguments.
-    fn collect_call_arg_diagnostics(&mut self, span: SourceSpan, target: &str, args: &[Var]) {
-        let Some(summary) = self.summary_for_target(target).cloned() else {
-            return;
-        };
-        if summary.is_opaque() {
-            return;
-        }
-        let callee = SymbolPath::new(target.to_string());
-        for (index, (arg, expected)) in args.iter().zip(summary.inputs.iter()).enumerate() {
-            let actual = self.inferred_type_for_var(arg);
-            match check_compatibility(actual, *expected) {
-                Compatibility::Compatible | Compatibility::Indeterminate => {}
-                Compatibility::Incompatible => {
-                    let mut diagnostic = TypeDiagnostic::new(
-                        self.proc_path.clone(),
-                        span,
-                        format!(
-                            "argument {index} to `{callee}` expects {expected}, but inferred {actual}"
-                        ),
-                    );
-                    diagnostic.callee = Some(callee.clone());
-                    diagnostic.arg_index = Some(index);
-                    diagnostic.expected = Some(*expected);
-                    diagnostic.actual = Some(actual);
-                    self.diagnostics.push(diagnostic);
-                }
-            }
-        }
-    }
+    ///
+    /// In the current four-point chain lattice, no scalar type pair is
+    /// definitively incompatible. Call-argument mismatch diagnostics are
+    /// therefore disabled. Stronger diagnostics require richer facts
+    /// (exact constants, numeric ranges, or provenance tracking).
+    fn collect_call_arg_diagnostics(&mut self, _span: SourceSpan, _target: &str, _args: &[Var]) {}
 
     /// Collect diagnostics for ternary conditions nested in expressions.
     fn collect_expr_diagnostics(&mut self, expr: &Expr, span: SourceSpan) {
@@ -1268,7 +1217,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
             } => {
                 self.check_expr_requirement(
                     cond,
-                    TypeRequirement::Bool,
+                    TypeFact::Bool,
                     span,
                     "ternary condition is not guaranteed Bool",
                 );
@@ -1289,20 +1238,17 @@ impl<'a> ProcTypeAnalyzer<'a> {
     fn check_expr_requirement(
         &mut self,
         expr: &Expr,
-        expected: TypeRequirement,
+        expected: TypeFact,
         span: SourceSpan,
         context: &str,
     ) {
         let actual = self.infer_expr_type(expr);
-        match check_compatibility(actual, expected) {
-            Compatibility::Compatible | Compatibility::Indeterminate => {}
-            Compatibility::Incompatible => {
-                self.diagnostics.push(TypeDiagnostic::new(
-                    self.proc_path.clone(),
-                    span,
-                    format!("{context} (inferred {actual})"),
-                ));
-            }
+        if !actual.satisfies(expected) {
+            self.diagnostics.push(TypeDiagnostic::new(
+                self.proc_path.clone(),
+                span,
+                format!("{context} (inferred {})", actual.to_inferred_type()),
+            ));
         }
     }
 
@@ -1310,20 +1256,17 @@ impl<'a> ProcTypeAnalyzer<'a> {
     fn check_var_requirement(
         &mut self,
         var: &Var,
-        expected: TypeRequirement,
+        expected: TypeFact,
         span: SourceSpan,
         context: &str,
     ) {
         let actual = self.inferred_type_for_var(var);
-        match check_compatibility(actual, expected) {
-            Compatibility::Compatible | Compatibility::Indeterminate => {}
-            Compatibility::Incompatible => {
-                self.diagnostics.push(TypeDiagnostic::new(
-                    self.proc_path.clone(),
-                    span,
-                    format!("{context} (inferred {actual})"),
-                ));
-            }
+        if !actual.satisfies(expected) {
+            self.diagnostics.push(TypeDiagnostic::new(
+                self.proc_path.clone(),
+                span,
+                format!("{context} (inferred {})", actual.to_inferred_type()),
+            ));
         }
     }
 

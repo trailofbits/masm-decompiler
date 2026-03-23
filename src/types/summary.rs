@@ -37,8 +37,8 @@ impl TypeSummary {
     /// Create an opaque summary with explicit input/output arity.
     pub fn opaque_with_arity(inputs: usize, outputs: usize) -> Self {
         Self {
-            inputs: vec![TypeRequirement::Unknown; inputs],
-            outputs: vec![InferredType::Unknown; outputs],
+            inputs: vec![TypeRequirement::Felt; inputs],
+            outputs: vec![InferredType::Felt; outputs],
             opaque: true,
         }
     }

@@ -8,7 +8,7 @@ mod inter;
 mod intra;
 mod summary;
 
-pub use domain::{Compatibility, InferredType, TypeRequirement, VarBaseKey, VarKey};
+pub use domain::{InferredType, TypeRequirement, VarBaseKey, VarKey};
 pub use inter::infer_type_summaries;
 pub use intra::{ProcTypeAnalysisResult, analyze_proc_types};
 pub use summary::{TypeDiagnostic, TypeDiagnosticsMap, TypeSummary, TypeSummaryMap};

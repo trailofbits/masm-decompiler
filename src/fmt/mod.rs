@@ -730,7 +730,7 @@ impl CodeDisplay for DecompiledHeader {
                 .input_types
                 .get(i)
                 .copied()
-                .unwrap_or(TypeRequirement::Unknown);
+                .unwrap_or(TypeRequirement::Felt);
             args.push(format!(
                 "{}: {}",
                 f.fmt_var(&v),
@@ -747,7 +747,7 @@ impl CodeDisplay for DecompiledHeader {
                     .output_types
                     .first()
                     .copied()
-                    .unwrap_or(InferredType::Unknown);
+                    .unwrap_or(InferredType::Felt);
                 format!(" -> {}", type_name(inferred_type_for_display(ty)))
             }
             n => {
@@ -757,7 +757,7 @@ impl CodeDisplay for DecompiledHeader {
                             .output_types
                             .get(idx)
                             .copied()
-                            .unwrap_or(InferredType::Unknown);
+                            .unwrap_or(InferredType::Felt);
                         type_name(inferred_type_for_display(ty))
                     })
                     .collect::<Vec<_>>()
@@ -777,11 +777,9 @@ impl CodeDisplay for DecompiledHeader {
 }
 
 /// Convert an input type requirement to its formatter display string.
-///
-/// Unknown requirements are rendered as `Felt`.
 fn type_requirement_for_display(requirement: TypeRequirement) -> &'static str {
     match requirement {
-        TypeRequirement::Unknown | TypeRequirement::Felt => "Felt",
+        TypeRequirement::Felt => "Felt",
         TypeRequirement::Bool => "Bool",
         TypeRequirement::U32 => "U32",
         TypeRequirement::Address => "Address",
@@ -789,11 +787,9 @@ fn type_requirement_for_display(requirement: TypeRequirement) -> &'static str {
 }
 
 /// Convert an inferred output type to its formatter display string.
-///
-/// Unknown inferred outputs are rendered as `Felt`.
 fn inferred_type_for_display(ty: InferredType) -> &'static str {
     match ty {
-        InferredType::Unknown | InferredType::Felt => "Felt",
+        InferredType::Felt => "Felt",
         InferredType::Bool => "Bool",
         InferredType::U32 => "U32",
         InferredType::Address => "Address",

@@ -331,42 +331,33 @@ fn infers_expected_input_requirements() {
 }
 
 #[test]
-fn reports_call_argument_type_mismatches() {
+fn call_argument_diagnostics_disabled_in_chain_lattice() {
     let decompiler = setup_decompiler();
 
+    // In the four-point chain, no scalar type pair is definitively
+    // incompatible. Call-argument diagnostics are disabled.
     let bad_bool = diagnostics_for(&decompiler, "typecheck::caller_bad_bool");
     assert!(
-        bad_bool
-            .iter()
-            .any(|diag| diag.arg_index == Some(0) && diag.expected == Some(TypeRequirement::Bool))
+        bad_bool.is_empty(),
+        "call-arg diagnostics disabled: {bad_bool:?}"
     );
 
     let bad_u32 = diagnostics_for(&decompiler, "typecheck::caller_bad_u32");
     assert!(
-        bad_u32
-            .iter()
-            .any(|diag| diag.arg_index == Some(0) && diag.expected == Some(TypeRequirement::U32))
+        bad_u32.is_empty(),
+        "call-arg diagnostics disabled: {bad_u32:?}"
     );
 
     let bad_addr = diagnostics_for(&decompiler, "typecheck::caller_bad_address");
     assert!(
-        bad_addr.iter().any(
-            |diag| diag.arg_index == Some(0) && diag.expected == Some(TypeRequirement::Address)
-        )
+        bad_addr.is_empty(),
+        "call-arg diagnostics disabled: {bad_addr:?}"
     );
 
     let bad_and = diagnostics_for(&decompiler, "typecheck::caller_bad_and_bool");
     assert!(
-        bad_and
-            .iter()
-            .any(|diag| diag.arg_index == Some(0) && diag.expected == Some(TypeRequirement::Bool)),
-        "expected arg 0 Bool mismatch, got: {bad_and:?}"
-    );
-    assert!(
-        bad_and
-            .iter()
-            .any(|diag| diag.arg_index == Some(1) && diag.expected == Some(TypeRequirement::Bool)),
-        "expected arg 1 Bool mismatch, got: {bad_and:?}"
+        bad_and.is_empty(),
+        "call-arg diagnostics disabled: {bad_and:?}"
     );
 }
 
@@ -408,7 +399,7 @@ fn type_summary_positions_follow_stack_conventions() {
         .expect("out_mixed summary");
     assert_eq!(
         out_mixed.outputs,
-        vec![InferredType::Felt, InferredType::Bool]
+        vec![InferredType::U32, InferredType::Bool]
     );
 }
 
@@ -419,19 +410,9 @@ fn enforces_argument_types_by_stack_position() {
     let ok = diagnostics_for(&decompiler, "typecheck::caller_order_ok");
     assert!(ok.is_empty(), "stack-ordered arguments should pass: {ok:?}");
 
+    // Call-argument diagnostics are disabled in the chain lattice.
     let bad = diagnostics_for(&decompiler, "typecheck::caller_order_bad");
-    assert!(
-        bad.iter().any(|diag| {
-            diag.arg_index == Some(0) && diag.expected == Some(TypeRequirement::U32)
-        }),
-        "expected arg 0 U32 mismatch, got: {bad:?}"
-    );
-    assert!(
-        bad.iter().any(|diag| {
-            diag.arg_index == Some(1) && diag.expected == Some(TypeRequirement::Bool)
-        }),
-        "expected arg 1 Bool mismatch, got: {bad:?}"
-    );
+    assert!(bad.is_empty(), "call-arg diagnostics disabled: {bad:?}");
 }
 
 #[test]
@@ -551,14 +532,14 @@ fn u32_assert_split_and_cast_do_not_seed_u32_input_requirements() {
     let assert_only = summaries
         .get(&SymbolPath::new("typecheck::assert_only"))
         .expect("assert_only summary");
-    assert_eq!(assert_only.inputs, vec![TypeRequirement::Unknown]);
+    assert_eq!(assert_only.inputs, vec![TypeRequirement::Felt]);
 
     let assert2_only = summaries
         .get(&SymbolPath::new("typecheck::assert2_only"))
         .expect("assert2_only summary");
     assert_eq!(
         assert2_only.inputs,
-        vec![TypeRequirement::Unknown, TypeRequirement::Unknown]
+        vec![TypeRequirement::Felt, TypeRequirement::Felt]
     );
 
     let assertw_only = summaries
@@ -567,17 +548,17 @@ fn u32_assert_split_and_cast_do_not_seed_u32_input_requirements() {
     assert_eq!(
         assertw_only.inputs,
         vec![
-            TypeRequirement::Unknown,
-            TypeRequirement::Unknown,
-            TypeRequirement::Unknown,
-            TypeRequirement::Unknown
+            TypeRequirement::Felt,
+            TypeRequirement::Felt,
+            TypeRequirement::Felt,
+            TypeRequirement::Felt
         ]
     );
 
     let split_only = summaries
         .get(&SymbolPath::new("typecheck::split_only"))
         .expect("split_only summary");
-    assert_eq!(split_only.inputs, vec![TypeRequirement::Unknown]);
+    assert_eq!(split_only.inputs, vec![TypeRequirement::Felt]);
     assert_eq!(
         split_only.outputs,
         vec![InferredType::U32, InferredType::U32]
@@ -586,13 +567,13 @@ fn u32_assert_split_and_cast_do_not_seed_u32_input_requirements() {
     let cast_only = summaries
         .get(&SymbolPath::new("typecheck::cast_only"))
         .expect("cast_only summary");
-    assert_eq!(cast_only.inputs, vec![TypeRequirement::Unknown]);
+    assert_eq!(cast_only.inputs, vec![TypeRequirement::Felt]);
     assert_eq!(cast_only.outputs, vec![InferredType::U32]);
 
     let test_only = summaries
         .get(&SymbolPath::new("typecheck::test_only"))
         .expect("test_only summary");
-    assert_eq!(test_only.inputs, vec![TypeRequirement::Unknown]);
+    assert_eq!(test_only.inputs, vec![TypeRequirement::Felt]);
 
     let test_outputs = summaries
         .get(&SymbolPath::new("typecheck::test_outputs"))
@@ -608,22 +589,22 @@ fn u32_postconditions_discharge_downstream_u32_requirements() {
     let assert_then_add = summaries
         .get(&SymbolPath::new("typecheck::assert_then_add"))
         .expect("assert_then_add summary");
-    assert_eq!(assert_then_add.inputs, vec![TypeRequirement::Unknown]);
+    assert_eq!(assert_then_add.inputs, vec![TypeRequirement::Felt]);
 
     let assert_then_divmod = summaries
         .get(&SymbolPath::new("typecheck::assert_then_divmod"))
         .expect("assert_then_divmod summary");
-    assert_eq!(assert_then_divmod.inputs, vec![TypeRequirement::Unknown]);
+    assert_eq!(assert_then_divmod.inputs, vec![TypeRequirement::Felt]);
 
     let split_then_add = summaries
         .get(&SymbolPath::new("typecheck::split_then_add"))
         .expect("split_then_add summary");
-    assert_eq!(split_then_add.inputs, vec![TypeRequirement::Unknown]);
+    assert_eq!(split_then_add.inputs, vec![TypeRequirement::Felt]);
 
     let cast_then_add = summaries
         .get(&SymbolPath::new("typecheck::cast_then_add"))
         .expect("cast_then_add summary");
-    assert_eq!(cast_then_add.inputs, vec![TypeRequirement::Unknown]);
+    assert_eq!(cast_then_add.inputs, vec![TypeRequirement::Felt]);
 }
 
 #[test]
@@ -791,8 +772,8 @@ fn setup_storage_decompiler() -> Decompiler<'static> {
         end
 
         # locaddr.0 followed by add.1 to address element 1 of the word.
-        # Before fix: Add produces Felt, mem_load address triggers diagnostic.
-        # After fix: Add produces Address, no diagnostic.
+        # The inferred type of add is Felt (not Address), but the
+        # MemAddressKey::LocalAddrOffset suppresses the address diagnostic.
         @locals(1)
         pub proc address_offset_no_warning
             locaddr.0
@@ -800,6 +781,107 @@ fn setup_storage_decompiler() -> Decompiler<'static> {
             add
             mem_load
             drop
+        end
+
+        # A large Felt constant (>= 2^32) used as a memory address should
+        # produce a diagnostic warning, not be silently suppressed.
+        pub proc large_felt_as_address
+            push.4294967296
+            mem_load
+            drop
+        end
+
+        # Address + large U32 offset should produce a diagnostic because the
+        # u32wrapping_add result has no MemAddressKey (address keys are not
+        # propagated through u32 operations), so the `add` result has no key
+        # and its inferred type (Felt) is incompatible with Address.
+        @locals(2)
+        pub proc address_plus_large_offset
+            locaddr.0
+            push.4294967295
+            push.0
+            u32wrapping_add
+            add
+            mem_load
+            drop
+        end
+
+        # The procedure input flows through a local store/load and is used
+        # by two loads with conflicting requirements: u32wrapping_add (U32)
+        # and `not` (Bool). The analysis should converge without exhausting
+        # 128 iterations. The conflicting requirements collapse to Unknown,
+        # so the input requirement should also be Unknown.
+        @locals(1)
+        pub proc conflicting_local_requirements
+            loc_store.0
+
+            loc_load.0
+            push.1
+            u32wrapping_add
+            drop
+
+            loc_load.0
+            not
+            drop
+        end
+
+        # locaddr.0 flows through an if-phi and is used as mem_load address.
+        # Both branches produce the same locaddr.0 value.
+        @locals(1)
+        pub proc address_through_if_phi
+            push.1
+            if.true
+                locaddr.0
+            else
+                locaddr.0
+            end
+            mem_load
+            drop
+        end
+
+        # locaddr.0 - 1: field subtraction computes (addr - 1) mod p,
+        # which may point outside the procedure's local frame. No
+        # MemAddressKey should be created, so the diagnostic should fire.
+        @locals(1)
+        pub proc address_through_sub_offset
+            locaddr.0
+            push.1
+            sub
+            mem_load
+            drop
+        end
+
+        # locaddr.0 + 1 + 2: chained offsets should compose into
+        # LocalAddrOffset(0, 3), suppressing the address diagnostic.
+        @locals(1)
+        pub proc address_chained_offset
+            locaddr.0
+            push.1
+            add
+            push.2
+            add
+            mem_load
+            drop
+        end
+
+        # locaddr.0 and locaddr.1 flow through an if-phi. The branches
+        # disagree, so no MemAddressKey is propagated to the phi dest.
+        # A U32 stored at the phi address should NOT be tracked, so
+        # loading from locaddr.0 should produce Felt (not U32).
+        @locals(2)
+        pub proc u32_not_tracked_through_disagreeing_phi
+            push.1.2
+            u32wrapping_add
+            push.1
+            if.true
+                locaddr.0
+            else
+                locaddr.1
+            end
+            mem_store
+            drop
+            locaddr.0
+            mem_load
         end
         "#,
     )]));
@@ -847,11 +929,7 @@ fn felt_type_unchanged_through_local_roundtrip() {
         .expect("felt_local_roundtrip summary");
     // Procedure takes no stack inputs — the Felt comes from a push constant.
     assert!(
-        summary.inputs.is_empty()
-            || summary
-                .inputs
-                .iter()
-                .all(|r| *r == TypeRequirement::Unknown),
+        summary.inputs.is_empty() || summary.inputs.iter().all(|r| *r == TypeRequirement::Felt),
         "felt roundtrip should not introduce spurious requirements: {:?}",
         summary.inputs
     );
@@ -952,4 +1030,209 @@ fn address_plus_offset_preserves_address_type() {
         diagnostics.is_empty(),
         "Address + small offset should remain Address: {diagnostics:?}"
     );
+}
+
+#[test]
+fn large_felt_constant_address_emits_diagnostic() {
+    let decompiler = setup_storage_decompiler();
+    let diagnostics = diagnostics_for(&decompiler, "storage::large_felt_as_address");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("not guaranteed Address")),
+        "Felt constant >= 2^32 used as memory address should produce an address diagnostic, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn address_plus_large_offset_emits_diagnostic() {
+    let decompiler = setup_storage_decompiler();
+    let diagnostics = diagnostics_for(&decompiler, "storage::address_plus_large_offset");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("not guaranteed Address")),
+        "Address + untracked offset should produce an address diagnostic, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn conflicting_local_requirements_do_not_propagate() {
+    let decompiler = setup_storage_decompiler();
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("storage::conflicting_local_requirements"))
+        .expect("conflicting_local_requirements summary");
+    // The procedure takes one stack input, stores it to local 0, then loads
+    // it twice with requirements U32 and Bool. In the chain lattice,
+    // glb(U32, Bool) = Bool (the most specific type that satisfies both).
+    assert_eq!(
+        summary.inputs,
+        vec![TypeRequirement::Bool],
+        "glb(U32, Bool) = Bool in the chain lattice"
+    );
+}
+
+#[test]
+fn address_sub_offset_emits_diagnostic() {
+    let decompiler = setup_storage_decompiler();
+    let diagnostics = diagnostics_for(&decompiler, "storage::address_through_sub_offset");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("not guaranteed Address")),
+        "locaddr - offset should produce an address diagnostic: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn address_chained_offset_suppresses_diagnostic() {
+    let decompiler = setup_storage_decompiler();
+    let diagnostics = diagnostics_for(&decompiler, "storage::address_chained_offset");
+    assert!(
+        diagnostics.is_empty(),
+        "locaddr + 1 + 2 should suppress address diagnostic via chained LocalAddrOffset: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn u32_not_tracked_through_disagreeing_phi() {
+    let decompiler = setup_storage_decompiler();
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new(
+            "storage::u32_not_tracked_through_disagreeing_phi",
+        ))
+        .expect("u32_not_tracked_through_disagreeing_phi summary");
+    // The procedure stores U32 at phi(locaddr.0, locaddr.1) — the phi
+    // branches disagree so no MemAddressKey is propagated and the type
+    // is not tracked. Loading from locaddr.0 should yield the default
+    // Felt type, not U32.
+    assert_eq!(
+        summary.outputs,
+        vec![InferredType::Felt],
+        "mem_load from locaddr.0 should be Felt when type was stored through disagreeing phi"
+    );
+}
+
+#[test]
+fn address_key_survives_if_phi() {
+    let decompiler = setup_storage_decompiler();
+    let diagnostics = diagnostics_for(&decompiler, "storage::address_through_if_phi");
+    assert!(
+        diagnostics.is_empty(),
+        "locaddr through if-phi should not produce address diagnostic: {diagnostics:?}"
+    );
+}
+
+// -- Regression tests for type lattice redesign --------------------------
+
+#[test]
+fn is_odd_intrinsic_infers_bool() {
+    let ws = workspace_from_modules(&[(
+        "is_odd_types",
+        r#"
+        pub proc uses_is_odd
+            push.5
+            is_odd
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("is_odd_types::uses_is_odd"))
+        .expect("uses_is_odd summary");
+    assert_eq!(summary.outputs, vec![InferredType::Bool]);
+}
+
+#[test]
+fn u32_range_constant_infers_u32() {
+    let ws = workspace_from_modules(&[(
+        "const_types",
+        r#"
+        pub proc returns_small_felt
+            push.42
+        end
+
+        pub proc returns_large_felt
+            push.4294967296
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let summaries = decompiler.type_summaries();
+
+    let small = summaries
+        .get(&SymbolPath::new("const_types::returns_small_felt"))
+        .expect("returns_small_felt summary");
+    assert_eq!(small.outputs, vec![InferredType::U32]);
+
+    let large = summaries
+        .get(&SymbolPath::new("const_types::returns_large_felt"))
+        .expect("returns_large_felt summary");
+    assert_eq!(large.outputs, vec![InferredType::Felt]);
+}
+
+#[test]
+fn bool_satisfies_address_requirement() {
+    let ws = workspace_from_modules(&[(
+        "subtype_test",
+        r#"
+        pub proc bool_as_address
+            push.1.1
+            eq
+            mem_load
+            drop
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let diagnostics = decompiler
+        .type_diagnostics()
+        .get(&SymbolPath::new("subtype_test::bool_as_address"))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        diagnostics.is_empty(),
+        "Bool satisfies Address in the chain lattice: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn local_store_join_widens_type() {
+    let ws = workspace_from_modules(&[(
+        "store_join",
+        r#"
+        @locals(1)
+        pub proc store_bool_then_u32
+            push.1
+            loc_store.0
+            push.42
+            u32assert
+            loc_store.0
+            loc_load.0
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("store_join::store_bool_then_u32"))
+        .expect("store_bool_then_u32 summary");
+    // Bool stored then U32 stored → join(Bool, U32) = U32
+    assert_eq!(summary.outputs, vec![InferredType::U32]);
+}
+
+#[test]
+fn opaque_summary_with_arity_fills_felt() {
+    use masm_decompiler::types::TypeSummary;
+    let summary = TypeSummary::opaque_with_arity(2, 3);
+    assert!(summary.is_opaque());
+    assert_eq!(summary.inputs, vec![TypeRequirement::Felt; 2]);
+    assert_eq!(summary.outputs, vec![InferredType::Felt; 3]);
 }

@@ -239,8 +239,8 @@ impl DecompiledProc {
             })
             .unwrap_or_else(|| {
                 (
-                    vec![TypeRequirement::Unknown; inputs],
-                    vec![InferredType::Unknown; outputs],
+                    vec![TypeRequirement::Felt; inputs],
+                    vec![InferredType::Felt; outputs],
                 )
             });
 
@@ -263,7 +263,7 @@ impl DecompiledProc {
 
 /// Normalize inferred input types to exactly match the known input arity.
 fn normalized_input_types(types: &[TypeRequirement], expected_len: usize) -> Vec<TypeRequirement> {
-    let mut normalized = vec![TypeRequirement::Unknown; expected_len];
+    let mut normalized = vec![TypeRequirement::Felt; expected_len];
     for (display_idx, slot) in normalized.iter_mut().enumerate() {
         let summary_idx = expected_len.saturating_sub(1).saturating_sub(display_idx);
         if let Some(ty) = types.get(summary_idx) {
@@ -275,7 +275,7 @@ fn normalized_input_types(types: &[TypeRequirement], expected_len: usize) -> Vec
 
 /// Normalize inferred output types to exactly match the known output arity.
 fn normalized_output_types(types: &[InferredType], expected_len: usize) -> Vec<InferredType> {
-    let mut normalized = vec![InferredType::Unknown; expected_len];
+    let mut normalized = vec![InferredType::Felt; expected_len];
     for (display_idx, slot) in normalized.iter_mut().enumerate() {
         let summary_idx = expected_len.saturating_sub(1).saturating_sub(display_idx);
         if let Some(ty) = types.get(summary_idx) {
