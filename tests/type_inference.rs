@@ -319,7 +319,7 @@ fn infers_expected_input_requirements() {
     let needs_address = summaries
         .get(&SymbolPath::new("typecheck::needs_address"))
         .expect("needs_address summary");
-    assert_eq!(needs_address.inputs, vec![TypeRequirement::Address]);
+    assert_eq!(needs_address.inputs, vec![TypeRequirement::U32]);
 
     let needs_and_bool = summaries
         .get(&SymbolPath::new("typecheck::needs_and_bool"))
@@ -465,7 +465,7 @@ fn accepts_boolean_arguments_for_and_operator() {
 }
 
 #[test]
-fn infers_locaddr_output_as_address() {
+fn infers_locaddr_output_as_u32() {
     let ws = workspace_from_modules(&[(
         "locaddr_types",
         r#"
@@ -480,7 +480,7 @@ fn infers_locaddr_output_as_address() {
     let summary = summaries
         .get(&SymbolPath::new("locaddr_types::returns_locaddr"))
         .expect("returns_locaddr summary");
-    assert_eq!(summary.outputs, vec![InferredType::Address]);
+    assert_eq!(summary.outputs, vec![InferredType::U32]);
 }
 
 #[test]
@@ -906,7 +906,7 @@ fn address_type_preserved_through_local_roundtrip() {
     let diagnostics = diagnostics_for(&decompiler, "storage::address_local_roundtrip");
     assert!(
         diagnostics.is_empty(),
-        "Address type should survive local store/load roundtrip: {diagnostics:?}"
+        "U32 type should survive local store/load roundtrip: {diagnostics:?}"
     );
 }
 
@@ -951,7 +951,7 @@ fn address_type_preserved_through_mem_roundtrip() {
     let diagnostics = diagnostics_for(&decompiler, "storage::address_mem_roundtrip");
     assert!(
         diagnostics.is_empty(),
-        "Address type should survive memory store/load roundtrip: {diagnostics:?}"
+        "U32 type should survive memory store/load roundtrip: {diagnostics:?}"
     );
 }
 
@@ -1028,7 +1028,7 @@ fn address_plus_offset_preserves_address_type() {
     let diagnostics = diagnostics_for(&decompiler, "storage::address_offset_no_warning");
     assert!(
         diagnostics.is_empty(),
-        "Address + small offset should remain Address: {diagnostics:?}"
+        "locaddr + small offset should suppress diagnostic: {diagnostics:?}"
     );
 }
 
@@ -1039,7 +1039,7 @@ fn large_felt_constant_address_emits_diagnostic() {
     assert!(
         diagnostics
             .iter()
-            .any(|d| d.message.contains("not guaranteed Address")),
+            .any(|d| d.message.contains("not guaranteed U32")),
         "Felt constant >= 2^32 used as memory address should produce an address diagnostic, got: {diagnostics:?}"
     );
 }
@@ -1051,7 +1051,7 @@ fn address_plus_large_offset_emits_diagnostic() {
     assert!(
         diagnostics
             .iter()
-            .any(|d| d.message.contains("not guaranteed Address")),
+            .any(|d| d.message.contains("not guaranteed U32")),
         "Address + untracked offset should produce an address diagnostic, got: {diagnostics:?}"
     );
 }
@@ -1080,7 +1080,7 @@ fn address_sub_offset_emits_diagnostic() {
     assert!(
         diagnostics
             .iter()
-            .any(|d| d.message.contains("not guaranteed Address")),
+            .any(|d| d.message.contains("not guaranteed U32")),
         "locaddr - offset should produce an address diagnostic: {diagnostics:?}"
     );
 }
@@ -1177,7 +1177,7 @@ fn u32_range_constant_infers_u32() {
 }
 
 #[test]
-fn bool_satisfies_address_requirement() {
+fn bool_satisfies_u32_requirement() {
     let ws = workspace_from_modules(&[(
         "subtype_test",
         r#"
@@ -1198,7 +1198,7 @@ fn bool_satisfies_address_requirement() {
         .unwrap_or_default();
     assert!(
         diagnostics.is_empty(),
-        "Bool satisfies Address in the chain lattice: {diagnostics:?}"
+        "Bool satisfies U32 in the chain lattice: {diagnostics:?}"
     );
 }
 
