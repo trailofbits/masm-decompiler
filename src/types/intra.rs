@@ -283,7 +283,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
         // number of variables.
         loop {
             let prev = origins.clone();
-            Self::propagate_origins_in_block(stmts, &mut origins);
+            self.propagate_origins_in_block(stmts, &mut origins);
             if origins == prev {
                 break;
             }
@@ -293,9 +293,9 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Propagate origins through a statement block.
-    fn propagate_origins_in_block(stmts: &[Stmt], origins: &mut HashMap<VarKey, Origin>) {
+    fn propagate_origins_in_block(&self, stmts: &[Stmt], origins: &mut HashMap<VarKey, Origin>) {
         for stmt in stmts {
-            Self::propagate_origins_in_stmt(stmt, origins);
+            self.propagate_origins_in_stmt(stmt, origins);
         }
     }
 
@@ -319,7 +319,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Propagate origins through a single statement.
-    fn propagate_origins_in_stmt(stmt: &Stmt, origins: &mut HashMap<VarKey, Origin>) {
+    fn propagate_origins_in_stmt(&self, stmt: &Stmt, origins: &mut HashMap<VarKey, Origin>) {
         match stmt {
             Stmt::Assign { dest, expr, .. } => {
                 let origin = match expr {
@@ -349,8 +349,8 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 phis,
                 ..
             } => {
-                Self::propagate_origins_in_block(then_body, origins);
-                Self::propagate_origins_in_block(else_body, origins);
+                self.propagate_origins_in_block(then_body, origins);
+                self.propagate_origins_in_block(else_body, origins);
                 for phi in phis {
                     let then_origin = origins
                         .get(&VarKey::from_var(&phi.then_var))
@@ -379,7 +379,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     let updated = Self::merge_origins(current, init_origin);
                     origins.insert(VarKey::from_var(&phi.dest), updated);
                 }
-                Self::propagate_origins_in_block(body, origins);
+                self.propagate_origins_in_block(body, origins);
                 // Verify step agrees with dest; demote if not.
                 for phi in phis {
                     let dest_origin = origins
@@ -394,11 +394,24 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     origins.insert(VarKey::from_var(&phi.dest), merged);
                 }
             }
-            // Statements that define new variables from external sources:
-            // call results, intrinsic results, memory loads, etc. are all Computed.
             Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
-                for result in &call.results {
-                    origins.insert(VarKey::from_var(result), Origin::Computed);
+                let callee_map = self
+                    .summary_for_target(&call.target)
+                    .map(|s| &s.output_input_map);
+                for (idx, result) in call.results.iter().enumerate() {
+                    let origin = if let Some(Some(input_idx)) = callee_map.and_then(|m| m.get(idx))
+                    {
+                        // Callee output traces to callee input — inherit
+                        // the origin of the corresponding caller argument.
+                        // Origin::Input uses 0=deepest, args uses 0=topmost.
+                        call.args
+                            .get(call.args.len() - 1 - *input_idx)
+                            .and_then(|arg| origins.get(&VarKey::from_var(arg)).copied())
+                            .unwrap_or(Origin::Computed)
+                    } else {
+                        Origin::Computed
+                    };
+                    origins.insert(VarKey::from_var(result), origin);
                 }
             }
             Stmt::DynCall { results, .. } => {
