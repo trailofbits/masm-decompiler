@@ -215,35 +215,32 @@ impl<'a> ProcTypeAnalyzer<'a> {
         let origins = self.compute_origins(stmts);
 
         let mut outputs = Vec::with_capacity(self.output_count);
+        let mut output_input_map = Vec::with_capacity(self.output_count);
         let return_values = Self::find_return_values(stmts);
         for index in (0..self.output_count).rev() {
-            let ty = return_values
+            let (ty, origin_input) = return_values
                 .and_then(|values| values.get(index))
                 .map(|var| {
                     let inferred = self.inferred_type_for_var(var);
                     let key = VarKey::from_var(var);
                     if let Some(Origin::Input(input_idx)) = origins.get(&key) {
-                        // This return variable traces back to an unmodified
-                        // procedure input. The backward-propagated requirement
-                        // for that input is a valid output guarantee, because
-                        // callers are required to supply a value satisfying the
-                        // input requirement (enforced by TypeSummary.inputs).
                         let input_key = Self::input_var_key(*input_idx);
                         let input_req = self
                             .required
                             .get(&input_key)
                             .copied()
                             .unwrap_or(TypeFact::Felt);
-                        inferred.glb(input_req)
+                        (inferred.glb(input_req), Some(*input_idx))
                     } else {
-                        inferred
+                        (inferred, None)
                     }
                 })
-                .unwrap_or(TypeFact::Felt);
+                .unwrap_or((TypeFact::Felt, None));
             outputs.push(ty.to_inferred_type());
+            output_input_map.push(origin_input);
         }
 
-        TypeSummary::new(inputs, outputs)
+        TypeSummary::new_with_map(inputs, outputs, output_input_map)
     }
 
     /// Find the top-level return statement values.

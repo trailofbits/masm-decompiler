@@ -1707,3 +1707,49 @@ fn felt_arithmetic_into_u32_warns_at_assignment() {
         "Diagnostic should explain that Felt arithmetic can produce non-U32 values"
     );
 }
+
+// -- Cross-call passthrough tests -----------------------------------------
+
+fn setup_cross_call_passthrough_decompiler() -> Decompiler<'static> {
+    let ws = Box::new(workspace_from_modules(&[(
+        "crosscall",
+        r#"
+        # Pure stack swap: returns inputs in reversed order.
+        proc swap_two
+            swap.1
+        end
+
+        # Caller passes U32 values through swap_two and uses results
+        # in u32 operations. Should NOT produce call-result diagnostics.
+        # IMPORTANT: both arguments must be U32 so the test verifies
+        # passthrough resolution, not just type coincidence.
+        pub proc caller_swap
+            push.3
+            push.7
+            u32wrapping_add
+            push.4
+            push.1
+            u32wrapping_add
+            exec.swap_two
+            u32wrapping_add
+            drop
+        end
+        "#,
+    )]));
+    let ws: &'static _ = Box::leak(ws);
+    Decompiler::new(ws)
+}
+
+#[test]
+fn cross_call_passthrough_no_false_positive() {
+    let decompiler = setup_cross_call_passthrough_decompiler();
+    let diags = diagnostics_for(&decompiler, "crosscall::caller_swap");
+    let call_result_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("call to") && d.message.contains("result"))
+        .collect();
+    assert!(
+        call_result_diags.is_empty(),
+        "passthrough call should not produce result-widening diagnostics: {call_result_diags:?}"
+    );
+}
