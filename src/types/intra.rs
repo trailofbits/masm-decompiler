@@ -300,9 +300,10 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 changed
             }
             Stmt::Intrinsic { intrinsic, .. } => {
-                let result_ty = self.intrinsic_result_type(&intrinsic.name);
+                let output_count = intrinsic.results.len();
                 let mut changed = false;
-                for result in &intrinsic.results {
+                for (idx, result) in intrinsic.results.iter().enumerate() {
+                    let result_ty = Self::intrinsic_output_type(&intrinsic.name, idx, output_count);
                     changed |= self.set_inferred_type_for_var(result, result_ty);
                 }
                 if Self::intrinsic_asserts_u32_args(&intrinsic.name) {
@@ -405,14 +406,40 @@ impl<'a> ProcTypeAnalyzer<'a> {
         changed
     }
 
-    /// Infer result type for an intrinsic operation.
-    fn intrinsic_result_type(&self, name: &str) -> TypeFact {
-        if name.starts_with("u32") || name == "sdepth" || name.starts_with("locaddr.") {
-            TypeFact::U32
-        } else if name == "is_odd" {
-            TypeFact::Bool
-        } else {
-            TypeFact::Felt
+    /// Infer result type for an intrinsic output at a given position.
+    ///
+    /// Position 0 is the first pushed result (deepest on stack for multi-output
+    /// intrinsics). The last position is the topmost result on the stack.
+    fn intrinsic_output_type(name: &str, output_index: usize, output_count: usize) -> TypeFact {
+        let base = Self::intrinsic_base_name(name);
+        match base {
+            // Multi-output intrinsics with Bool carry/borrow flag as last output.
+            "u32overflowing_add"
+            | "u32overflowing_sub"
+            | "u32overflowing_add3"
+            | "u32widening_add" => {
+                if output_index == output_count - 1 {
+                    TypeFact::Bool
+                } else {
+                    TypeFact::U32
+                }
+            }
+            // Multi-output intrinsics where all outputs are U32.
+            "u32widening_add3" | "u32widening_mul" | "u32widening_madd" | "u32divmod"
+            | "u32split" | "u32mod" | "u32wrapping_add3" => TypeFact::U32,
+            // Other u32 intrinsics and sdepth: all outputs U32.
+            _ if base.starts_with("u32") || name == "sdepth" => TypeFact::U32,
+            // locaddr: U32. Note: uses `name` (not `base`) because
+            // `intrinsic_base_name` strips at the first dot, turning
+            // `locaddr.0` into `locaddr`. The match on `base` above
+            // intentionally falls through to these wildcard arms for dotted
+            // intrinsics.
+            _ if name.starts_with("locaddr.") => TypeFact::U32,
+            // is_odd: Bool.
+            "is_odd" => TypeFact::Bool,
+            // All other intrinsics (crypto, extension field, mem_stream,
+            // adv_pipe, etc.): Felt.
+            _ => TypeFact::Felt,
         }
     }
 

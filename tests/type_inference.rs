@@ -630,7 +630,7 @@ fn u32_not_rotr_widening_add_and_mod_infer_u32_types() {
     assert_eq!(widening_add_only.inputs, vec![TypeRequirement::U32]);
     assert_eq!(
         widening_add_only.outputs,
-        vec![InferredType::U32, InferredType::U32]
+        vec![InferredType::U32, InferredType::Bool]
     );
 
     let widening_add3_only = summaries
@@ -1235,4 +1235,57 @@ fn opaque_summary_with_arity_fills_felt() {
     assert!(summary.is_opaque());
     assert_eq!(summary.inputs, vec![TypeRequirement::Felt; 2]);
     assert_eq!(summary.outputs, vec![InferredType::Felt; 3]);
+}
+
+#[test]
+fn u32overflowing_add_second_output_is_bool() {
+    let ws = workspace_from_modules(&[(
+        "overflow_types",
+        r#"
+        pub proc overflowing_add_outputs
+            u32overflowing_add
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("overflow_types::overflowing_add_outputs"))
+        .expect("overflowing_add_outputs summary");
+    // Output 0 = U32 (low result), Output 1 = Bool (carry flag)
+    assert_eq!(summary.outputs[0], InferredType::U32);
+    assert_eq!(summary.outputs[1], InferredType::Bool);
+}
+
+#[test]
+fn u32overflowing_sub_flag_satisfies_bool_condition() {
+    let ws = workspace_from_modules(&[(
+        "overflow_cond",
+        r#"
+        pub proc overflowing_sub_cond
+            push.10
+            push.3
+            u32overflowing_sub
+            if.true
+                push.1
+            else
+                push.0
+            end
+            drop
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let diagnostics = decompiler
+        .type_diagnostics()
+        .get(&SymbolPath::new("overflow_cond::overflowing_sub_cond"))
+        .cloned()
+        .unwrap_or_default();
+    // The borrow flag (output 1) is Bool, so using it as an if-condition should not warn.
+    assert!(
+        diagnostics.is_empty(),
+        "Expected no diagnostics, got: {diagnostics:?}"
+    );
 }
