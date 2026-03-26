@@ -1753,3 +1753,50 @@ fn cross_call_passthrough_no_false_positive() {
         "passthrough call should not produce result-widening diagnostics: {call_result_diags:?}"
     );
 }
+
+fn setup_transitive_passthrough_decompiler() -> Decompiler<'static> {
+    let ws = Box::new(workspace_from_modules(&[(
+        "transitive",
+        r#"
+        # Level 0: pure swap.
+        proc swap_inner
+            swap.1
+        end
+
+        # Level 1: calls swap_inner, itself a passthrough-through-call.
+        proc swap_outer
+            exec.swap_inner
+        end
+
+        # Caller passes U32 values through two levels of passthrough calls.
+        # Both args must be U32 so passthrough resolution eliminates FPs.
+        pub proc caller
+            push.3
+            push.7
+            u32wrapping_add
+            push.4
+            push.1
+            u32wrapping_add
+            exec.swap_outer
+            u32wrapping_add
+            drop
+        end
+        "#,
+    )]));
+    let ws: &'static _ = Box::leak(ws);
+    Decompiler::new(ws)
+}
+
+#[test]
+fn transitive_passthrough_no_false_positive() {
+    let decompiler = setup_transitive_passthrough_decompiler();
+    let diags = diagnostics_for(&decompiler, "transitive::caller");
+    let call_result_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("call to") && d.message.contains("result"))
+        .collect();
+    assert!(
+        call_result_diags.is_empty(),
+        "transitive passthrough should not produce result-widening diagnostics: {call_result_diags:?}"
+    );
+}

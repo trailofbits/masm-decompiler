@@ -521,7 +521,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 changed
             }
             Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
-                self.assign_call_result_types(&call.target, &call.results)
+                self.assign_call_result_types(&call.target, &call.args, &call.results)
             }
             Stmt::DynCall { results, .. } => {
                 let mut changed = false;
@@ -617,7 +617,12 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Assign types to call results from a known callee summary.
-    fn assign_call_result_types(&mut self, target: &str, results: &[Var]) -> bool {
+    ///
+    /// For outputs that trace back to a callee input (`output_input_map`),
+    /// the result type is resolved from the caller's argument type rather
+    /// than the callee's fixed output type. This eliminates false positives
+    /// for passthrough procedures that only permute their inputs.
+    fn assign_call_result_types(&mut self, target: &str, args: &[Var], results: &[Var]) -> bool {
         let mut changed = false;
         let Some(summary) = self.summary_for_target(target).cloned() else {
             return false;
@@ -625,6 +630,12 @@ impl<'a> ProcTypeAnalyzer<'a> {
         for (idx, result) in results.iter().enumerate() {
             let ty = if summary.is_opaque() {
                 TypeFact::Felt
+            } else if let Some(Some(input_idx)) = summary.output_input_map.get(idx) {
+                // Passthrough output: resolve type from the caller's argument.
+                // Origin::Input uses 0=deepest, but args uses 0=topmost (inverted).
+                args.get(args.len() - 1 - *input_idx)
+                    .map(|arg| self.inferred_type_for_var(arg))
+                    .unwrap_or(TypeFact::Felt)
             } else {
                 summary
                     .outputs
