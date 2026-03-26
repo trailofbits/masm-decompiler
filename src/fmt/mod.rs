@@ -790,7 +790,6 @@ fn type_requirement_for_display(requirement: TypeRequirement) -> &'static str {
         TypeRequirement::Felt => "Felt",
         TypeRequirement::Bool => "Bool",
         TypeRequirement::U32 => "U32",
-        TypeRequirement::Address => "Address",
     }
 }
 
@@ -800,7 +799,6 @@ fn inferred_type_for_display(ty: InferredType) -> &'static str {
         InferredType::Felt => "Felt",
         InferredType::Bool => "Bool",
         InferredType::U32 => "U32",
-        InferredType::Address => "Address",
     }
 }
 

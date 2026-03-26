@@ -4,7 +4,7 @@ use std::fmt;
 
 use crate::ir::{IndexExpr, ValueId, Var, VarBase};
 
-/// Internal dataflow fact for the scalar type chain `Bool < Address < U32 < Felt`.
+/// Internal dataflow fact for the scalar type chain `Bool < U32 < Felt`.
 ///
 /// This type is used within the type analysis pass for lattice-based inference.
 /// It is not exposed outside `src/types`.
@@ -14,20 +14,17 @@ pub(super) enum TypeFact {
     Felt,
     /// 32-bit unsigned integer.
     U32,
-    /// Element address (refinement of U32).
-    Address,
     /// Boolean value (bottom of lattice).
     Bool,
 }
 
 impl TypeFact {
-    /// Numeric rank in the chain `Bool(0) < Address(1) < U32(2) < Felt(3)`.
+    /// Numeric rank in the chain `Bool(0) < U32(1) < Felt(2)`.
     const fn rank(self) -> u8 {
         match self {
             Self::Bool => 0,
-            Self::Address => 1,
-            Self::U32 => 2,
-            Self::Felt => 3,
+            Self::U32 => 1,
+            Self::Felt => 2,
         }
     }
 
@@ -66,7 +63,6 @@ impl TypeFact {
         match self {
             Self::Felt => InferredType::Felt,
             Self::U32 => InferredType::U32,
-            Self::Address => InferredType::Address,
             Self::Bool => InferredType::Bool,
         }
     }
@@ -76,7 +72,6 @@ impl TypeFact {
         match self {
             Self::Felt => TypeRequirement::Felt,
             Self::U32 => TypeRequirement::U32,
-            Self::Address => TypeRequirement::Address,
             Self::Bool => TypeRequirement::Bool,
         }
     }
@@ -86,7 +81,6 @@ impl TypeFact {
         match ty {
             InferredType::Felt => Self::Felt,
             InferredType::U32 => Self::U32,
-            InferredType::Address => Self::Address,
             InferredType::Bool => Self::Bool,
         }
     }
@@ -96,7 +90,6 @@ impl TypeFact {
         match req {
             TypeRequirement::Felt => Self::Felt,
             TypeRequirement::U32 => Self::U32,
-            TypeRequirement::Address => Self::Address,
             TypeRequirement::Bool => Self::Bool,
         }
     }
@@ -111,8 +104,6 @@ pub enum InferredType {
     Bool,
     /// 32-bit unsigned integer.
     U32,
-    /// Element address.
-    Address,
 }
 
 impl fmt::Display for InferredType {
@@ -121,7 +112,6 @@ impl fmt::Display for InferredType {
             Self::Felt => write!(f, "Felt"),
             Self::Bool => write!(f, "Bool"),
             Self::U32 => write!(f, "U32"),
-            Self::Address => write!(f, "Address"),
         }
     }
 }
@@ -135,8 +125,6 @@ pub enum TypeRequirement {
     Bool,
     /// U32 is required.
     U32,
-    /// Address is required.
-    Address,
 }
 
 impl fmt::Display for TypeRequirement {
@@ -145,7 +133,6 @@ impl fmt::Display for TypeRequirement {
             Self::Felt => write!(f, "Felt"),
             Self::Bool => write!(f, "Bool"),
             Self::U32 => write!(f, "U32"),
-            Self::Address => write!(f, "Address"),
         }
     }
 }
@@ -193,52 +180,37 @@ mod tests {
         assert_eq!(TypeFact::Bool.join(TypeFact::Bool), TypeFact::Bool);
         assert_eq!(TypeFact::U32.join(TypeFact::U32), TypeFact::U32);
         assert_eq!(TypeFact::Felt.join(TypeFact::Felt), TypeFact::Felt);
-        assert_eq!(TypeFact::Bool.join(TypeFact::Address), TypeFact::Address);
-        assert_eq!(TypeFact::Address.join(TypeFact::Bool), TypeFact::Address);
         assert_eq!(TypeFact::Bool.join(TypeFact::U32), TypeFact::U32);
         assert_eq!(TypeFact::U32.join(TypeFact::Bool), TypeFact::U32);
-        assert_eq!(TypeFact::Address.join(TypeFact::U32), TypeFact::U32);
-        assert_eq!(TypeFact::U32.join(TypeFact::Address), TypeFact::U32);
         assert_eq!(TypeFact::Bool.join(TypeFact::Felt), TypeFact::Felt);
         assert_eq!(TypeFact::U32.join(TypeFact::Felt), TypeFact::Felt);
-        assert_eq!(TypeFact::Address.join(TypeFact::Felt), TypeFact::Felt);
     }
 
     #[test]
     fn type_fact_glb_is_greatest_lower_bound() {
         assert_eq!(TypeFact::Bool.glb(TypeFact::Bool), TypeFact::Bool);
         assert_eq!(TypeFact::U32.glb(TypeFact::U32), TypeFact::U32);
-        assert_eq!(TypeFact::Address.glb(TypeFact::Bool), TypeFact::Bool);
-        assert_eq!(TypeFact::Bool.glb(TypeFact::Address), TypeFact::Bool);
-        assert_eq!(TypeFact::U32.glb(TypeFact::Address), TypeFact::Address);
-        assert_eq!(TypeFact::Address.glb(TypeFact::U32), TypeFact::Address);
         assert_eq!(TypeFact::Felt.glb(TypeFact::Bool), TypeFact::Bool);
+        assert_eq!(TypeFact::Bool.glb(TypeFact::U32), TypeFact::Bool);
+        assert_eq!(TypeFact::U32.glb(TypeFact::Bool), TypeFact::Bool);
         assert_eq!(TypeFact::Felt.glb(TypeFact::U32), TypeFact::U32);
-        assert_eq!(TypeFact::Felt.glb(TypeFact::Address), TypeFact::Address);
+        assert_eq!(TypeFact::Felt.glb(TypeFact::Bool), TypeFact::Bool);
     }
 
     #[test]
     fn type_fact_satisfies_is_subtype_check() {
-        // Bool satisfies everything
+        // Bool satisfies everything (bottom of lattice)
         assert!(TypeFact::Bool.satisfies(TypeFact::Bool));
-        assert!(TypeFact::Bool.satisfies(TypeFact::Address));
         assert!(TypeFact::Bool.satisfies(TypeFact::U32));
         assert!(TypeFact::Bool.satisfies(TypeFact::Felt));
-        // Address satisfies Address, U32, Felt but not Bool
-        assert!(TypeFact::Address.satisfies(TypeFact::Address));
-        assert!(TypeFact::Address.satisfies(TypeFact::U32));
-        assert!(TypeFact::Address.satisfies(TypeFact::Felt));
-        assert!(!TypeFact::Address.satisfies(TypeFact::Bool));
-        // U32 satisfies U32, Felt but not Address, Bool
+        // U32 satisfies U32, Felt but not Bool
         assert!(TypeFact::U32.satisfies(TypeFact::U32));
         assert!(TypeFact::U32.satisfies(TypeFact::Felt));
-        assert!(!TypeFact::U32.satisfies(TypeFact::Address));
         assert!(!TypeFact::U32.satisfies(TypeFact::Bool));
-        // Felt only satisfies Felt
+        // Felt only satisfies Felt (top of lattice)
         assert!(TypeFact::Felt.satisfies(TypeFact::Felt));
         assert!(!TypeFact::Felt.satisfies(TypeFact::U32));
         assert!(!TypeFact::Felt.satisfies(TypeFact::Bool));
-        assert!(!TypeFact::Felt.satisfies(TypeFact::Address));
     }
 
     mod proptests {
@@ -248,7 +220,6 @@ mod tests {
         fn arb_type_fact() -> impl Strategy<Value = TypeFact> {
             prop_oneof![
                 Just(TypeFact::Bool),
-                Just(TypeFact::Address),
                 Just(TypeFact::U32),
                 Just(TypeFact::Felt),
             ]

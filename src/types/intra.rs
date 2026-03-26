@@ -407,10 +407,8 @@ impl<'a> ProcTypeAnalyzer<'a> {
 
     /// Infer result type for an intrinsic operation.
     fn intrinsic_result_type(&self, name: &str) -> TypeFact {
-        if name.starts_with("u32") || name == "sdepth" {
+        if name.starts_with("u32") || name == "sdepth" || name.starts_with("locaddr.") {
             TypeFact::U32
-        } else if name.starts_with("locaddr.") {
-            TypeFact::Address
         } else if name == "is_odd" {
             TypeFact::Bool
         } else {
@@ -658,7 +656,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     if self.mem_address_key_for_var(address).is_some() {
                         continue;
                     }
-                    changed |= self.apply_requirement_to_var(address, TypeFact::Address);
+                    changed |= self.apply_requirement_to_var(address, TypeFact::U32);
                 }
                 changed
             }
@@ -668,7 +666,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     if self.mem_address_key_for_var(address).is_some() {
                         continue;
                     }
-                    changed |= self.apply_requirement_to_var(address, TypeFact::Address);
+                    changed |= self.apply_requirement_to_var(address, TypeFact::U32);
                 }
                 changed
             }
@@ -1121,9 +1119,9 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     }
                     self.check_var_requirement(
                         address,
-                        TypeFact::Address,
+                        TypeFact::U32,
                         *span,
-                        "memory load address is not guaranteed Address",
+                        "memory load address is not guaranteed U32",
                     );
                 }
             }
@@ -1136,9 +1134,9 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     }
                     self.check_var_requirement(
                         address,
-                        TypeFact::Address,
+                        TypeFact::U32,
                         *span,
-                        "memory store address is not guaranteed Address",
+                        "memory store address is not guaranteed U32",
                     );
                 }
             }
