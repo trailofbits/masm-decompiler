@@ -20,6 +20,14 @@ pub struct TypeSummary {
     /// Position `0` corresponds to the first pushed result (deepest of the
     /// new return values on the stack).
     pub outputs: Vec<InferredType>,
+    /// Maps each output position to the input position it traces back to
+    /// as an unmodified copy, or `None` if the output is computed.
+    ///
+    /// When `output_input_map[i] == Some(j)`, the value at output position
+    /// `i` is the same value that was passed as input `j`. This enables
+    /// callers to infer the output type from their own argument types
+    /// rather than using the callee's conservative fixed type.
+    pub output_input_map: Vec<Option<usize>>,
     /// Indicates the summary is opaque and should not be used for mismatch checks.
     pub opaque: bool,
 }
@@ -27,9 +35,25 @@ pub struct TypeSummary {
 impl TypeSummary {
     /// Create a known summary.
     pub fn new(inputs: Vec<TypeRequirement>, outputs: Vec<InferredType>) -> Self {
+        let output_count = outputs.len();
         Self {
             inputs,
             outputs,
+            output_input_map: vec![None; output_count],
+            opaque: false,
+        }
+    }
+
+    /// Create a known summary with an explicit output-to-input map.
+    pub fn new_with_map(
+        inputs: Vec<TypeRequirement>,
+        outputs: Vec<InferredType>,
+        output_input_map: Vec<Option<usize>>,
+    ) -> Self {
+        Self {
+            inputs,
+            outputs,
+            output_input_map,
             opaque: false,
         }
     }
@@ -39,6 +63,7 @@ impl TypeSummary {
         Self {
             inputs: vec![TypeRequirement::Felt; inputs],
             outputs: vec![InferredType::Felt; outputs],
+            output_input_map: vec![None; outputs],
             opaque: true,
         }
     }
@@ -65,7 +90,7 @@ impl Default for TypeSummary {
 pub struct TypeDiagnostic {
     /// Procedure in which the diagnostic was emitted.
     pub procedure: SymbolPath,
-    /// Source span associated with the mismatch.
+    /// Source span associated with the mismatch (where the violation occurs).
     pub span: SourceSpan,
     /// Human-readable message.
     pub message: String,
@@ -77,6 +102,16 @@ pub struct TypeDiagnostic {
     pub expected: Option<TypeRequirement>,
     /// Actual inferred type.
     pub actual: Option<InferredType>,
+    /// Optional source span pointing to the origin of the type mismatch.
+    ///
+    /// For example, the Felt arithmetic operation whose output feeds a U32
+    /// call site, or the public procedure input that lacks validation.
+    pub source_span: Option<SourceSpan>,
+    /// Optional human-readable explanation of why the source causes the mismatch.
+    ///
+    /// For example, "Felt addition can produce values outside the u32 range"
+    /// or "public procedure input must be validated as U32".
+    pub source_description: Option<String>,
 }
 
 impl TypeDiagnostic {
@@ -90,6 +125,8 @@ impl TypeDiagnostic {
             arg_index: None,
             expected: None,
             actual: None,
+            source_span: None,
+            source_description: None,
         }
     }
 }
