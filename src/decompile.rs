@@ -5,6 +5,8 @@
 use log::debug;
 use std::collections::HashMap;
 
+use miden_assembly_syntax::ast::Visibility;
+
 use crate::{
     callgraph::CallGraph,
     fmt::{CodeWriter, FormattingConfig},
@@ -136,6 +138,8 @@ pub type DecompilationResult<T> = Result<T, DecompilationError>;
 pub struct DecompiledHeader {
     /// Procedure name (without module path).
     pub name: String,
+    /// Visibility of the procedure (public or private).
+    pub visibility: Visibility,
     /// Number of input parameters.
     pub inputs: usize,
     /// Number of output values.
@@ -177,6 +181,8 @@ pub struct DecompiledProc {
     pub name: String,
     /// Module path containing this procedure.
     pub module_path: String,
+    /// Visibility of the procedure (public or private).
+    pub visibility: Visibility,
     /// Inferred procedure signature, if available.
     pub signature: Option<ProcSignature>,
     /// Inferred procedure type summary, if available.
@@ -246,6 +252,7 @@ impl DecompiledProc {
 
         DecompiledHeader {
             name,
+            visibility: self.visibility,
             inputs,
             outputs,
             input_types,
@@ -431,6 +438,7 @@ impl<'a> Decompiler<'a> {
         Ok(DecompiledProc {
             name: fq_name.to_string(),
             module_path,
+            visibility: proc.visibility(),
             signature,
             type_summary,
             body,

@@ -1,5 +1,7 @@
 //! Pretty-printing helpers that emit a readable structured view of IR statements.
 
+use miden_assembly_syntax::ast::Visibility;
+
 use crate::{
     decompile::{DecompiledHeader, DecompiledProc},
     ir::{
@@ -766,8 +768,14 @@ impl CodeDisplay for DecompiledHeader {
             }
         };
 
+        let vis = match self.visibility {
+            Visibility::Public => format!("{} ", keyword("pub")),
+            Visibility::Private => String::new(),
+        };
+
         f.write_line(&format!(
-            "{} {}({}){} {{",
+            "{}{} {}({}){} {{",
+            vis,
             keyword("proc"),
             self.name,
             arg_list,

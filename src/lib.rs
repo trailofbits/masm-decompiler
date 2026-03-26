@@ -12,4 +12,5 @@ pub mod types;
 // Re-export key types for convenient access
 pub use decompile::{DecompilationConfig, DecompilationError, DecompilationResult, Decompiler};
 pub use frontend::Program;
+pub use miden_assembly_syntax::ast::Visibility;
 pub use symbol::path::SymbolPath;

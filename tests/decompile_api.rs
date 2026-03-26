@@ -298,16 +298,16 @@ fn formatter_prints_typed_signatures() {
     let typed_first_line = typed_output.lines().next().unwrap_or_default();
     assert_eq!(
         typed_first_line,
-        "proc typed_header(v_0: Bool, v_1: Felt, v_2: Address) -> (Bool, Felt) {"
+        "pub proc typed_header(v_0: Bool, v_1: Felt, v_2: Address) -> (Bool, Felt) {"
     );
 
     let sink_output = sink.render(FormattingConfig::new().with_color(false));
     let sink_first_line = sink_output.lines().next().unwrap_or_default();
-    assert_eq!(sink_first_line, "proc sink(v_0: Felt) {");
+    assert_eq!(sink_first_line, "pub proc sink(v_0: Felt) {");
 
     let unknown_out_output = unknown_out.render(FormattingConfig::new().with_color(false));
     let unknown_out_first_line = unknown_out_output.lines().next().unwrap_or_default();
-    assert_eq!(unknown_out_first_line, "proc unknown_out() -> Felt {");
+    assert_eq!(unknown_out_first_line, "pub proc unknown_out() -> Felt {");
 }
 
 #[test]

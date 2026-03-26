@@ -4,6 +4,7 @@ use masm_decompiler::{
     ir::{Expr, MemAccessKind, MemLoad, Stmt, ValueId, Var},
     signature::ProcSignature,
 };
+use miden_assembly_syntax::ast::Visibility;
 use miden_assembly_syntax::debuginfo::SourceSpan;
 
 const TEST_SPAN: SourceSpan = SourceSpan::UNKNOWN;
@@ -36,6 +37,7 @@ fn proc_with_colliding_names() -> DecompiledProc {
     DecompiledProc {
         name: "test::colliding_names".to_string(),
         module_path: "test".to_string(),
+        visibility: Visibility::Private,
         signature: Some(ProcSignature::known(12, 0, 0)),
         type_summary: None,
         body: DecompiledBody::new(vec![
