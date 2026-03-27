@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use miden_assembly_syntax::ast::Visibility;
 use miden_assembly_syntax::debuginfo::SourceSpan;
 
-use crate::ir::{BinOp, Constant, Expr, Stmt, UnOp, ValueId, Var};
+use crate::ir::{BinOp, Call, Constant, Expr, Stmt, UnOp, ValueId, Var};
 use crate::symbol::path::SymbolPath;
 
 use super::domain::{TypeFact, VarKey};
@@ -405,7 +405,9 @@ impl<'a> ProcTypeAnalyzer<'a> {
                         // the origin of the corresponding caller argument.
                         // Origin::Input uses 0=deepest, args uses 0=topmost.
                         call.args
-                            .get(call.args.len() - 1 - *input_idx)
+                            .len()
+                            .checked_sub(1 + *input_idx)
+                            .and_then(|i| call.args.get(i))
                             .and_then(|arg| origins.get(&VarKey::from_var(arg)).copied())
                             .unwrap_or(Origin::Computed)
                     } else {
@@ -646,7 +648,9 @@ impl<'a> ProcTypeAnalyzer<'a> {
             } else if let Some(Some(input_idx)) = summary.output_input_map.get(idx) {
                 // Passthrough output: resolve type from the caller's argument.
                 // Origin::Input uses 0=deepest, but args uses 0=topmost (inverted).
-                args.get(args.len() - 1 - *input_idx)
+                args.len()
+                    .checked_sub(1 + *input_idx)
+                    .and_then(|i| args.get(i))
                     .map(|arg| self.inferred_type_for_var(arg))
                     .unwrap_or(TypeFact::Felt)
             } else {
@@ -1259,11 +1263,29 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 }
                 changed
             }
+            Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
+                let mut changed = false;
+                if let Some(summary) = self.summary_for_target(&call.target).cloned() {
+                    for (idx, result) in call.results.iter().enumerate() {
+                        let req = self.requirement_for_var(result);
+                        if req == TypeFact::Felt {
+                            continue;
+                        }
+                        if let Some(Some(input_idx)) = summary.output_input_map.get(idx)
+                            && let Some(arg) = call
+                                .args
+                                .len()
+                                .checked_sub(1 + *input_idx)
+                                .and_then(|i| call.args.get(i))
+                            {
+                                changed |= self.apply_requirement_to_var(arg, req);
+                            }
+                    }
+                }
+                changed
+            }
             Stmt::AdvLoad { .. }
             | Stmt::AdvStore { .. }
-            | Stmt::Call { .. }
-            | Stmt::Exec { .. }
-            | Stmt::SysCall { .. }
             | Stmt::DynCall { .. }
             | Stmt::Intrinsic { .. }
             | Stmt::Return { .. } => false,
@@ -1465,11 +1487,15 @@ impl<'a> ProcTypeAnalyzer<'a> {
             Stmt::Call { span, call }
             | Stmt::Exec { span, call }
             | Stmt::SysCall { span, call } => {
-                self.collect_result_widening_diagnostics(
-                    *span,
-                    &call.results,
-                    &format!("call to {}", call.target),
-                );
+                let (is_opaque, suppress) = self.call_result_suppression(call);
+                if !is_opaque {
+                    self.collect_result_widening_diagnostics(
+                        *span,
+                        &call.results,
+                        &format!("call to {}", call.target),
+                        &suppress,
+                    );
+                }
             }
             Stmt::Intrinsic { span, intrinsic } => {
                 // Advice-sourced intrinsics have a separate analysis pass;
@@ -1479,11 +1505,12 @@ impl<'a> ProcTypeAnalyzer<'a> {
                         *span,
                         &intrinsic.results,
                         &format!("{} intrinsic", intrinsic.name),
+                        &[],
                     );
                 }
             }
             Stmt::DynCall { span, results, .. } => {
-                self.collect_result_widening_diagnostics(*span, results, "dynamic call");
+                self.collect_result_widening_diagnostics(*span, results, "dynamic call", &[]);
             }
             Stmt::If {
                 then_body,
@@ -1540,6 +1567,45 @@ impl<'a> ProcTypeAnalyzer<'a> {
         }
     }
 
+    /// Compute suppression flags for call result-widening diagnostics.
+    ///
+    /// Returns `(is_opaque, suppress)` where `suppress[i]` is `true` when
+    /// result `i` is a passthrough whose requirement was propagated backward
+    /// to the caller's argument. Suppressed results should not produce
+    /// result-widening diagnostics because a root-cause diagnostic will
+    /// fire at the argument's origin instead.
+    fn call_result_suppression(&self, call: &Call) -> (bool, Vec<bool>) {
+        let Some(summary) = self.summary_for_target(&call.target) else {
+            return (false, Vec::new());
+        };
+        if summary.is_opaque() {
+            return (true, Vec::new());
+        }
+        let suppress = call
+            .results
+            .iter()
+            .enumerate()
+            .map(|(idx, result)| {
+                let req = self.requirement_for_var(result);
+                if req == TypeFact::Felt {
+                    return false;
+                }
+                if let Some(input_idx) = summary.output_input_map.get(idx).copied().flatten()
+                    && let Some(arg) = call
+                        .args
+                        .len()
+                        .checked_sub(1 + input_idx)
+                        .and_then(|i| call.args.get(i))
+                    {
+                        let arg_req = self.requirement_for_var(arg);
+                        return arg_req.satisfies(req);
+                    }
+                false
+            })
+            .collect();
+        (false, suppress)
+    }
+
     /// Emit diagnostics for result variables whose inferred type is wider than
     /// the back-propagated requirement.
     ///
@@ -1553,8 +1619,12 @@ impl<'a> ProcTypeAnalyzer<'a> {
         span: SourceSpan,
         results: &[Var],
         origin: &str,
+        suppress: &[bool],
     ) {
         for (idx, result) in results.iter().enumerate() {
+            if suppress.get(idx).copied().unwrap_or(false) {
+                continue;
+            }
             let req = self.requirement_for_var(result);
             if req == TypeFact::Felt {
                 continue;

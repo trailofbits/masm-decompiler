@@ -50,6 +50,11 @@ impl TypeSummary {
         outputs: Vec<InferredType>,
         output_input_map: Vec<Option<usize>>,
     ) -> Self {
+        debug_assert_eq!(
+            output_input_map.len(),
+            outputs.len(),
+            "output_input_map length must match outputs length"
+        );
         Self {
             inputs,
             outputs,
