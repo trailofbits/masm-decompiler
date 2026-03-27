@@ -298,7 +298,7 @@ fn formatter_prints_typed_signatures() {
     let typed_first_line = typed_output.lines().next().unwrap_or_default();
     assert_eq!(
         typed_first_line,
-        "pub proc typed_header(v_0: Bool, v_1: Felt, v_2: Address) -> (Bool, Felt) {"
+        "pub proc typed_header(v_0: Bool, v_1: Felt, v_2: U32) -> (Bool, Felt) {"
     );
 
     let sink_output = sink.render(FormattingConfig::new().with_color(false));

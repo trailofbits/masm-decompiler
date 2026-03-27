@@ -1,5 +1,7 @@
 //! Interprocedural type-summary inference.
 
+use miden_assembly_syntax::debuginfo::Spanned;
+
 use crate::callgraph::CallGraph;
 use crate::decompile::DecompilationError;
 use crate::frontend::Workspace;
@@ -61,13 +63,26 @@ fn infer_summary_for_node(
     let Some((program, proc)) = workspace.lookup_proc_entry(&proc_path) else {
         return TypeSummary::opaque_with_arity(inputs, outputs);
     };
+    let visibility = proc.visibility();
+    // Use the procedure name span rather than the full body span for
+    // diagnostics. MASM procedures have implicit stack arguments, so
+    // there is no explicit parameter list to point at.
+    let proc_span = proc.name().span();
     let resolver = create_resolver(program.module(), workspace.source_manager());
     let stmts = match lift::lift_proc(proc, &proc_path, &resolver, signatures) {
         Ok(stmts) => stmts,
         Err(_err) => return TypeSummary::opaque_with_arity(inputs, outputs),
     };
 
-    let analysis = analyze_proc_types(&proc_path, inputs, outputs, &stmts, callee_summaries);
+    let analysis = analyze_proc_types(
+        &proc_path,
+        inputs,
+        outputs,
+        visibility,
+        proc_span,
+        &stmts,
+        callee_summaries,
+    );
     if !analysis.diagnostics.is_empty() {
         diagnostics.insert(proc_path.clone(), analysis.diagnostics.clone());
     }

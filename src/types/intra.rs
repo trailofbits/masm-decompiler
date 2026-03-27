@@ -2,9 +2,10 @@
 
 use std::collections::HashMap;
 
+use miden_assembly_syntax::ast::Visibility;
 use miden_assembly_syntax::debuginfo::SourceSpan;
 
-use crate::ir::{BinOp, Constant, Expr, Stmt, UnOp, ValueId, Var};
+use crate::ir::{BinOp, Call, Constant, Expr, Stmt, UnOp, ValueId, Var};
 use crate::symbol::path::SymbolPath;
 
 use super::domain::{TypeFact, VarKey};
@@ -45,6 +46,23 @@ enum MemAddressKey {
     LocalAddrOffset(u16, u32),
 }
 
+/// Provenance of a variable in the output summary.
+///
+/// Used to determine whether a return variable is an unmodified copy of
+/// a procedure input, enabling type narrowing based on the input's
+/// backward-propagated requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// Variable traces back to the procedure input at the given index.
+    ///
+    /// The index corresponds to the stack position (0 = deepest input,
+    /// matching the convention used by `input_var_key`).
+    Input(usize),
+    /// Variable was produced by a computation (arithmetic, call result,
+    /// memory load, etc.) or by merging incompatible origins.
+    Computed,
+}
+
 /// Output of type analysis for a single procedure.
 #[derive(Debug, Clone)]
 pub struct ProcTypeAnalysisResult {
@@ -59,6 +77,8 @@ pub fn analyze_proc_types(
     proc_path: &SymbolPath,
     input_count: usize,
     output_count: usize,
+    visibility: Visibility,
+    proc_span: SourceSpan,
     stmts: &[Stmt],
     callee_summaries: &TypeSummaryMap,
 ) -> ProcTypeAnalysisResult {
@@ -66,6 +86,8 @@ pub fn analyze_proc_types(
         proc_path.clone(),
         input_count,
         output_count,
+        visibility,
+        proc_span,
         callee_summaries,
     );
     analyzer.analyze(stmts)
@@ -79,6 +101,10 @@ struct ProcTypeAnalyzer<'a> {
     input_count: usize,
     /// Number of stack outputs.
     output_count: usize,
+    /// Visibility of the procedure (public or private).
+    visibility: Visibility,
+    /// Source span of the procedure definition.
+    proc_span: SourceSpan,
     /// Previously inferred summaries for callees.
     callee_summaries: &'a TypeSummaryMap,
     /// Inferred type guarantees for variables.
@@ -114,12 +140,16 @@ impl<'a> ProcTypeAnalyzer<'a> {
         proc_path: SymbolPath,
         input_count: usize,
         output_count: usize,
+        visibility: Visibility,
+        proc_span: SourceSpan,
         callee_summaries: &'a TypeSummaryMap,
     ) -> Self {
         Self {
             proc_path,
             input_count,
             output_count,
+            visibility,
+            proc_span,
             callee_summaries,
             inferred: HashMap::new(),
             required: HashMap::new(),
@@ -163,6 +193,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
         }
 
         self.collect_diagnostics_in_block(stmts);
+        self.collect_input_diagnostics();
         let summary = self.build_summary(stmts);
         let diagnostics = std::mem::take(&mut self.diagnostics);
 
@@ -181,17 +212,35 @@ impl<'a> ProcTypeAnalyzer<'a> {
             inputs.push(req.to_requirement());
         }
 
+        let origins = self.compute_origins(stmts);
+
         let mut outputs = Vec::with_capacity(self.output_count);
+        let mut output_input_map = Vec::with_capacity(self.output_count);
         let return_values = Self::find_return_values(stmts);
         for index in (0..self.output_count).rev() {
-            let ty = return_values
+            let (ty, origin_input) = return_values
                 .and_then(|values| values.get(index))
-                .map(|var| self.inferred_type_for_var(var))
-                .unwrap_or(TypeFact::Felt);
+                .map(|var| {
+                    let inferred = self.inferred_type_for_var(var);
+                    let key = VarKey::from_var(var);
+                    if let Some(Origin::Input(input_idx)) = origins.get(&key) {
+                        let input_key = Self::input_var_key(*input_idx);
+                        let input_req = self
+                            .required
+                            .get(&input_key)
+                            .copied()
+                            .unwrap_or(TypeFact::Felt);
+                        (inferred.glb(input_req), Some(*input_idx))
+                    } else {
+                        (inferred, None)
+                    }
+                })
+                .unwrap_or((TypeFact::Felt, None));
             outputs.push(ty.to_inferred_type());
+            output_input_map.push(origin_input);
         }
 
-        TypeSummary::new(inputs, outputs)
+        TypeSummary::new_with_map(inputs, outputs, output_input_map)
     }
 
     /// Find the top-level return statement values.
@@ -202,6 +251,203 @@ impl<'a> ProcTypeAnalyzer<'a> {
             }
         }
         None
+    }
+
+    /// Compute the origin of each variable in the procedure body.
+    ///
+    /// This is a post-hoc structural analysis run after the fixed-point
+    /// converges. It determines which variables are unmodified copies of
+    /// procedure inputs, tracing through variable copies (`Assign { expr:
+    /// Var(_) }`), ternary selects, if-phi merges, and loop-phi merges.
+    ///
+    /// A variable has `Origin::Input(i)` only if every path from the input
+    /// to the variable consists exclusively of copy operations and phi/ternary
+    /// nodes where all incoming edges agree on the same input index.
+    ///
+    /// The analysis iterates to a fixed point to handle nested loops: an
+    /// inner loop phi may optimistically inherit `Input(i)` from an outer
+    /// loop phi that is later demoted to `Computed`. Fixed-point iteration
+    /// ensures such stale origins are corrected.
+    fn compute_origins(&self, stmts: &[Stmt]) -> HashMap<VarKey, Origin> {
+        let mut origins: HashMap<VarKey, Origin> = HashMap::new();
+
+        // Seed input variables.
+        for index in 0..self.input_count {
+            let key = Self::input_var_key(index);
+            origins.insert(key, Origin::Input(index));
+        }
+
+        // Iterate to a fixed point. Each pass may demote origins from
+        // Input to Computed (monotonic — never the reverse), so
+        // convergence is guaranteed in at most N passes where N is the
+        // number of variables.
+        loop {
+            let prev = origins.clone();
+            self.propagate_origins_in_block(stmts, &mut origins);
+            if origins == prev {
+                break;
+            }
+        }
+
+        origins
+    }
+
+    /// Propagate origins through a statement block.
+    fn propagate_origins_in_block(&self, stmts: &[Stmt], origins: &mut HashMap<VarKey, Origin>) {
+        for stmt in stmts {
+            self.propagate_origins_in_stmt(stmt, origins);
+        }
+    }
+
+    /// Look up the origin for a variable expression, or `Computed` if not a variable.
+    fn origin_of_expr(expr: &Expr, origins: &HashMap<VarKey, Origin>) -> Origin {
+        match expr {
+            Expr::Var(var) => origins
+                .get(&VarKey::from_var(var))
+                .copied()
+                .unwrap_or(Origin::Computed),
+            _ => Origin::Computed,
+        }
+    }
+
+    /// Merge two origins: both must agree on the same `Input(i)`, otherwise `Computed`.
+    fn merge_origins(a: Origin, b: Origin) -> Origin {
+        match (a, b) {
+            (Origin::Input(i), Origin::Input(j)) if i == j => Origin::Input(i),
+            _ => Origin::Computed,
+        }
+    }
+
+    /// Propagate origins through a single statement.
+    fn propagate_origins_in_stmt(&self, stmt: &Stmt, origins: &mut HashMap<VarKey, Origin>) {
+        match stmt {
+            Stmt::Assign { dest, expr, .. } => {
+                let origin = match expr {
+                    // Variable copy: propagate the source's origin.
+                    Expr::Var(src) => origins
+                        .get(&VarKey::from_var(src))
+                        .copied()
+                        .unwrap_or(Origin::Computed),
+                    // Ternary select (cdrop/cswap): both branches must agree.
+                    Expr::Ternary {
+                        then_expr,
+                        else_expr,
+                        ..
+                    } => {
+                        let then_origin = Self::origin_of_expr(then_expr, origins);
+                        let else_origin = Self::origin_of_expr(else_expr, origins);
+                        Self::merge_origins(then_origin, else_origin)
+                    }
+                    // Any other expression: the value is computed.
+                    _ => Origin::Computed,
+                };
+                origins.insert(VarKey::from_var(dest), origin);
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                phis,
+                ..
+            } => {
+                self.propagate_origins_in_block(then_body, origins);
+                self.propagate_origins_in_block(else_body, origins);
+                for phi in phis {
+                    let then_origin = origins
+                        .get(&VarKey::from_var(&phi.then_var))
+                        .copied()
+                        .unwrap_or(Origin::Computed);
+                    let else_origin = origins
+                        .get(&VarKey::from_var(&phi.else_var))
+                        .copied()
+                        .unwrap_or(Origin::Computed);
+                    let merged = Self::merge_origins(then_origin, else_origin);
+                    origins.insert(VarKey::from_var(&phi.dest), merged);
+                }
+            }
+            Stmt::While { body, phis, .. } | Stmt::Repeat { body, phis, .. } => {
+                // Seed loop-phi dests from their init values.
+                for phi in phis {
+                    let init_origin = origins
+                        .get(&VarKey::from_var(&phi.init))
+                        .copied()
+                        .unwrap_or(Origin::Computed);
+                    // Only narrow (Input→Computed), never widen.
+                    let current = origins
+                        .get(&VarKey::from_var(&phi.dest))
+                        .copied()
+                        .unwrap_or(init_origin);
+                    let updated = Self::merge_origins(current, init_origin);
+                    origins.insert(VarKey::from_var(&phi.dest), updated);
+                }
+                self.propagate_origins_in_block(body, origins);
+                // Verify step agrees with dest; demote if not.
+                for phi in phis {
+                    let dest_origin = origins
+                        .get(&VarKey::from_var(&phi.dest))
+                        .copied()
+                        .unwrap_or(Origin::Computed);
+                    let step_origin = origins
+                        .get(&VarKey::from_var(&phi.step))
+                        .copied()
+                        .unwrap_or(Origin::Computed);
+                    let merged = Self::merge_origins(dest_origin, step_origin);
+                    origins.insert(VarKey::from_var(&phi.dest), merged);
+                }
+            }
+            Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
+                let callee_map = self
+                    .summary_for_target(&call.target)
+                    .map(|s| &s.output_input_map);
+                for (idx, result) in call.results.iter().enumerate() {
+                    let origin = if let Some(Some(input_idx)) = callee_map.and_then(|m| m.get(idx))
+                    {
+                        // Callee output traces to callee input — inherit
+                        // the origin of the corresponding caller argument.
+                        // Origin::Input uses 0=deepest, args uses 0=topmost.
+                        call.args
+                            .len()
+                            .checked_sub(1 + *input_idx)
+                            .and_then(|i| call.args.get(i))
+                            .and_then(|arg| origins.get(&VarKey::from_var(arg)).copied())
+                            .unwrap_or(Origin::Computed)
+                    } else {
+                        Origin::Computed
+                    };
+                    origins.insert(VarKey::from_var(result), origin);
+                }
+            }
+            Stmt::DynCall { results, .. } => {
+                for result in results {
+                    origins.insert(VarKey::from_var(result), Origin::Computed);
+                }
+            }
+            Stmt::Intrinsic { intrinsic, .. } => {
+                for result in &intrinsic.results {
+                    origins.insert(VarKey::from_var(result), Origin::Computed);
+                }
+            }
+            Stmt::MemLoad { load, .. } => {
+                for output in &load.outputs {
+                    origins.insert(VarKey::from_var(output), Origin::Computed);
+                }
+            }
+            Stmt::LocalLoad { load, .. } => {
+                for output in &load.outputs {
+                    origins.insert(VarKey::from_var(output), Origin::Computed);
+                }
+            }
+            Stmt::AdvLoad { load, .. } => {
+                for output in &load.outputs {
+                    origins.insert(VarKey::from_var(output), Origin::Computed);
+                }
+            }
+            // Statements that don't define new variables.
+            Stmt::MemStore { .. }
+            | Stmt::AdvStore { .. }
+            | Stmt::LocalStore { .. }
+            | Stmt::LocalStoreW { .. }
+            | Stmt::Return { .. } => {}
+        }
     }
 
     /// Build the canonical key for an input variable by stack index.
@@ -290,7 +536,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 changed
             }
             Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
-                self.assign_call_result_types(&call.target, &call.results)
+                self.assign_call_result_types(&call.target, &call.args, &call.results)
             }
             Stmt::DynCall { results, .. } => {
                 let mut changed = false;
@@ -300,9 +546,10 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 changed
             }
             Stmt::Intrinsic { intrinsic, .. } => {
-                let result_ty = self.intrinsic_result_type(&intrinsic.name);
+                let output_count = intrinsic.results.len();
                 let mut changed = false;
-                for result in &intrinsic.results {
+                for (idx, result) in intrinsic.results.iter().enumerate() {
+                    let result_ty = Self::intrinsic_output_type(&intrinsic.name, idx, output_count);
                     changed |= self.set_inferred_type_for_var(result, result_ty);
                 }
                 if Self::intrinsic_asserts_u32_args(&intrinsic.name) {
@@ -385,7 +632,12 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Assign types to call results from a known callee summary.
-    fn assign_call_result_types(&mut self, target: &str, results: &[Var]) -> bool {
+    ///
+    /// For outputs that trace back to a callee input (`output_input_map`),
+    /// the result type is resolved from the caller's argument type rather
+    /// than the callee's fixed output type. This eliminates false positives
+    /// for passthrough procedures that only permute their inputs.
+    fn assign_call_result_types(&mut self, target: &str, args: &[Var], results: &[Var]) -> bool {
         let mut changed = false;
         let Some(summary) = self.summary_for_target(target).cloned() else {
             return false;
@@ -393,6 +645,14 @@ impl<'a> ProcTypeAnalyzer<'a> {
         for (idx, result) in results.iter().enumerate() {
             let ty = if summary.is_opaque() {
                 TypeFact::Felt
+            } else if let Some(Some(input_idx)) = summary.output_input_map.get(idx) {
+                // Passthrough output: resolve type from the caller's argument.
+                // Origin::Input uses 0=deepest, but args uses 0=topmost (inverted).
+                args.len()
+                    .checked_sub(1 + *input_idx)
+                    .and_then(|i| args.get(i))
+                    .map(|arg| self.inferred_type_for_var(arg))
+                    .unwrap_or(TypeFact::Felt)
             } else {
                 summary
                     .outputs
@@ -405,22 +665,55 @@ impl<'a> ProcTypeAnalyzer<'a> {
         changed
     }
 
-    /// Infer result type for an intrinsic operation.
-    fn intrinsic_result_type(&self, name: &str) -> TypeFact {
-        if name.starts_with("u32") || name == "sdepth" {
-            TypeFact::U32
-        } else if name.starts_with("locaddr.") {
-            TypeFact::Address
-        } else if name == "is_odd" {
-            TypeFact::Bool
-        } else {
-            TypeFact::Felt
+    /// Infer result type for an intrinsic output at a given position.
+    ///
+    /// Position 0 is the first pushed result (deepest on stack for multi-output
+    /// intrinsics). The last position is the topmost result on the stack.
+    fn intrinsic_output_type(name: &str, output_index: usize, output_count: usize) -> TypeFact {
+        let base = Self::intrinsic_base_name(name);
+        match base {
+            // Multi-output intrinsics with Bool carry/borrow flag as last output.
+            "u32overflowing_add"
+            | "u32overflowing_sub"
+            | "u32overflowing_add3"
+            | "u32widening_add" => {
+                if output_index == output_count - 1 {
+                    TypeFact::Bool
+                } else {
+                    TypeFact::U32
+                }
+            }
+            // Multi-output intrinsics where all outputs are U32.
+            "u32widening_add3" | "u32widening_mul" | "u32widening_madd" | "u32divmod"
+            | "u32split" | "u32mod" | "u32wrapping_add3" => TypeFact::U32,
+            // Other u32 intrinsics and sdepth: all outputs U32.
+            _ if base.starts_with("u32") || name == "sdepth" => TypeFact::U32,
+            // locaddr: U32. Note: uses `name` (not `base`) because
+            // `intrinsic_base_name` strips at the first dot, turning
+            // `locaddr.0` into `locaddr`. The match on `base` above
+            // intentionally falls through to these wildcard arms for dotted
+            // intrinsics.
+            _ if name.starts_with("locaddr.") => TypeFact::U32,
+            // is_odd: Bool.
+            "is_odd" => TypeFact::Bool,
+            // All other intrinsics (crypto, extension field, mem_stream,
+            // adv_pipe, etc.): Felt.
+            _ => TypeFact::Felt,
         }
     }
 
     /// Return intrinsic base name without suffixes such as `.err=*` or immediates.
     fn intrinsic_base_name(name: &str) -> &str {
         name.split_once('.').map_or(name, |(base, _)| base)
+    }
+
+    /// Return true if the intrinsic is an advice-sourced operation.
+    ///
+    /// Advice intrinsics (`adv_push`, `adv_pipe`) have a separate analysis
+    /// pass and should not generate type-widening diagnostics.
+    fn is_advice_intrinsic(name: &str) -> bool {
+        let base = Self::intrinsic_base_name(name);
+        matches!(base, "adv_push" | "adv_pipe")
     }
 
     /// Return true if intrinsic arguments require a caller-side u32 precondition.
@@ -658,7 +951,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     if self.mem_address_key_for_var(address).is_some() {
                         continue;
                     }
-                    changed |= self.apply_requirement_to_var(address, TypeFact::Address);
+                    changed |= self.apply_requirement_to_var(address, TypeFact::U32);
                 }
                 changed
             }
@@ -668,7 +961,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     if self.mem_address_key_for_var(address).is_some() {
                         continue;
                     }
-                    changed |= self.apply_requirement_to_var(address, TypeFact::Address);
+                    changed |= self.apply_requirement_to_var(address, TypeFact::U32);
                 }
                 changed
             }
@@ -720,14 +1013,45 @@ impl<'a> ProcTypeAnalyzer<'a> {
 
     /// Seed requirements for intrinsic arguments.
     fn seed_intrinsic_arg_requirements(&mut self, intrinsic: &crate::ir::Intrinsic) -> bool {
-        if !Self::intrinsic_requires_u32_precondition(&intrinsic.name) {
-            return false;
+        let mut changed = false;
+
+        // Blanket u32 precondition for u32 arithmetic intrinsics.
+        if Self::intrinsic_requires_u32_precondition(&intrinsic.name) {
+            for arg in &intrinsic.args {
+                changed |= self.require_u32_var_if_not_guaranteed(arg);
+            }
         }
 
-        let mut changed = false;
-        for arg in &intrinsic.args {
-            changed |= self.require_u32_var_if_not_guaranteed(arg);
+        // Per-intrinsic positional requirements.
+        let base = Self::intrinsic_base_name(&intrinsic.name);
+        match base {
+            // mtree_get: [d, i, R, ...] — depth (arg 0) and index (arg 1) are U32.
+            "mtree_get" => {
+                for arg in intrinsic.args.iter().take(2) {
+                    changed |= self.require_u32_var_if_not_guaranteed(arg);
+                }
+            }
+            // mtree_set: [d, i, R, V', ...] — depth (arg 0) and index (arg 1) are U32.
+            "mtree_set" => {
+                for arg in intrinsic.args.iter().take(2) {
+                    changed |= self.require_u32_var_if_not_guaranteed(arg);
+                }
+            }
+            // mtree_verify: [V, d, i, R, ...] — depth (arg 4) and index (arg 5) are U32.
+            "mtree_verify" => {
+                for arg in intrinsic.args.iter().skip(4).take(2) {
+                    changed |= self.require_u32_var_if_not_guaranteed(arg);
+                }
+            }
+            // mem_stream / adv_pipe: address is the last argument.
+            "mem_stream" | "adv_pipe" => {
+                if let Some(addr) = intrinsic.args.last() {
+                    changed |= self.require_u32_var_if_not_guaranteed(addr);
+                }
+            }
+            _ => {}
         }
+
         changed
     }
 
@@ -939,11 +1263,29 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 }
                 changed
             }
+            Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
+                let mut changed = false;
+                if let Some(summary) = self.summary_for_target(&call.target).cloned() {
+                    for (idx, result) in call.results.iter().enumerate() {
+                        let req = self.requirement_for_var(result);
+                        if req == TypeFact::Felt {
+                            continue;
+                        }
+                        if let Some(Some(input_idx)) = summary.output_input_map.get(idx)
+                            && let Some(arg) = call
+                                .args
+                                .len()
+                                .checked_sub(1 + *input_idx)
+                                .and_then(|i| call.args.get(i))
+                            {
+                                changed |= self.apply_requirement_to_var(arg, req);
+                            }
+                    }
+                }
+                changed
+            }
             Stmt::AdvLoad { .. }
             | Stmt::AdvStore { .. }
-            | Stmt::Call { .. }
-            | Stmt::Exec { .. }
-            | Stmt::SysCall { .. }
             | Stmt::DynCall { .. }
             | Stmt::Intrinsic { .. }
             | Stmt::Return { .. } => false,
@@ -1107,86 +1449,78 @@ impl<'a> ProcTypeAnalyzer<'a> {
     /// Collect mismatch diagnostics for one statement.
     fn collect_diagnostics_in_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::Assign { span, expr, .. } => {
-                self.collect_expr_diagnostics(expr, *span);
-            }
-            Stmt::MemLoad { span, load } => {
-                for address in &load.address {
-                    // Skip the address check if the variable is a known abstract
-                    // address (constant immediate or locaddr result) — these are
-                    // always valid memory addresses regardless of their inferred
-                    // scalar type.
-                    if self.mem_address_key_for_var(address).is_some() {
-                        continue;
+            Stmt::Assign {
+                span, dest, expr, ..
+            } => {
+                // Wider-output operation. If the destination has a
+                // requirement stricter than what the RHS expression produces,
+                // and the expression is not a simple variable copy (which just
+                // propagates, not originates), emit a diagnostic.
+                let req = self.requirement_for_var(dest);
+                if req != TypeFact::Felt {
+                    let actual = self.infer_expr_type(expr);
+                    if !actual.satisfies(req) && !matches!(expr, Expr::Var(_)) {
+                        let mut diag = TypeDiagnostic::new(
+                            self.proc_path.clone(),
+                            *span,
+                            format!(
+                                "expression produces {} but {} is required",
+                                actual.to_inferred_type(),
+                                req.to_requirement(),
+                            ),
+                        );
+                        diag.expected = Some(req.to_requirement());
+                        diag.actual = Some(actual.to_inferred_type());
+                        diag.source_span = Some(*span);
+                        diag.source_description = Some(format!(
+                            "Felt arithmetic can produce values outside the {} range",
+                            req.to_requirement(),
+                        ));
+                        self.diagnostics.push(diag);
                     }
-                    self.check_var_requirement(
-                        address,
-                        TypeFact::Address,
-                        *span,
-                        "memory load address is not guaranteed Address",
-                    );
                 }
             }
-            Stmt::MemStore { span, store } => {
-                for address in &store.address {
-                    // Skip the address check if the variable is a known abstract
-                    // address (constant immediate or locaddr result).
-                    if self.mem_address_key_for_var(address).is_some() {
-                        continue;
-                    }
-                    self.check_var_requirement(
-                        address,
-                        TypeFact::Address,
-                        *span,
-                        "memory store address is not guaranteed Address",
-                    );
-                }
+            Stmt::MemLoad { .. } | Stmt::MemStore { .. } => {
+                // Address requirements back-propagate to callers via
+                // TypeSummary.inputs — no interior diagnostic needed.
             }
             Stmt::Call { span, call }
             | Stmt::Exec { span, call }
             | Stmt::SysCall { span, call } => {
-                self.collect_call_arg_diagnostics(*span, &call.target, &call.args);
-            }
-            Stmt::Intrinsic { span, intrinsic } => {
-                if Self::intrinsic_requires_u32_precondition(&intrinsic.name) {
-                    for arg in &intrinsic.args {
-                        self.check_var_requirement(
-                            arg,
-                            TypeFact::U32,
-                            *span,
-                            "u32 instruction argument is not guaranteed U32",
-                        );
-                    }
+                let (is_opaque, suppress) = self.call_result_suppression(call);
+                if !is_opaque {
+                    self.collect_result_widening_diagnostics(
+                        *span,
+                        &call.results,
+                        &format!("call to {}", call.target),
+                        &suppress,
+                    );
                 }
             }
+            Stmt::Intrinsic { span, intrinsic } => {
+                // Advice-sourced intrinsics have a separate analysis pass;
+                // skip result-widening diagnostics for them.
+                if !Self::is_advice_intrinsic(&intrinsic.name) {
+                    self.collect_result_widening_diagnostics(
+                        *span,
+                        &intrinsic.results,
+                        &format!("{} intrinsic", intrinsic.name),
+                        &[],
+                    );
+                }
+            }
+            Stmt::DynCall { span, results, .. } => {
+                self.collect_result_widening_diagnostics(*span, results, "dynamic call", &[]);
+            }
             Stmt::If {
-                span,
-                cond,
                 then_body,
                 else_body,
                 ..
             } => {
-                self.check_expr_requirement(
-                    cond,
-                    TypeFact::Bool,
-                    *span,
-                    "if-condition is not guaranteed Bool",
-                );
                 self.collect_diagnostics_in_block(then_body);
                 self.collect_diagnostics_in_block(else_body);
             }
-            Stmt::While {
-                span, cond, body, ..
-            } => {
-                self.check_expr_requirement(
-                    cond,
-                    TypeFact::Bool,
-                    *span,
-                    "while-condition is not guaranteed Bool",
-                );
-                self.collect_diagnostics_in_block(body);
-            }
-            Stmt::Repeat { body, .. } => {
+            Stmt::While { body, .. } | Stmt::Repeat { body, .. } => {
                 self.collect_diagnostics_in_block(body);
             }
             Stmt::AdvLoad { .. }
@@ -1194,79 +1528,131 @@ impl<'a> ProcTypeAnalyzer<'a> {
             | Stmt::LocalLoad { .. }
             | Stmt::LocalStore { .. }
             | Stmt::LocalStoreW { .. }
-            | Stmt::DynCall { .. }
             | Stmt::Return { .. } => {}
         }
     }
 
-    /// Collect diagnostics for call arguments.
-    ///
-    /// In the current four-point chain lattice, no scalar type pair is
-    /// definitively incompatible. Call-argument mismatch diagnostics are
-    /// therefore disabled. Stronger diagnostics require richer facts
-    /// (exact constants, numeric ranges, or provenance tracking).
-    fn collect_call_arg_diagnostics(&mut self, _span: SourceSpan, _target: &str, _args: &[Var]) {}
-
-    /// Collect diagnostics for ternary conditions nested in expressions.
-    fn collect_expr_diagnostics(&mut self, expr: &Expr, span: SourceSpan) {
-        match expr {
-            Expr::Ternary {
-                cond,
-                then_expr,
-                else_expr,
-            } => {
-                self.check_expr_requirement(
-                    cond,
-                    TypeFact::Bool,
-                    span,
-                    "ternary condition is not guaranteed Bool",
+    /// Emit diagnostics for public procedure inputs that don't satisfy their requirements.
+    fn collect_input_diagnostics(&mut self) {
+        if self.visibility != Visibility::Public {
+            return;
+        }
+        for index in (0..self.input_count).rev() {
+            let key = Self::input_var_key(index);
+            let req = self.required.get(&key).copied().unwrap_or(TypeFact::Felt);
+            if req == TypeFact::Felt {
+                continue; // No specific requirement.
+            }
+            let inferred = self.inferred.get(&key).copied().unwrap_or(TypeFact::Felt);
+            if !inferred.satisfies(req) {
+                let mut diag = TypeDiagnostic::new(
+                    self.proc_path.clone(),
+                    self.proc_span,
+                    format!(
+                        "public procedure input {} requires {} but is not validated (inferred {})",
+                        index + 1,
+                        req.to_requirement(),
+                        inferred.to_inferred_type(),
+                    ),
                 );
-                self.collect_expr_diagnostics(then_expr, span);
-                self.collect_expr_diagnostics(else_expr, span);
+                diag.expected = Some(req.to_requirement());
+                diag.actual = Some(inferred.to_inferred_type());
+                diag.source_span = Some(self.proc_span);
+                diag.source_description = Some(format!(
+                    "public procedure input must be validated as {} (e.g. via u32assert)",
+                    req.to_requirement(),
+                ));
+                self.diagnostics.push(diag);
             }
-            Expr::Binary(_, lhs, rhs) => {
-                self.collect_expr_diagnostics(lhs, span);
-                self.collect_expr_diagnostics(rhs, span);
-            }
-            Expr::EqW { .. } => {}
-            Expr::Unary(_, inner) => self.collect_expr_diagnostics(inner, span),
-            Expr::True | Expr::False | Expr::Var(_) | Expr::Constant(_) => {}
         }
     }
 
-    /// Check whether an expression satisfies a requirement.
-    fn check_expr_requirement(
-        &mut self,
-        expr: &Expr,
-        expected: TypeFact,
-        span: SourceSpan,
-        context: &str,
-    ) {
-        let actual = self.infer_expr_type(expr);
-        if !actual.satisfies(expected) {
-            self.diagnostics.push(TypeDiagnostic::new(
-                self.proc_path.clone(),
-                span,
-                format!("{context} (inferred {})", actual.to_inferred_type()),
-            ));
+    /// Compute suppression flags for call result-widening diagnostics.
+    ///
+    /// Returns `(is_opaque, suppress)` where `suppress[i]` is `true` when
+    /// result `i` is a passthrough whose requirement was propagated backward
+    /// to the caller's argument. Suppressed results should not produce
+    /// result-widening diagnostics because a root-cause diagnostic will
+    /// fire at the argument's origin instead.
+    fn call_result_suppression(&self, call: &Call) -> (bool, Vec<bool>) {
+        let Some(summary) = self.summary_for_target(&call.target) else {
+            return (false, Vec::new());
+        };
+        if summary.is_opaque() {
+            return (true, Vec::new());
         }
+        let suppress = call
+            .results
+            .iter()
+            .enumerate()
+            .map(|(idx, result)| {
+                let req = self.requirement_for_var(result);
+                if req == TypeFact::Felt {
+                    return false;
+                }
+                if let Some(input_idx) = summary.output_input_map.get(idx).copied().flatten()
+                    && let Some(arg) = call
+                        .args
+                        .len()
+                        .checked_sub(1 + input_idx)
+                        .and_then(|i| call.args.get(i))
+                    {
+                        let arg_req = self.requirement_for_var(arg);
+                        return arg_req.satisfies(req);
+                    }
+                false
+            })
+            .collect();
+        (false, suppress)
     }
 
-    /// Check whether a variable satisfies a requirement.
-    fn check_var_requirement(
+    /// Emit diagnostics for result variables whose inferred type is wider than
+    /// the back-propagated requirement.
+    ///
+    /// Call, intrinsic, and dynamic-call results are terminal points for
+    /// backward propagation: their type is determined by the callee or
+    /// instruction, not by upstream data flow. When a result carries a
+    /// requirement stricter than its inferred type, the mismatch is reported
+    /// here.
+    fn collect_result_widening_diagnostics(
         &mut self,
-        var: &Var,
-        expected: TypeFact,
         span: SourceSpan,
-        context: &str,
+        results: &[Var],
+        origin: &str,
+        suppress: &[bool],
     ) {
-        let actual = self.inferred_type_for_var(var);
-        if !actual.satisfies(expected) {
-            self.diagnostics.push(TypeDiagnostic::new(
-                self.proc_path.clone(),
-                span,
-                format!("{context} (inferred {})", actual.to_inferred_type()),
-            ));
+        for (idx, result) in results.iter().enumerate() {
+            if suppress.get(idx).copied().unwrap_or(false) {
+                continue;
+            }
+            let req = self.requirement_for_var(result);
+            if req == TypeFact::Felt {
+                continue;
+            }
+            let actual = self.inferred_type_for_var(result);
+            if !actual.satisfies(req) {
+                let mut diag = TypeDiagnostic::new(
+                    self.proc_path.clone(),
+                    span,
+                    format!(
+                        "{} result {} produces {} but {} is required",
+                        origin,
+                        idx,
+                        actual.to_inferred_type(),
+                        req.to_requirement(),
+                    ),
+                );
+                diag.expected = Some(req.to_requirement());
+                diag.actual = Some(actual.to_inferred_type());
+                diag.source_span = Some(span);
+                diag.source_description = Some(format!(
+                    "{} produces {} which does not satisfy the {} requirement",
+                    origin,
+                    actual.to_inferred_type(),
+                    req.to_requirement(),
+                ));
+                self.diagnostics.push(diag);
+            }
         }
     }
 
@@ -1274,5 +1660,408 @@ impl<'a> ProcTypeAnalyzer<'a> {
     fn summary_for_target(&self, target: &str) -> Option<&TypeSummary> {
         let key = SymbolPath::new(target.to_string());
         self.callee_summaries.get(&key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{Expr, IfPhi, LoopPhi, LoopVar, Stmt, ValueId, Var};
+    use miden_assembly_syntax::ast::Visibility;
+    use miden_assembly_syntax::debuginfo::SourceSpan;
+
+    /// Helper to create a variable with a given value ID and stack depth.
+    fn var(id: u64, depth: usize) -> Var {
+        Var::new(ValueId::new(id), depth)
+    }
+
+    /// Helper to create an analyzer with given input/output counts.
+    fn analyzer(input_count: usize, output_count: usize) -> ProcTypeAnalyzer<'static> {
+        let summaries: &'static TypeSummaryMap = Box::leak(Box::default());
+        ProcTypeAnalyzer::new(
+            SymbolPath::new("test::proc".to_string()),
+            input_count,
+            output_count,
+            Visibility::Private,
+            SourceSpan::default(),
+            summaries,
+        )
+    }
+
+    #[test]
+    fn origin_seeds_inputs() {
+        let analyzer = analyzer(3, 0);
+        let stmts: Vec<Stmt> = vec![];
+        let origins = analyzer.compute_origins(&stmts);
+
+        for i in 0..3 {
+            let key = ProcTypeAnalyzer::input_var_key(i);
+            assert_eq!(
+                origins.get(&key),
+                Some(&Origin::Input(i)),
+                "input {i} should have Origin::Input({i})"
+            );
+        }
+    }
+
+    #[test]
+    fn origin_propagates_through_var_copy() {
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let copy = var(10, 0);
+        let stmts = vec![Stmt::Assign {
+            span: SourceSpan::default(),
+            dest: copy.clone(),
+            expr: Expr::Var(input_0),
+        }];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&copy)),
+            Some(&Origin::Input(0)),
+            "copy of input should trace to Input(0)"
+        );
+    }
+
+    #[test]
+    fn origin_propagates_through_chained_copies() {
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let copy1 = var(10, 0);
+        let copy2 = var(11, 0);
+        let copy3 = var(12, 0);
+        let stmts = vec![
+            Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: copy1.clone(),
+                expr: Expr::Var(input_0),
+            },
+            Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: copy2.clone(),
+                expr: Expr::Var(copy1),
+            },
+            Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: copy3.clone(),
+                expr: Expr::Var(copy2),
+            },
+        ];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&copy3)),
+            Some(&Origin::Input(0)),
+            "chained copy A→B→C should trace back to Input(0)"
+        );
+    }
+
+    #[test]
+    fn origin_computed_for_arithmetic() {
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let result = var(10, 0);
+        let stmts = vec![Stmt::Assign {
+            span: SourceSpan::default(),
+            dest: result.clone(),
+            expr: Expr::Binary(
+                BinOp::Add,
+                Box::new(Expr::Var(input_0)),
+                Box::new(Expr::Constant(Constant::Felt(1))),
+            ),
+        }];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&result)),
+            Some(&Origin::Computed),
+            "arithmetic result should be Computed"
+        );
+    }
+
+    #[test]
+    fn origin_ternary_same_input() {
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let cond = var(10, 1);
+        let result = var(11, 0);
+        let stmts = vec![
+            Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: cond.clone(),
+                expr: Expr::True,
+            },
+            Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: result.clone(),
+                expr: Expr::Ternary {
+                    cond: Box::new(Expr::Var(cond)),
+                    then_expr: Box::new(Expr::Var(input_0.clone())),
+                    else_expr: Box::new(Expr::Var(input_0)),
+                },
+            },
+        ];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&result)),
+            Some(&Origin::Input(0)),
+            "ternary with both branches from same input should trace to Input(0)"
+        );
+    }
+
+    #[test]
+    fn origin_ternary_different_inputs_is_computed() {
+        let analyzer = analyzer(2, 1);
+        let input_0 = var(0, 0);
+        let input_1 = var(1, 1);
+        let cond = var(10, 2);
+        let result = var(11, 0);
+        let stmts = vec![
+            Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: cond.clone(),
+                expr: Expr::True,
+            },
+            Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: result.clone(),
+                expr: Expr::Ternary {
+                    cond: Box::new(Expr::Var(cond)),
+                    then_expr: Box::new(Expr::Var(input_0)),
+                    else_expr: Box::new(Expr::Var(input_1)),
+                },
+            },
+        ];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&result)),
+            Some(&Origin::Computed),
+            "ternary with different input origins should be Computed"
+        );
+    }
+
+    #[test]
+    fn origin_if_phi_same_input() {
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let then_copy = var(10, 0);
+        let else_copy = var(11, 0);
+        let phi_dest = var(12, 0);
+
+        let stmts = vec![Stmt::If {
+            span: SourceSpan::default(),
+            cond: Expr::True,
+            then_body: vec![Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: then_copy.clone(),
+                expr: Expr::Var(input_0.clone()),
+            }],
+            else_body: vec![Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: else_copy.clone(),
+                expr: Expr::Var(input_0),
+            }],
+            phis: vec![IfPhi {
+                dest: phi_dest.clone(),
+                then_var: then_copy,
+                else_var: else_copy,
+            }],
+        }];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&phi_dest)),
+            Some(&Origin::Input(0)),
+            "if-phi with both branches from same input should trace to Input(0)"
+        );
+    }
+
+    #[test]
+    fn origin_if_phi_different_inputs_is_computed() {
+        let analyzer = analyzer(2, 1);
+        let input_0 = var(0, 0);
+        let input_1 = var(1, 1);
+        let phi_dest = var(12, 0);
+
+        let stmts = vec![Stmt::If {
+            span: SourceSpan::default(),
+            cond: Expr::True,
+            then_body: vec![],
+            else_body: vec![],
+            phis: vec![IfPhi {
+                dest: phi_dest.clone(),
+                then_var: input_0,
+                else_var: input_1,
+            }],
+        }];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&phi_dest)),
+            Some(&Origin::Computed),
+            "if-phi with different input origins should be Computed"
+        );
+    }
+
+    #[test]
+    fn origin_loop_phi_preserves_input() {
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let phi_dest = var(10, 0);
+        let step_copy = var(11, 0);
+
+        let stmts = vec![Stmt::Repeat {
+            span: SourceSpan::default(),
+            loop_var: LoopVar::new(0),
+            loop_count: 3,
+            body: vec![Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: step_copy.clone(),
+                expr: Expr::Var(phi_dest.clone()),
+            }],
+            phis: vec![LoopPhi {
+                dest: phi_dest.clone(),
+                init: input_0,
+                step: step_copy,
+            }],
+        }];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&phi_dest)),
+            Some(&Origin::Input(0)),
+            "loop-phi preserving input should trace to Input(0)"
+        );
+    }
+
+    #[test]
+    fn origin_loop_phi_modified_step_is_computed() {
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let phi_dest = var(10, 0);
+        let modified = var(11, 0);
+
+        let stmts = vec![Stmt::Repeat {
+            span: SourceSpan::default(),
+            loop_var: LoopVar::new(0),
+            loop_count: 3,
+            body: vec![Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: modified.clone(),
+                expr: Expr::Binary(
+                    BinOp::Add,
+                    Box::new(Expr::Var(phi_dest.clone())),
+                    Box::new(Expr::Constant(Constant::Felt(1))),
+                ),
+            }],
+            phis: vec![LoopPhi {
+                dest: phi_dest.clone(),
+                init: input_0,
+                step: modified,
+            }],
+        }];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&phi_dest)),
+            Some(&Origin::Computed),
+            "loop-phi with modified step should be Computed"
+        );
+    }
+
+    #[test]
+    fn origin_nested_loop_outer_demotion_propagates() {
+        // Outer loop modifies a value. Inner loop inherits from outer phi.
+        // After outer step verification demotes the outer phi to Computed,
+        // the fixed-point iteration must also demote the inner phi.
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let outer_phi = var(10, 0);
+        let inner_phi = var(20, 0);
+        let inner_step = var(21, 0);
+        let outer_modified = var(11, 0);
+
+        let stmts = vec![Stmt::Repeat {
+            span: SourceSpan::default(),
+            loop_var: LoopVar::new(0),
+            loop_count: 2,
+            body: vec![
+                Stmt::Repeat {
+                    span: SourceSpan::default(),
+                    loop_var: LoopVar::new(1),
+                    loop_count: 2,
+                    body: vec![Stmt::Assign {
+                        span: SourceSpan::default(),
+                        dest: inner_step.clone(),
+                        expr: Expr::Var(inner_phi.clone()),
+                    }],
+                    phis: vec![LoopPhi {
+                        dest: inner_phi.clone(),
+                        init: outer_phi.clone(),
+                        step: inner_step.clone(),
+                    }],
+                },
+                Stmt::Assign {
+                    span: SourceSpan::default(),
+                    dest: outer_modified.clone(),
+                    expr: Expr::Binary(
+                        BinOp::Add,
+                        Box::new(Expr::Var(outer_phi.clone())),
+                        Box::new(Expr::Constant(Constant::Felt(1))),
+                    ),
+                },
+            ],
+            phis: vec![LoopPhi {
+                dest: outer_phi.clone(),
+                init: input_0,
+                step: outer_modified,
+            }],
+        }];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&outer_phi)),
+            Some(&Origin::Computed),
+            "outer loop phi with modified step should be Computed"
+        );
+        assert_eq!(
+            origins.get(&VarKey::from_var(&inner_phi)),
+            Some(&Origin::Computed),
+            "inner loop phi inheriting from Computed outer phi should also be Computed"
+        );
+    }
+
+    #[test]
+    fn origin_local_store_load_is_computed() {
+        // Passthrough through local storage is conservatively Computed.
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let loaded = var(10, 0);
+        let stmts = vec![
+            Stmt::LocalStore {
+                span: SourceSpan::default(),
+                store: crate::ir::LocalStore {
+                    index: 0,
+                    values: vec![input_0],
+                },
+            },
+            Stmt::LocalLoad {
+                span: SourceSpan::default(),
+                load: crate::ir::LocalLoad {
+                    kind: crate::ir::LocalAccessKind::Element,
+                    index: 0,
+                    outputs: vec![loaded.clone()],
+                },
+            },
+        ];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&loaded)),
+            Some(&Origin::Computed),
+            "local store/load passthrough is conservatively Computed"
+        );
     }
 }

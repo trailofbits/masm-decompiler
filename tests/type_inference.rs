@@ -319,7 +319,7 @@ fn infers_expected_input_requirements() {
     let needs_address = summaries
         .get(&SymbolPath::new("typecheck::needs_address"))
         .expect("needs_address summary");
-    assert_eq!(needs_address.inputs, vec![TypeRequirement::Address]);
+    assert_eq!(needs_address.inputs, vec![TypeRequirement::U32]);
 
     let needs_and_bool = summaries
         .get(&SymbolPath::new("typecheck::needs_and_bool"))
@@ -331,33 +331,35 @@ fn infers_expected_input_requirements() {
 }
 
 #[test]
-fn call_argument_diagnostics_disabled_in_chain_lattice() {
+fn call_argument_diagnostics_enabled() {
     let decompiler = setup_decompiler();
 
-    // In the four-point chain, no scalar type pair is definitively
-    // incompatible. Call-argument diagnostics are disabled.
+    // push.2 (U32) -> needs_bool (Bool) -- U32 does not satisfy Bool.
     let bad_bool = diagnostics_for(&decompiler, "typecheck::caller_bad_bool");
     assert!(
-        bad_bool.is_empty(),
-        "call-arg diagnostics disabled: {bad_bool:?}"
+        !bad_bool.is_empty(),
+        "U32 constant passed to Bool parameter should emit diagnostic: {bad_bool:?}"
     );
 
+    // push.2 (U32) -> needs_u32 (U32) -- U32 satisfies U32.
     let bad_u32 = diagnostics_for(&decompiler, "typecheck::caller_bad_u32");
     assert!(
         bad_u32.is_empty(),
-        "call-arg diagnostics disabled: {bad_u32:?}"
+        "U32 constant satisfies U32 requirement: {bad_u32:?}"
     );
 
+    // eq result (Bool) -> needs_address (now U32) -- Bool satisfies U32.
     let bad_addr = diagnostics_for(&decompiler, "typecheck::caller_bad_address");
     assert!(
         bad_addr.is_empty(),
-        "call-arg diagnostics disabled: {bad_addr:?}"
+        "Bool satisfies U32 requirement: {bad_addr:?}"
     );
 
+    // push.3, push.2 (U32, U32) -> needs_and_bool (Bool, Bool) -- U32 doesn't satisfy Bool.
     let bad_and = diagnostics_for(&decompiler, "typecheck::caller_bad_and_bool");
     assert!(
-        bad_and.is_empty(),
-        "call-arg diagnostics disabled: {bad_and:?}"
+        !bad_and.is_empty(),
+        "U32 constants passed to Bool parameters should emit diagnostics: {bad_and:?}"
     );
 }
 
@@ -410,9 +412,12 @@ fn enforces_argument_types_by_stack_position() {
     let ok = diagnostics_for(&decompiler, "typecheck::caller_order_ok");
     assert!(ok.is_empty(), "stack-ordered arguments should pass: {ok:?}");
 
-    // Call-argument diagnostics are disabled in the chain lattice.
+    // caller_order_bad: passes U32 where Bool is required.
     let bad = diagnostics_for(&decompiler, "typecheck::caller_order_bad");
-    assert!(bad.is_empty(), "call-arg diagnostics disabled: {bad:?}");
+    assert!(
+        !bad.is_empty(),
+        "mismatched argument types should emit diagnostics: {bad:?}"
+    );
 }
 
 #[test]
@@ -428,8 +433,8 @@ fn maps_call_results_to_output_types_by_position() {
     let bad = diagnostics_for(&decompiler, "typecheck::caller_out_bad");
     assert!(
         bad.iter()
-            .any(|diag| diag.message.contains("if-condition is not guaranteed Bool")),
-        "expected Bool condition mismatch, got: {bad:?}"
+            .any(|diag| diag.message.contains("produces U32 but Bool is required")),
+        "expected result-widening diagnostic for call result, got: {bad:?}"
     );
 }
 
@@ -465,7 +470,7 @@ fn accepts_boolean_arguments_for_and_operator() {
 }
 
 #[test]
-fn infers_locaddr_output_as_address() {
+fn infers_locaddr_output_as_u32() {
     let ws = workspace_from_modules(&[(
         "locaddr_types",
         r#"
@@ -480,7 +485,7 @@ fn infers_locaddr_output_as_address() {
     let summary = summaries
         .get(&SymbolPath::new("locaddr_types::returns_locaddr"))
         .expect("returns_locaddr summary");
-    assert_eq!(summary.outputs, vec![InferredType::Address]);
+    assert_eq!(summary.outputs, vec![InferredType::U32]);
 }
 
 #[test]
@@ -630,7 +635,7 @@ fn u32_not_rotr_widening_add_and_mod_infer_u32_types() {
     assert_eq!(widening_add_only.inputs, vec![TypeRequirement::U32]);
     assert_eq!(
         widening_add_only.outputs,
-        vec![InferredType::U32, InferredType::U32]
+        vec![InferredType::U32, InferredType::Bool]
     );
 
     let widening_add3_only = summaries
@@ -906,7 +911,7 @@ fn address_type_preserved_through_local_roundtrip() {
     let diagnostics = diagnostics_for(&decompiler, "storage::address_local_roundtrip");
     assert!(
         diagnostics.is_empty(),
-        "Address type should survive local store/load roundtrip: {diagnostics:?}"
+        "U32 type should survive local store/load roundtrip: {diagnostics:?}"
     );
 }
 
@@ -951,7 +956,7 @@ fn address_type_preserved_through_mem_roundtrip() {
     let diagnostics = diagnostics_for(&decompiler, "storage::address_mem_roundtrip");
     assert!(
         diagnostics.is_empty(),
-        "Address type should survive memory store/load roundtrip: {diagnostics:?}"
+        "U32 type should survive memory store/load roundtrip: {diagnostics:?}"
     );
 }
 
@@ -1028,7 +1033,7 @@ fn address_plus_offset_preserves_address_type() {
     let diagnostics = diagnostics_for(&decompiler, "storage::address_offset_no_warning");
     assert!(
         diagnostics.is_empty(),
-        "Address + small offset should remain Address: {diagnostics:?}"
+        "locaddr + small offset should suppress diagnostic: {diagnostics:?}"
     );
 }
 
@@ -1039,8 +1044,8 @@ fn large_felt_constant_address_emits_diagnostic() {
     assert!(
         diagnostics
             .iter()
-            .any(|d| d.message.contains("not guaranteed Address")),
-        "Felt constant >= 2^32 used as memory address should produce an address diagnostic, got: {diagnostics:?}"
+            .any(|d| d.message.contains("Felt but U32 is required")),
+        "Felt constant >= 2^32 used as memory address should produce a widening diagnostic, got: {diagnostics:?}"
     );
 }
 
@@ -1051,8 +1056,8 @@ fn address_plus_large_offset_emits_diagnostic() {
     assert!(
         diagnostics
             .iter()
-            .any(|d| d.message.contains("not guaranteed Address")),
-        "Address + untracked offset should produce an address diagnostic, got: {diagnostics:?}"
+            .any(|d| d.message.contains("Felt but U32 is required")),
+        "Address + untracked offset should produce a widening diagnostic, got: {diagnostics:?}"
     );
 }
 
@@ -1080,8 +1085,8 @@ fn address_sub_offset_emits_diagnostic() {
     assert!(
         diagnostics
             .iter()
-            .any(|d| d.message.contains("not guaranteed Address")),
-        "locaddr - offset should produce an address diagnostic: {diagnostics:?}"
+            .any(|d| d.message.contains("Felt but U32 is required")),
+        "locaddr - offset should produce a widening diagnostic: {diagnostics:?}"
     );
 }
 
@@ -1122,6 +1127,272 @@ fn address_key_survives_if_phi() {
     assert!(
         diagnostics.is_empty(),
         "locaddr through if-phi should not produce address diagnostic: {diagnostics:?}"
+    );
+}
+
+fn setup_passthrough_decompiler() -> Decompiler<'static> {
+    let ws = Box::new(workspace_from_modules(&[(
+        "passthrough",
+        r#"
+        # Direct passthrough: input is used in a u32 op (creating backward
+        # requirement) and also returned unchanged. The output should be
+        # narrowed to U32 because the input has a U32 requirement.
+        proc direct_passthrough
+            dup.0
+            push.1
+            u32wrapping_add
+            drop
+        end
+
+        # Dup-copy passthrough: input is dup'd, copy is used in u32 op,
+        # and a second copy (different ValueId) is returned.
+        proc dup_copy_passthrough
+            dup.0
+            dup.0
+            push.1
+            u32wrapping_add
+            drop
+            swap.1
+            drop
+        end
+
+        # If-phi passthrough: both branches dup the input, forcing an IfPhi
+        # with different SSA values that both trace to the same input.
+        proc if_phi_passthrough
+            dup.0
+            push.1
+            u32wrapping_add
+            drop
+            push.1
+            if.true
+                dup.0
+                swap.1
+                drop
+            else
+                dup.0
+                swap.1
+                drop
+            end
+        end
+
+        # Repeat-loop passthrough: each iteration applies u32not twice
+        # (a u32 identity transformation), creating a LoopPhi whose
+        # step is Computed (u32not is not a copy). The pre-loop dup
+        # establishes a U32 requirement on the input. The output stays
+        # Felt because origin tracing cannot see through computations.
+        proc repeat_passthrough
+            dup.0
+            push.1
+            u32wrapping_add
+            drop
+            repeat.3
+                u32not
+                u32not
+            end
+        end
+
+        # Non-passthrough soundness boundary: input is modified by Felt
+        # arithmetic. Even though it has a U32 requirement from the caller,
+        # the output must stay Felt because `add` can produce values outside
+        # the u32 range.
+        proc not_passthrough
+            push.1
+            add
+        end
+
+        pub proc caller_not_passthrough
+            push.5
+            exec.not_passthrough
+            push.1
+            u32wrapping_add
+            drop
+        end
+
+        # Mixed outputs: two inputs. Input 0 (deeper, MASM pos 1) is dup'd
+        # into a copy used in a u32 op (establishing U32 requirement on
+        # input 0). Then input 0 is replaced with a second dup copy so
+        # the output SSA variable differs from the original input.
+        # Input 1 (top, MASM pos 0) is modified by Felt add.
+        # Output 0 (deepest) = dup copy of input 0 → U32;
+        # Output 1 (top) = input 1 + 1 → Felt.
+        proc mixed_passthrough
+            dup.1
+            push.1
+            u32wrapping_add
+            drop
+            swap.1
+            dup.0
+            swap.1
+            drop
+            swap.1
+            push.1
+            add
+        end
+
+        pub proc caller_mixed
+            push.5
+            push.10
+            exec.mixed_passthrough
+            push.1
+            u32wrapping_add
+            drop
+            drop
+        end
+
+        # Chained copy passthrough: input -> copy1 -> copy2, copy2 is returned.
+        # Tests that origin propagation follows multi-step copy chains.
+        proc chained_copy_passthrough
+            dup.0
+            push.1
+            u32wrapping_add
+            drop
+            dup.0
+            swap.1
+            drop
+            dup.0
+            swap.1
+            drop
+        end
+        "#,
+    )]));
+
+    let ws: &'static _ = Box::leak(ws);
+    Decompiler::new(ws)
+}
+
+#[test]
+fn passthrough_direct_creates_u32_input_requirement() {
+    let decompiler = setup_passthrough_decompiler();
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("passthrough::direct_passthrough"))
+        .expect("direct_passthrough summary");
+    assert_eq!(
+        summary.inputs,
+        vec![TypeRequirement::U32],
+        "input should require U32 from internal u32 operation"
+    );
+    // Note: outputs is empty because the returned value is the identical
+    // input variable, which the signature inference does not count as output.
+}
+
+#[test]
+fn passthrough_dup_copy_infers_narrow_output_type() {
+    let decompiler = setup_passthrough_decompiler();
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("passthrough::dup_copy_passthrough"))
+        .expect("dup_copy_passthrough summary");
+    assert_eq!(
+        summary.inputs,
+        vec![TypeRequirement::U32],
+        "input should require U32"
+    );
+    assert_eq!(
+        summary.outputs,
+        vec![InferredType::U32],
+        "dup-copy passthrough of U32-required input should produce U32 output"
+    );
+}
+
+#[test]
+fn passthrough_if_phi_infers_narrow_output_type() {
+    let decompiler = setup_passthrough_decompiler();
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("passthrough::if_phi_passthrough"))
+        .expect("if_phi_passthrough summary");
+    assert_eq!(
+        summary.inputs,
+        vec![TypeRequirement::U32],
+        "input should require U32"
+    );
+    assert_eq!(
+        summary.outputs,
+        vec![InferredType::U32],
+        "if-phi passthrough of U32-required input should produce U32 output"
+    );
+}
+
+#[test]
+fn passthrough_repeat_infers_narrow_output_type() {
+    let decompiler = setup_passthrough_decompiler();
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("passthrough::repeat_passthrough"))
+        .expect("repeat_passthrough summary");
+    assert_eq!(
+        summary.inputs,
+        vec![TypeRequirement::U32],
+        "input should require U32 from u32wrapping_add and u32not"
+    );
+    // The loop body applies u32not twice — a semantic identity but not a
+    // copy chain in SSA terms. Origin tracing correctly marks the loop phi
+    // dest as Computed, and the forward join widens to Felt.
+    assert_eq!(
+        summary.outputs,
+        vec![InferredType::Felt],
+        "repeat-loop with Computed origin stays Felt (u32not is not a copy)"
+    );
+}
+
+#[test]
+fn non_passthrough_arithmetic_stays_felt() {
+    let decompiler = setup_passthrough_decompiler();
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("passthrough::not_passthrough"))
+        .expect("not_passthrough summary");
+    assert_eq!(
+        summary.outputs,
+        vec![InferredType::Felt],
+        "Felt addition result must stay Felt even with U32 requirement -- origin is Computed"
+    );
+}
+
+#[test]
+fn mixed_outputs_passthrough_and_computed() {
+    let decompiler = setup_passthrough_decompiler();
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("passthrough::mixed_passthrough"))
+        .expect("mixed_passthrough summary");
+    assert_eq!(
+        summary.outputs.len(),
+        2,
+        "mixed_passthrough should produce 2 outputs, got: {:?}",
+        summary.outputs
+    );
+    // outputs[0] = deepest = dup copy of input 0 (passthrough) → U32
+    assert_eq!(
+        summary.outputs[0],
+        InferredType::U32,
+        "passthrough output (deepest) should narrow to U32"
+    );
+    // outputs[1] = top = result of `push.1; add` on input 1 (computed) → Felt
+    assert_eq!(
+        summary.outputs[1],
+        InferredType::Felt,
+        "computed (Felt add) output must remain Felt"
+    );
+}
+
+#[test]
+fn passthrough_chained_copy_infers_narrow_output_type() {
+    let decompiler = setup_passthrough_decompiler();
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("passthrough::chained_copy_passthrough"))
+        .expect("chained_copy_passthrough summary");
+    assert_eq!(
+        summary.inputs,
+        vec![TypeRequirement::U32],
+        "input should require U32"
+    );
+    assert_eq!(
+        summary.outputs,
+        vec![InferredType::U32],
+        "chained copy passthrough should trace back to input and narrow to U32"
     );
 }
 
@@ -1177,7 +1448,7 @@ fn u32_range_constant_infers_u32() {
 }
 
 #[test]
-fn bool_satisfies_address_requirement() {
+fn bool_satisfies_u32_requirement() {
     let ws = workspace_from_modules(&[(
         "subtype_test",
         r#"
@@ -1198,7 +1469,7 @@ fn bool_satisfies_address_requirement() {
         .unwrap_or_default();
     assert!(
         diagnostics.is_empty(),
-        "Bool satisfies Address in the chain lattice: {diagnostics:?}"
+        "Bool satisfies U32 in the chain lattice: {diagnostics:?}"
     );
 }
 
@@ -1235,4 +1506,605 @@ fn opaque_summary_with_arity_fills_felt() {
     assert!(summary.is_opaque());
     assert_eq!(summary.inputs, vec![TypeRequirement::Felt; 2]);
     assert_eq!(summary.outputs, vec![InferredType::Felt; 3]);
+}
+
+#[test]
+fn u32overflowing_add_second_output_is_bool() {
+    let ws = workspace_from_modules(&[(
+        "overflow_types",
+        r#"
+        pub proc overflowing_add_outputs
+            u32overflowing_add
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("overflow_types::overflowing_add_outputs"))
+        .expect("overflowing_add_outputs summary");
+    // Output 0 = U32 (low result), Output 1 = Bool (carry flag)
+    assert_eq!(summary.outputs[0], InferredType::U32);
+    assert_eq!(summary.outputs[1], InferredType::Bool);
+}
+
+#[test]
+fn u32overflowing_sub_flag_satisfies_bool_condition() {
+    let ws = workspace_from_modules(&[(
+        "overflow_cond",
+        r#"
+        pub proc overflowing_sub_cond
+            push.10
+            push.3
+            u32overflowing_sub
+            if.true
+                push.1
+            else
+                push.0
+            end
+            drop
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let diagnostics = decompiler
+        .type_diagnostics()
+        .get(&SymbolPath::new("overflow_cond::overflowing_sub_cond"))
+        .cloned()
+        .unwrap_or_default();
+    // The borrow flag (output 1) is Bool, so using it as an if-condition should not warn.
+    assert!(
+        diagnostics.is_empty(),
+        "Expected no diagnostics, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn mtree_get_requires_u32_for_depth_and_index() {
+    let ws = workspace_from_modules(&[(
+        "mtree_types",
+        r#"
+        pub proc mtree_get_types
+            mtree_get
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("mtree_types::mtree_get_types"))
+        .expect("mtree_get_types summary");
+    // mtree_get stack input: [d, i, R0, R1, R2, R3] (6 inputs)
+    // Depth (input 0 = top of stack) and index (input 1) should require U32.
+    // Remaining inputs (R0-R3, the root hash) should require Felt.
+    assert_eq!(
+        summary.inputs[0],
+        TypeRequirement::U32,
+        "depth should be U32"
+    );
+    assert_eq!(
+        summary.inputs[1],
+        TypeRequirement::U32,
+        "index should be U32"
+    );
+    assert_eq!(
+        summary.inputs[2],
+        TypeRequirement::Felt,
+        "root element should be Felt"
+    );
+}
+
+// -- Visibility-aware diagnostic tests ------------------------------------
+
+#[test]
+fn private_proc_no_interior_diagnostics() {
+    let ws = workspace_from_modules(&[(
+        "visibility_test",
+        r#"
+        proc private_add
+            u32wrapping_add
+        end
+
+        pub proc caller
+            push.1 push.2
+            exec.private_add
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let diagnostics = decompiler
+        .type_diagnostics()
+        .get(&SymbolPath::new("visibility_test::private_add"))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        diagnostics.is_empty(),
+        "Private proc should not emit interior diagnostics: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn public_proc_warns_at_unvalidated_input() {
+    let ws = workspace_from_modules(&[(
+        "visibility_test2",
+        r#"
+        pub proc public_add
+            u32wrapping_add
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let diagnostics = decompiler
+        .type_diagnostics()
+        .get(&SymbolPath::new("visibility_test2::public_add"))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !diagnostics.is_empty(),
+        "Public proc with unvalidated U32 inputs should warn"
+    );
+    let diag = &diagnostics[0];
+    assert!(
+        diag.source_description.is_some(),
+        "Diagnostic should explain why the input needs validation"
+    );
+}
+
+#[test]
+fn public_proc_no_warning_when_asserted() {
+    let ws = workspace_from_modules(&[(
+        "visibility_test3",
+        r#"
+        pub proc validated_add
+            u32assert2
+            u32wrapping_add
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let diagnostics = decompiler
+        .type_diagnostics()
+        .get(&SymbolPath::new("visibility_test3::validated_add"))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        diagnostics.is_empty(),
+        "Asserted inputs should not warn: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn felt_arithmetic_into_u32_warns_at_assignment() {
+    let ws = workspace_from_modules(&[(
+        "felt_arith",
+        r#"
+        pub proc felt_into_u32
+            add
+            u32wrapping_add
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let diagnostics = decompiler
+        .type_diagnostics()
+        .get(&SymbolPath::new("felt_arith::felt_into_u32"))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !diagnostics.is_empty(),
+        "Felt arithmetic feeding u32 op should warn"
+    );
+    let diag = &diagnostics[0];
+    assert!(
+        diag.source_description.is_some(),
+        "Diagnostic should explain that Felt arithmetic can produce non-U32 values"
+    );
+}
+
+// -- Cross-call passthrough tests -----------------------------------------
+
+fn setup_cross_call_passthrough_decompiler() -> Decompiler<'static> {
+    let ws = Box::new(workspace_from_modules(&[(
+        "crosscall",
+        r#"
+        # Pure stack swap: returns inputs in reversed order.
+        proc swap_two
+            swap.1
+        end
+
+        # Caller passes U32 values through swap_two and uses results
+        # in u32 operations. Should NOT produce call-result diagnostics.
+        # IMPORTANT: both arguments must be U32 so the test verifies
+        # passthrough resolution, not just type coincidence.
+        pub proc caller_swap
+            push.3
+            push.7
+            u32wrapping_add
+            push.4
+            push.1
+            u32wrapping_add
+            exec.swap_two
+            u32wrapping_add
+            drop
+        end
+        "#,
+    )]));
+    let ws: &'static _ = Box::leak(ws);
+    Decompiler::new(ws)
+}
+
+#[test]
+fn cross_call_passthrough_no_false_positive() {
+    let decompiler = setup_cross_call_passthrough_decompiler();
+    let diags = diagnostics_for(&decompiler, "crosscall::caller_swap");
+    let call_result_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("call to") && d.message.contains("result"))
+        .collect();
+    assert!(
+        call_result_diags.is_empty(),
+        "passthrough call should not produce result-widening diagnostics: {call_result_diags:?}"
+    );
+}
+
+fn setup_transitive_passthrough_decompiler() -> Decompiler<'static> {
+    let ws = Box::new(workspace_from_modules(&[(
+        "transitive",
+        r#"
+        # Level 0: pure swap.
+        proc swap_inner
+            swap.1
+        end
+
+        # Level 1: calls swap_inner, itself a passthrough-through-call.
+        proc swap_outer
+            exec.swap_inner
+        end
+
+        # Caller passes U32 values through two levels of passthrough calls.
+        # Both args must be U32 so passthrough resolution eliminates FPs.
+        pub proc caller
+            push.3
+            push.7
+            u32wrapping_add
+            push.4
+            push.1
+            u32wrapping_add
+            exec.swap_outer
+            u32wrapping_add
+            drop
+        end
+        "#,
+    )]));
+    let ws: &'static _ = Box::leak(ws);
+    Decompiler::new(ws)
+}
+
+#[test]
+fn transitive_passthrough_no_false_positive() {
+    let decompiler = setup_transitive_passthrough_decompiler();
+    let diags = diagnostics_for(&decompiler, "transitive::caller");
+    let call_result_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("call to") && d.message.contains("result"))
+        .collect();
+    assert!(
+        call_result_diags.is_empty(),
+        "transitive passthrough should not produce result-widening diagnostics: {call_result_diags:?}"
+    );
+}
+
+fn setup_backward_passthrough_decompiler() -> Decompiler<'static> {
+    let ws = Box::new(workspace_from_modules(&[(
+        "backward",
+        r#"
+        proc swap_two
+            swap.1
+        end
+
+        # Public proc takes 2 inputs, passes through swap_two, then uses
+        # in u32 op. The backward U32 requirement from u32wrapping_add
+        # should propagate through the passthrough call to the proc inputs.
+        pub proc use_through_swap
+            exec.swap_two
+            u32wrapping_add
+            drop
+        end
+        "#,
+    )]));
+    let ws: &'static _ = Box::leak(ws);
+    Decompiler::new(ws)
+}
+
+#[test]
+fn passthrough_call_backward_propagates_u32_requirement_to_proc_inputs() {
+    let decompiler = setup_backward_passthrough_decompiler();
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("backward::use_through_swap".to_string()))
+        .expect("use_through_swap summary");
+    // use_through_swap passes its inputs through swap_two and uses the
+    // results in u32wrapping_add. The U32 requirement should propagate
+    // backward through the passthrough call to the proc's own inputs.
+    assert!(
+        summary.inputs.iter().all(|i| *i == TypeRequirement::U32),
+        "proc inputs should require U32 after backward propagation through passthrough call: inputs={:?}",
+        summary.inputs
+    );
+}
+
+#[test]
+fn backward_passthrough_suppresses_result_widening() {
+    let decompiler = setup_backward_passthrough_decompiler();
+    let diags = diagnostics_for(&decompiler, "backward::use_through_swap");
+
+    // Result-widening diagnostics for the passthrough call should be
+    // suppressed: the U32 requirement has been propagated backward to
+    // the caller's arguments, so the root-cause diagnostic (at the
+    // public proc input) covers the mismatch.
+    let call_result_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("call to") && d.message.contains("result"))
+        .collect();
+    assert!(
+        call_result_diags.is_empty(),
+        "passthrough result-widening should be suppressed when requirement is propagated to argument: {call_result_diags:?}"
+    );
+
+    // The root-cause diagnostics — public proc inputs requiring U32
+    // but not validated — should still fire.
+    let input_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("public procedure input"))
+        .collect();
+    assert_eq!(
+        input_diags.len(),
+        2,
+        "both public proc inputs should have validation diagnostics: {input_diags:?}"
+    );
+}
+
+fn setup_opaque_callee_decompiler() -> Decompiler<'static> {
+    let ws = Box::new(workspace_from_modules(&[(
+        "opaque",
+        r#"
+        # This procedure has a known signature (2 inputs, 2 outputs from
+        # swap.1) but contains eval_circuit which is not handled by the
+        # lifter. This causes lifting to fail, producing an opaque summary
+        # with known arity.
+        #
+        # eval_circuit has StackEffect::known(0, 0).with_required_depth(3),
+        # so we need at least 3 elements on the stack. push.0 + 2 inputs
+        # gives us 3.
+        proc opaque_callee
+            push.0
+            eval_circuit
+        end
+
+        pub proc caller_of_opaque
+            push.3
+            push.7
+            u32wrapping_add
+            push.5
+            exec.opaque_callee
+            u32wrapping_add
+            drop
+        end
+        "#,
+    )]));
+    let ws: &'static _ = Box::leak(ws);
+    Decompiler::new(ws)
+}
+
+#[test]
+fn opaque_callee_suppresses_result_widening_diagnostic() {
+    let decompiler = setup_opaque_callee_decompiler();
+
+    // Verify the opaque_callee actually gets an opaque summary.
+    let summaries = decompiler.type_summaries();
+    let opaque_summary = summaries
+        .get(&SymbolPath::new("opaque::opaque_callee".to_string()))
+        .expect("opaque_callee summary");
+    assert!(
+        opaque_summary.is_opaque(),
+        "opaque_callee should have an opaque summary, got: {opaque_summary:?}"
+    );
+
+    let diags = diagnostics_for(&decompiler, "opaque::caller_of_opaque");
+    let call_result_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("call to") && d.message.contains("result"))
+        .collect();
+    assert!(
+        call_result_diags.is_empty(),
+        "opaque callee should not produce result-widening diagnostics: {call_result_diags:?}"
+    );
+}
+
+fn setup_mixed_cross_call_decompiler() -> Decompiler<'static> {
+    let ws = Box::new(workspace_from_modules(&[(
+        "mixed",
+        r#"
+        # Takes 2 inputs: [a (deep), b (top)].
+        # Returns [b+1 (deep, computed), a (top, passthrough of input 0)].
+        # The swap.1 at the end puts the passthrough ABOVE the computed
+        # slot, which is necessary for it to be counted as an output.
+        proc half_passthrough
+            push.1
+            add
+            swap.1
+        end
+
+        # Calls half_passthrough with two U32 args. Output 1 (top) is a
+        # passthrough resolved to U32, output 0 (deep) is computed Felt.
+        # Should warn only about the computed output (result 0).
+        pub proc caller_mixed
+            push.3
+            push.7
+            u32wrapping_add
+            push.4
+            push.1
+            u32wrapping_add
+            exec.half_passthrough
+            u32wrapping_add
+            drop
+        end
+
+        # Pure swap for heterogeneous index test.
+        proc swap_two
+            swap.1
+        end
+
+        # Passes Felt (deeper) and U32 (top) through swap_two.
+        # After swap: output 0 (deep) = old top (U32),
+        #             output 1 (top) = old deep (Felt).
+        # Should warn about result 1 (Felt), not result 0 (U32).
+        pub proc caller_swap_hetero
+            push.3
+            push.4
+            add
+            push.3
+            push.7
+            u32wrapping_add
+            exec.swap_two
+            u32wrapping_add
+            drop
+        end
+        "#,
+    )]));
+    let ws: &'static _ = Box::leak(ws);
+    Decompiler::new(ws)
+}
+
+#[test]
+fn mixed_cross_call_warns_only_for_computed_output() {
+    let decompiler = setup_mixed_cross_call_decompiler();
+    let diags = diagnostics_for(&decompiler, "mixed::caller_mixed");
+    let call_result_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("call to") && d.message.contains("result"))
+        .collect();
+    assert_eq!(
+        call_result_diags.len(),
+        1,
+        "expected exactly 1 call-result diagnostic (for computed output), got: {call_result_diags:?}"
+    );
+    assert!(
+        call_result_diags[0].message.contains("result 0"),
+        "diagnostic should be for result 0 (computed Felt add), got: {}",
+        call_result_diags[0].message
+    );
+}
+
+#[test]
+fn heterogeneous_passthrough_maps_correct_index() {
+    let decompiler = setup_mixed_cross_call_decompiler();
+    let diags = diagnostics_for(&decompiler, "mixed::caller_swap_hetero");
+
+    // After backward propagation + suppression: the passthrough
+    // result-widening diagnostics are suppressed. The Felt add result
+    // (which is the passthrough source for swap output 1) gets a U32
+    // requirement via backward propagation, producing an expression
+    // diagnostic instead.
+    let call_result_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("call to") && d.message.contains("result"))
+        .collect();
+    assert!(
+        call_result_diags.is_empty(),
+        "passthrough result-widening should be suppressed: {call_result_diags:?}"
+    );
+
+    // The root-cause diagnostic: Felt add produces Felt but U32 is
+    // required (requirement propagated backward through passthrough).
+    let expr_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("expression produces"))
+        .collect();
+    assert_eq!(
+        expr_diags.len(),
+        1,
+        "expected 1 expression diagnostic for Felt add with propagated U32 requirement: {expr_diags:?}"
+    );
+}
+
+fn setup_private_passthrough_decompiler() -> Decompiler<'static> {
+    let ws = Box::new(workspace_from_modules(&[(
+        "private_pt",
+        r#"
+        proc swap_two
+            swap.1
+        end
+
+        proc private_use_swap
+            exec.swap_two
+            u32wrapping_add
+        end
+        "#,
+    )]));
+    let ws: &'static _ = Box::leak(ws);
+    Decompiler::new(ws)
+}
+
+#[test]
+fn private_proc_passthrough_suppresses_and_exports_requirement() {
+    let decompiler = setup_private_passthrough_decompiler();
+
+    // No diagnostics in private proc: Site A is suppressed (passthrough
+    // with propagated requirement), Site C doesn't fire (private proc).
+    let diags = diagnostics_for(&decompiler, "private_pt::private_use_swap");
+    assert!(
+        diags.is_empty(),
+        "private proc should have no diagnostics (result-widening suppressed, no input diagnostics): {diags:?}"
+    );
+
+    // The U32 requirement is exported in the summary so callers can use it.
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("private_pt::private_use_swap".to_string()))
+        .expect("private_use_swap summary");
+    assert!(
+        summary.inputs.iter().all(|i| *i == TypeRequirement::U32),
+        "private proc summary should export U32 input requirements: {:?}",
+        summary.inputs
+    );
+}
+
+#[test]
+fn felt_add_is_not_passthrough() {
+    let decompiler = setup_mixed_cross_call_decompiler();
+    let summaries = decompiler.type_summaries();
+    let summary = summaries
+        .get(&SymbolPath::new("mixed::half_passthrough".to_string()))
+        .expect("half_passthrough summary");
+    // half_passthrough takes 2 inputs and returns 2 outputs:
+    //   output[0] (deepest) = b+1, computed via Felt add — NOT passthrough.
+    //   output[1] (top) = a, passthrough of input 0 (deepest input).
+    assert_eq!(
+        summary.output_input_map.len(),
+        2,
+        "half_passthrough should have 2 outputs, got: {:?}",
+        summary.output_input_map
+    );
+    assert_eq!(
+        summary.output_input_map[0], None,
+        "first output (computed Felt add) must not be a passthrough"
+    );
+    assert_eq!(
+        summary.output_input_map[1],
+        Some(0),
+        "second output should map to input 0 (passthrough)"
+    );
+    assert_eq!(
+        summary.outputs[0],
+        InferredType::Felt,
+        "Felt add result must remain Felt"
+    );
 }
