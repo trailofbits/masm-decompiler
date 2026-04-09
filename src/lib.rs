@@ -4,6 +4,7 @@ pub mod fmt;
 pub mod frontend;
 pub mod ir;
 pub mod lift;
+pub mod passthrough;
 pub mod signature;
 pub mod simplify;
 pub mod symbol;

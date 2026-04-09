@@ -46,23 +46,6 @@ enum MemAddressKey {
     LocalAddrOffset(u16, u32),
 }
 
-/// Provenance of a variable in the output summary.
-///
-/// Used to determine whether a return variable is an unmodified copy of
-/// a procedure input, enabling type narrowing based on the input's
-/// backward-propagated requirement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Origin {
-    /// Variable traces back to the procedure input at the given index.
-    ///
-    /// The index corresponds to the stack position (0 = deepest input,
-    /// matching the convention used by `input_var_key`).
-    Input(usize),
-    /// Variable was produced by a computation (arithmetic, call result,
-    /// memory load, etc.) or by merging incompatible origins.
-    Computed,
-}
-
 /// Output of type analysis for a single procedure.
 #[derive(Debug, Clone)]
 pub struct ProcTypeAnalysisResult {
@@ -194,7 +177,13 @@ impl<'a> ProcTypeAnalyzer<'a> {
 
         self.collect_diagnostics_in_block(stmts);
         self.collect_input_diagnostics();
-        let summary = self.build_summary(stmts);
+        let passthrough_map = crate::passthrough::compute_passthrough_map(
+            stmts,
+            self.input_count,
+            self.output_count,
+            Some(self.callee_summaries),
+        );
+        let summary = self.build_summary(stmts, passthrough_map);
         let diagnostics = std::mem::take(&mut self.diagnostics);
 
         ProcTypeAnalysisResult {
@@ -204,7 +193,11 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Build the final procedure summary from inferred state.
-    fn build_summary(&self, stmts: &[Stmt]) -> TypeSummary {
+    ///
+    /// `output_input_map` is a pre-computed passthrough map where
+    /// `output_input_map[i] == Some(j)` means output `i` is an unmodified
+    /// copy of input `j`.
+    fn build_summary(&self, stmts: &[Stmt], output_input_map: Vec<Option<usize>>) -> TypeSummary {
         let mut inputs = Vec::with_capacity(self.input_count);
         for index in (0..self.input_count).rev() {
             let key = Self::input_var_key(index);
@@ -212,32 +205,31 @@ impl<'a> ProcTypeAnalyzer<'a> {
             inputs.push(req.to_requirement());
         }
 
-        let origins = self.compute_origins(stmts);
-
         let mut outputs = Vec::with_capacity(self.output_count);
-        let mut output_input_map = Vec::with_capacity(self.output_count);
         let return_values = Self::find_return_values(stmts);
-        for index in (0..self.output_count).rev() {
-            let (ty, origin_input) = return_values
+        for (map_idx, origin_input) in output_input_map.iter().enumerate() {
+            // The passthrough map is built in the same order as the output
+            // positions (reversed stack depth), so map_idx corresponds to
+            // the reverse-depth index used by find_return_values.
+            let index = self.output_count.saturating_sub(1 + map_idx);
+            let ty = return_values
                 .and_then(|values| values.get(index))
                 .map(|var| {
                     let inferred = self.inferred_type_for_var(var);
-                    let key = VarKey::from_var(var);
-                    if let Some(Origin::Input(input_idx)) = origins.get(&key) {
+                    if let Some(input_idx) = origin_input {
                         let input_key = Self::input_var_key(*input_idx);
                         let input_req = self
                             .required
                             .get(&input_key)
                             .copied()
                             .unwrap_or(TypeFact::Felt);
-                        (inferred.glb(input_req), Some(*input_idx))
+                        inferred.glb(input_req)
                     } else {
-                        (inferred, None)
+                        inferred
                     }
                 })
-                .unwrap_or((TypeFact::Felt, None));
+                .unwrap_or(TypeFact::Felt);
             outputs.push(ty.to_inferred_type());
-            output_input_map.push(origin_input);
         }
 
         TypeSummary::new_with_map(inputs, outputs, output_input_map)
@@ -251,203 +243,6 @@ impl<'a> ProcTypeAnalyzer<'a> {
             }
         }
         None
-    }
-
-    /// Compute the origin of each variable in the procedure body.
-    ///
-    /// This is a post-hoc structural analysis run after the fixed-point
-    /// converges. It determines which variables are unmodified copies of
-    /// procedure inputs, tracing through variable copies (`Assign { expr:
-    /// Var(_) }`), ternary selects, if-phi merges, and loop-phi merges.
-    ///
-    /// A variable has `Origin::Input(i)` only if every path from the input
-    /// to the variable consists exclusively of copy operations and phi/ternary
-    /// nodes where all incoming edges agree on the same input index.
-    ///
-    /// The analysis iterates to a fixed point to handle nested loops: an
-    /// inner loop phi may optimistically inherit `Input(i)` from an outer
-    /// loop phi that is later demoted to `Computed`. Fixed-point iteration
-    /// ensures such stale origins are corrected.
-    fn compute_origins(&self, stmts: &[Stmt]) -> HashMap<VarKey, Origin> {
-        let mut origins: HashMap<VarKey, Origin> = HashMap::new();
-
-        // Seed input variables.
-        for index in 0..self.input_count {
-            let key = Self::input_var_key(index);
-            origins.insert(key, Origin::Input(index));
-        }
-
-        // Iterate to a fixed point. Each pass may demote origins from
-        // Input to Computed (monotonic — never the reverse), so
-        // convergence is guaranteed in at most N passes where N is the
-        // number of variables.
-        loop {
-            let prev = origins.clone();
-            self.propagate_origins_in_block(stmts, &mut origins);
-            if origins == prev {
-                break;
-            }
-        }
-
-        origins
-    }
-
-    /// Propagate origins through a statement block.
-    fn propagate_origins_in_block(&self, stmts: &[Stmt], origins: &mut HashMap<VarKey, Origin>) {
-        for stmt in stmts {
-            self.propagate_origins_in_stmt(stmt, origins);
-        }
-    }
-
-    /// Look up the origin for a variable expression, or `Computed` if not a variable.
-    fn origin_of_expr(expr: &Expr, origins: &HashMap<VarKey, Origin>) -> Origin {
-        match expr {
-            Expr::Var(var) => origins
-                .get(&VarKey::from_var(var))
-                .copied()
-                .unwrap_or(Origin::Computed),
-            _ => Origin::Computed,
-        }
-    }
-
-    /// Merge two origins: both must agree on the same `Input(i)`, otherwise `Computed`.
-    fn merge_origins(a: Origin, b: Origin) -> Origin {
-        match (a, b) {
-            (Origin::Input(i), Origin::Input(j)) if i == j => Origin::Input(i),
-            _ => Origin::Computed,
-        }
-    }
-
-    /// Propagate origins through a single statement.
-    fn propagate_origins_in_stmt(&self, stmt: &Stmt, origins: &mut HashMap<VarKey, Origin>) {
-        match stmt {
-            Stmt::Assign { dest, expr, .. } => {
-                let origin = match expr {
-                    // Variable copy: propagate the source's origin.
-                    Expr::Var(src) => origins
-                        .get(&VarKey::from_var(src))
-                        .copied()
-                        .unwrap_or(Origin::Computed),
-                    // Ternary select (cdrop/cswap): both branches must agree.
-                    Expr::Ternary {
-                        then_expr,
-                        else_expr,
-                        ..
-                    } => {
-                        let then_origin = Self::origin_of_expr(then_expr, origins);
-                        let else_origin = Self::origin_of_expr(else_expr, origins);
-                        Self::merge_origins(then_origin, else_origin)
-                    }
-                    // Any other expression: the value is computed.
-                    _ => Origin::Computed,
-                };
-                origins.insert(VarKey::from_var(dest), origin);
-            }
-            Stmt::If {
-                then_body,
-                else_body,
-                phis,
-                ..
-            } => {
-                self.propagate_origins_in_block(then_body, origins);
-                self.propagate_origins_in_block(else_body, origins);
-                for phi in phis {
-                    let then_origin = origins
-                        .get(&VarKey::from_var(&phi.then_var))
-                        .copied()
-                        .unwrap_or(Origin::Computed);
-                    let else_origin = origins
-                        .get(&VarKey::from_var(&phi.else_var))
-                        .copied()
-                        .unwrap_or(Origin::Computed);
-                    let merged = Self::merge_origins(then_origin, else_origin);
-                    origins.insert(VarKey::from_var(&phi.dest), merged);
-                }
-            }
-            Stmt::While { body, phis, .. } | Stmt::Repeat { body, phis, .. } => {
-                // Seed loop-phi dests from their init values.
-                for phi in phis {
-                    let init_origin = origins
-                        .get(&VarKey::from_var(&phi.init))
-                        .copied()
-                        .unwrap_or(Origin::Computed);
-                    // Only narrow (Input→Computed), never widen.
-                    let current = origins
-                        .get(&VarKey::from_var(&phi.dest))
-                        .copied()
-                        .unwrap_or(init_origin);
-                    let updated = Self::merge_origins(current, init_origin);
-                    origins.insert(VarKey::from_var(&phi.dest), updated);
-                }
-                self.propagate_origins_in_block(body, origins);
-                // Verify step agrees with dest; demote if not.
-                for phi in phis {
-                    let dest_origin = origins
-                        .get(&VarKey::from_var(&phi.dest))
-                        .copied()
-                        .unwrap_or(Origin::Computed);
-                    let step_origin = origins
-                        .get(&VarKey::from_var(&phi.step))
-                        .copied()
-                        .unwrap_or(Origin::Computed);
-                    let merged = Self::merge_origins(dest_origin, step_origin);
-                    origins.insert(VarKey::from_var(&phi.dest), merged);
-                }
-            }
-            Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
-                let callee_map = self
-                    .summary_for_target(&call.target)
-                    .map(|s| &s.output_input_map);
-                for (idx, result) in call.results.iter().enumerate() {
-                    let origin = if let Some(Some(input_idx)) = callee_map.and_then(|m| m.get(idx))
-                    {
-                        // Callee output traces to callee input — inherit
-                        // the origin of the corresponding caller argument.
-                        // Origin::Input uses 0=deepest, args uses 0=topmost.
-                        call.args
-                            .len()
-                            .checked_sub(1 + *input_idx)
-                            .and_then(|i| call.args.get(i))
-                            .and_then(|arg| origins.get(&VarKey::from_var(arg)).copied())
-                            .unwrap_or(Origin::Computed)
-                    } else {
-                        Origin::Computed
-                    };
-                    origins.insert(VarKey::from_var(result), origin);
-                }
-            }
-            Stmt::DynCall { results, .. } => {
-                for result in results {
-                    origins.insert(VarKey::from_var(result), Origin::Computed);
-                }
-            }
-            Stmt::Intrinsic { intrinsic, .. } => {
-                for result in &intrinsic.results {
-                    origins.insert(VarKey::from_var(result), Origin::Computed);
-                }
-            }
-            Stmt::MemLoad { load, .. } => {
-                for output in &load.outputs {
-                    origins.insert(VarKey::from_var(output), Origin::Computed);
-                }
-            }
-            Stmt::LocalLoad { load, .. } => {
-                for output in &load.outputs {
-                    origins.insert(VarKey::from_var(output), Origin::Computed);
-                }
-            }
-            Stmt::AdvLoad { load, .. } => {
-                for output in &load.outputs {
-                    origins.insert(VarKey::from_var(output), Origin::Computed);
-                }
-            }
-            // Statements that don't define new variables.
-            Stmt::MemStore { .. }
-            | Stmt::AdvStore { .. }
-            | Stmt::LocalStore { .. }
-            | Stmt::LocalStoreW { .. }
-            | Stmt::Return { .. } => {}
-        }
     }
 
     /// Build the canonical key for an input variable by stack index.
@@ -1277,9 +1072,9 @@ impl<'a> ProcTypeAnalyzer<'a> {
                                 .len()
                                 .checked_sub(1 + *input_idx)
                                 .and_then(|i| call.args.get(i))
-                            {
-                                changed |= self.apply_requirement_to_var(arg, req);
-                            }
+                        {
+                            changed |= self.apply_requirement_to_var(arg, req);
+                        }
                     }
                 }
                 changed
@@ -1596,10 +1391,10 @@ impl<'a> ProcTypeAnalyzer<'a> {
                         .len()
                         .checked_sub(1 + input_idx)
                         .and_then(|i| call.args.get(i))
-                    {
-                        let arg_req = self.requirement_for_var(arg);
-                        return arg_req.satisfies(req);
-                    }
+                {
+                    let arg_req = self.requirement_for_var(arg);
+                    return arg_req.satisfies(req);
+                }
                 false
             })
             .collect();
@@ -1665,403 +1460,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::ir::{Expr, IfPhi, LoopPhi, LoopVar, Stmt, ValueId, Var};
-    use miden_assembly_syntax::ast::Visibility;
-    use miden_assembly_syntax::debuginfo::SourceSpan;
-
-    /// Helper to create a variable with a given value ID and stack depth.
-    fn var(id: u64, depth: usize) -> Var {
-        Var::new(ValueId::new(id), depth)
-    }
-
-    /// Helper to create an analyzer with given input/output counts.
-    fn analyzer(input_count: usize, output_count: usize) -> ProcTypeAnalyzer<'static> {
-        let summaries: &'static TypeSummaryMap = Box::leak(Box::default());
-        ProcTypeAnalyzer::new(
-            SymbolPath::new("test::proc".to_string()),
-            input_count,
-            output_count,
-            Visibility::Private,
-            SourceSpan::default(),
-            summaries,
-        )
-    }
-
-    #[test]
-    fn origin_seeds_inputs() {
-        let analyzer = analyzer(3, 0);
-        let stmts: Vec<Stmt> = vec![];
-        let origins = analyzer.compute_origins(&stmts);
-
-        for i in 0..3 {
-            let key = ProcTypeAnalyzer::input_var_key(i);
-            assert_eq!(
-                origins.get(&key),
-                Some(&Origin::Input(i)),
-                "input {i} should have Origin::Input({i})"
-            );
-        }
-    }
-
-    #[test]
-    fn origin_propagates_through_var_copy() {
-        let analyzer = analyzer(1, 1);
-        let input_0 = var(0, 0);
-        let copy = var(10, 0);
-        let stmts = vec![Stmt::Assign {
-            span: SourceSpan::default(),
-            dest: copy.clone(),
-            expr: Expr::Var(input_0),
-        }];
-
-        let origins = analyzer.compute_origins(&stmts);
-        assert_eq!(
-            origins.get(&VarKey::from_var(&copy)),
-            Some(&Origin::Input(0)),
-            "copy of input should trace to Input(0)"
-        );
-    }
-
-    #[test]
-    fn origin_propagates_through_chained_copies() {
-        let analyzer = analyzer(1, 1);
-        let input_0 = var(0, 0);
-        let copy1 = var(10, 0);
-        let copy2 = var(11, 0);
-        let copy3 = var(12, 0);
-        let stmts = vec![
-            Stmt::Assign {
-                span: SourceSpan::default(),
-                dest: copy1.clone(),
-                expr: Expr::Var(input_0),
-            },
-            Stmt::Assign {
-                span: SourceSpan::default(),
-                dest: copy2.clone(),
-                expr: Expr::Var(copy1),
-            },
-            Stmt::Assign {
-                span: SourceSpan::default(),
-                dest: copy3.clone(),
-                expr: Expr::Var(copy2),
-            },
-        ];
-
-        let origins = analyzer.compute_origins(&stmts);
-        assert_eq!(
-            origins.get(&VarKey::from_var(&copy3)),
-            Some(&Origin::Input(0)),
-            "chained copy A→B→C should trace back to Input(0)"
-        );
-    }
-
-    #[test]
-    fn origin_computed_for_arithmetic() {
-        let analyzer = analyzer(1, 1);
-        let input_0 = var(0, 0);
-        let result = var(10, 0);
-        let stmts = vec![Stmt::Assign {
-            span: SourceSpan::default(),
-            dest: result.clone(),
-            expr: Expr::Binary(
-                BinOp::Add,
-                Box::new(Expr::Var(input_0)),
-                Box::new(Expr::Constant(Constant::Felt(1))),
-            ),
-        }];
-
-        let origins = analyzer.compute_origins(&stmts);
-        assert_eq!(
-            origins.get(&VarKey::from_var(&result)),
-            Some(&Origin::Computed),
-            "arithmetic result should be Computed"
-        );
-    }
-
-    #[test]
-    fn origin_ternary_same_input() {
-        let analyzer = analyzer(1, 1);
-        let input_0 = var(0, 0);
-        let cond = var(10, 1);
-        let result = var(11, 0);
-        let stmts = vec![
-            Stmt::Assign {
-                span: SourceSpan::default(),
-                dest: cond.clone(),
-                expr: Expr::True,
-            },
-            Stmt::Assign {
-                span: SourceSpan::default(),
-                dest: result.clone(),
-                expr: Expr::Ternary {
-                    cond: Box::new(Expr::Var(cond)),
-                    then_expr: Box::new(Expr::Var(input_0.clone())),
-                    else_expr: Box::new(Expr::Var(input_0)),
-                },
-            },
-        ];
-
-        let origins = analyzer.compute_origins(&stmts);
-        assert_eq!(
-            origins.get(&VarKey::from_var(&result)),
-            Some(&Origin::Input(0)),
-            "ternary with both branches from same input should trace to Input(0)"
-        );
-    }
-
-    #[test]
-    fn origin_ternary_different_inputs_is_computed() {
-        let analyzer = analyzer(2, 1);
-        let input_0 = var(0, 0);
-        let input_1 = var(1, 1);
-        let cond = var(10, 2);
-        let result = var(11, 0);
-        let stmts = vec![
-            Stmt::Assign {
-                span: SourceSpan::default(),
-                dest: cond.clone(),
-                expr: Expr::True,
-            },
-            Stmt::Assign {
-                span: SourceSpan::default(),
-                dest: result.clone(),
-                expr: Expr::Ternary {
-                    cond: Box::new(Expr::Var(cond)),
-                    then_expr: Box::new(Expr::Var(input_0)),
-                    else_expr: Box::new(Expr::Var(input_1)),
-                },
-            },
-        ];
-
-        let origins = analyzer.compute_origins(&stmts);
-        assert_eq!(
-            origins.get(&VarKey::from_var(&result)),
-            Some(&Origin::Computed),
-            "ternary with different input origins should be Computed"
-        );
-    }
-
-    #[test]
-    fn origin_if_phi_same_input() {
-        let analyzer = analyzer(1, 1);
-        let input_0 = var(0, 0);
-        let then_copy = var(10, 0);
-        let else_copy = var(11, 0);
-        let phi_dest = var(12, 0);
-
-        let stmts = vec![Stmt::If {
-            span: SourceSpan::default(),
-            cond: Expr::True,
-            then_body: vec![Stmt::Assign {
-                span: SourceSpan::default(),
-                dest: then_copy.clone(),
-                expr: Expr::Var(input_0.clone()),
-            }],
-            else_body: vec![Stmt::Assign {
-                span: SourceSpan::default(),
-                dest: else_copy.clone(),
-                expr: Expr::Var(input_0),
-            }],
-            phis: vec![IfPhi {
-                dest: phi_dest.clone(),
-                then_var: then_copy,
-                else_var: else_copy,
-            }],
-        }];
-
-        let origins = analyzer.compute_origins(&stmts);
-        assert_eq!(
-            origins.get(&VarKey::from_var(&phi_dest)),
-            Some(&Origin::Input(0)),
-            "if-phi with both branches from same input should trace to Input(0)"
-        );
-    }
-
-    #[test]
-    fn origin_if_phi_different_inputs_is_computed() {
-        let analyzer = analyzer(2, 1);
-        let input_0 = var(0, 0);
-        let input_1 = var(1, 1);
-        let phi_dest = var(12, 0);
-
-        let stmts = vec![Stmt::If {
-            span: SourceSpan::default(),
-            cond: Expr::True,
-            then_body: vec![],
-            else_body: vec![],
-            phis: vec![IfPhi {
-                dest: phi_dest.clone(),
-                then_var: input_0,
-                else_var: input_1,
-            }],
-        }];
-
-        let origins = analyzer.compute_origins(&stmts);
-        assert_eq!(
-            origins.get(&VarKey::from_var(&phi_dest)),
-            Some(&Origin::Computed),
-            "if-phi with different input origins should be Computed"
-        );
-    }
-
-    #[test]
-    fn origin_loop_phi_preserves_input() {
-        let analyzer = analyzer(1, 1);
-        let input_0 = var(0, 0);
-        let phi_dest = var(10, 0);
-        let step_copy = var(11, 0);
-
-        let stmts = vec![Stmt::Repeat {
-            span: SourceSpan::default(),
-            loop_var: LoopVar::new(0),
-            loop_count: 3,
-            body: vec![Stmt::Assign {
-                span: SourceSpan::default(),
-                dest: step_copy.clone(),
-                expr: Expr::Var(phi_dest.clone()),
-            }],
-            phis: vec![LoopPhi {
-                dest: phi_dest.clone(),
-                init: input_0,
-                step: step_copy,
-            }],
-        }];
-
-        let origins = analyzer.compute_origins(&stmts);
-        assert_eq!(
-            origins.get(&VarKey::from_var(&phi_dest)),
-            Some(&Origin::Input(0)),
-            "loop-phi preserving input should trace to Input(0)"
-        );
-    }
-
-    #[test]
-    fn origin_loop_phi_modified_step_is_computed() {
-        let analyzer = analyzer(1, 1);
-        let input_0 = var(0, 0);
-        let phi_dest = var(10, 0);
-        let modified = var(11, 0);
-
-        let stmts = vec![Stmt::Repeat {
-            span: SourceSpan::default(),
-            loop_var: LoopVar::new(0),
-            loop_count: 3,
-            body: vec![Stmt::Assign {
-                span: SourceSpan::default(),
-                dest: modified.clone(),
-                expr: Expr::Binary(
-                    BinOp::Add,
-                    Box::new(Expr::Var(phi_dest.clone())),
-                    Box::new(Expr::Constant(Constant::Felt(1))),
-                ),
-            }],
-            phis: vec![LoopPhi {
-                dest: phi_dest.clone(),
-                init: input_0,
-                step: modified,
-            }],
-        }];
-
-        let origins = analyzer.compute_origins(&stmts);
-        assert_eq!(
-            origins.get(&VarKey::from_var(&phi_dest)),
-            Some(&Origin::Computed),
-            "loop-phi with modified step should be Computed"
-        );
-    }
-
-    #[test]
-    fn origin_nested_loop_outer_demotion_propagates() {
-        // Outer loop modifies a value. Inner loop inherits from outer phi.
-        // After outer step verification demotes the outer phi to Computed,
-        // the fixed-point iteration must also demote the inner phi.
-        let analyzer = analyzer(1, 1);
-        let input_0 = var(0, 0);
-        let outer_phi = var(10, 0);
-        let inner_phi = var(20, 0);
-        let inner_step = var(21, 0);
-        let outer_modified = var(11, 0);
-
-        let stmts = vec![Stmt::Repeat {
-            span: SourceSpan::default(),
-            loop_var: LoopVar::new(0),
-            loop_count: 2,
-            body: vec![
-                Stmt::Repeat {
-                    span: SourceSpan::default(),
-                    loop_var: LoopVar::new(1),
-                    loop_count: 2,
-                    body: vec![Stmt::Assign {
-                        span: SourceSpan::default(),
-                        dest: inner_step.clone(),
-                        expr: Expr::Var(inner_phi.clone()),
-                    }],
-                    phis: vec![LoopPhi {
-                        dest: inner_phi.clone(),
-                        init: outer_phi.clone(),
-                        step: inner_step.clone(),
-                    }],
-                },
-                Stmt::Assign {
-                    span: SourceSpan::default(),
-                    dest: outer_modified.clone(),
-                    expr: Expr::Binary(
-                        BinOp::Add,
-                        Box::new(Expr::Var(outer_phi.clone())),
-                        Box::new(Expr::Constant(Constant::Felt(1))),
-                    ),
-                },
-            ],
-            phis: vec![LoopPhi {
-                dest: outer_phi.clone(),
-                init: input_0,
-                step: outer_modified,
-            }],
-        }];
-
-        let origins = analyzer.compute_origins(&stmts);
-        assert_eq!(
-            origins.get(&VarKey::from_var(&outer_phi)),
-            Some(&Origin::Computed),
-            "outer loop phi with modified step should be Computed"
-        );
-        assert_eq!(
-            origins.get(&VarKey::from_var(&inner_phi)),
-            Some(&Origin::Computed),
-            "inner loop phi inheriting from Computed outer phi should also be Computed"
-        );
-    }
-
-    #[test]
-    fn origin_local_store_load_is_computed() {
-        // Passthrough through local storage is conservatively Computed.
-        let analyzer = analyzer(1, 1);
-        let input_0 = var(0, 0);
-        let loaded = var(10, 0);
-        let stmts = vec![
-            Stmt::LocalStore {
-                span: SourceSpan::default(),
-                store: crate::ir::LocalStore {
-                    index: 0,
-                    values: vec![input_0],
-                },
-            },
-            Stmt::LocalLoad {
-                span: SourceSpan::default(),
-                load: crate::ir::LocalLoad {
-                    kind: crate::ir::LocalAccessKind::Element,
-                    index: 0,
-                    outputs: vec![loaded.clone()],
-                },
-            },
-        ];
-
-        let origins = analyzer.compute_origins(&stmts);
-        assert_eq!(
-            origins.get(&VarKey::from_var(&loaded)),
-            Some(&Origin::Computed),
-            "local store/load passthrough is conservatively Computed"
-        );
-    }
+    // Origin-tracing tests have been moved to `crate::passthrough::tests`,
+    // which provides equivalent (and broader) coverage using the standalone
+    // `compute_passthrough_map` function.
 }
