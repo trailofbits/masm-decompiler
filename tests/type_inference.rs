@@ -1,9 +1,11 @@
 use masm_decompiler::{
-    decompile::Decompiler,
+    decompile::{DecompilationConfig, DecompiledProc, Decompiler},
     frontend::testing::workspace_from_modules,
+    ir::{BinOp, Expr, Stmt},
     symbol::path::SymbolPath,
     types::{InferredType, TypeRequirement},
 };
+use miden_assembly_syntax::debuginfo::SourceSpan;
 
 fn diagnostics_for(
     decompiler: &Decompiler<'_>,
@@ -14,6 +16,47 @@ fn diagnostics_for(
         .get(&SymbolPath::new(proc.to_string()))
         .cloned()
         .unwrap_or_default()
+}
+
+fn decompiled_proc(decompiler: &Decompiler<'_>, proc: &str) -> DecompiledProc {
+    Decompiler::new(decompiler.workspace())
+        .with_config(DecompilationConfig::no_optimizations())
+        .decompile_proc(proc)
+        .unwrap_or_else(|err| panic!("failed to decompile {proc}: {err:?}"))
+}
+
+fn find_assign_binop_span(proc: &DecompiledProc, op: BinOp) -> SourceSpan {
+    proc.stmts()
+        .iter()
+        .find_map(|stmt| match stmt {
+            Stmt::Assign {
+                span,
+                expr: Expr::Binary(stmt_op, ..),
+                ..
+            } if *stmt_op == op => Some(*span),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing assignment for {op:?} in {}", proc.name))
+}
+
+fn find_mem_load_span(proc: &DecompiledProc) -> SourceSpan {
+    proc.stmts()
+        .iter()
+        .find_map(|stmt| match stmt {
+            Stmt::MemLoad { span, .. } => Some(*span),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing mem_load in {}", proc.name))
+}
+
+fn find_exec_span(proc: &DecompiledProc, target_suffix: &str) -> SourceSpan {
+    proc.stmts()
+        .iter()
+        .find_map(|stmt| match stmt {
+            Stmt::Exec { span, call } if call.target.ends_with(target_suffix) => Some(*span),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing exec.{target_suffix} in {}", proc.name))
 }
 
 fn setup_decompiler() -> Decompiler<'static> {
@@ -1644,14 +1687,27 @@ fn public_proc_warns_at_unvalidated_input() {
         .get(&SymbolPath::new("visibility_test2::public_add"))
         .cloned()
         .unwrap_or_default();
+    let proc = decompiled_proc(&decompiler, "visibility_test2::public_add");
+    let u32_add_span = find_assign_binop_span(&proc, BinOp::U32WrappingAdd);
     assert!(
         !diagnostics.is_empty(),
         "Public proc with unvalidated U32 inputs should warn"
     );
-    let diag = &diagnostics[0];
+    let input_diags: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.message.contains("public procedure input"))
+        .collect();
+    assert_eq!(
+        input_diags.len(),
+        2,
+        "u32wrapping_add should require validation for both public inputs: {input_diags:?}"
+    );
     assert!(
-        diag.source_description.is_some(),
-        "Diagnostic should explain why the input needs validation"
+        input_diags.iter().all(|diag| {
+            diag.source_span == Some(u32_add_span)
+                && diag.source_description.as_deref() == Some("this U32 operation requires U32")
+        }),
+        "public input diagnostics should point at the downstream U32 use: {input_diags:?}"
     );
 }
 
@@ -1697,14 +1753,142 @@ fn felt_arithmetic_into_u32_warns_at_assignment() {
         .get(&SymbolPath::new("felt_arith::felt_into_u32"))
         .cloned()
         .unwrap_or_default();
+    let proc = decompiled_proc(&decompiler, "felt_arith::felt_into_u32");
+    let u32_add_span = find_assign_binop_span(&proc, BinOp::U32WrappingAdd);
     assert!(
         !diagnostics.is_empty(),
         "Felt arithmetic feeding u32 op should warn"
     );
-    let diag = &diagnostics[0];
-    assert!(
-        diag.source_description.is_some(),
-        "Diagnostic should explain that Felt arithmetic can produce non-U32 values"
+    let diag = diagnostics
+        .iter()
+        .find(|d| d.message.contains("expression produces"))
+        .expect("expected assignment mismatch diagnostic");
+    assert_ne!(
+        diag.source_span,
+        Some(diag.span),
+        "related span should not duplicate the assignment span: {diag:?}"
+    );
+    assert_eq!(
+        diag.source_span,
+        Some(u32_add_span),
+        "related span should point at the downstream U32 use: {diag:?}"
+    );
+    assert_eq!(
+        diag.source_description.as_deref(),
+        Some("this U32 operation requires U32"),
+        "assignment diagnostic should describe the consumer requirement site"
+    );
+}
+
+#[test]
+fn public_input_memory_requirement_points_to_mem_load() {
+    let ws = workspace_from_modules(&[(
+        "visibility_mem",
+        r#"
+        pub proc public_mem
+            mem_load
+            drop
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let diagnostics = diagnostics_for(&decompiler, "visibility_mem::public_mem");
+    let proc = decompiled_proc(&decompiler, "visibility_mem::public_mem");
+    let mem_load_span = find_mem_load_span(&proc);
+
+    let diag = diagnostics
+        .iter()
+        .find(|d| d.message.contains("public procedure input"))
+        .expect("expected public input diagnostic");
+    assert_eq!(
+        diag.source_span,
+        Some(mem_load_span),
+        "related span should point at mem_load: {diag:?}"
+    );
+    assert_eq!(
+        diag.source_description.as_deref(),
+        Some("this memory address must be U32"),
+        "memory-address diagnostic should describe the address requirement"
+    );
+}
+
+#[test]
+fn public_input_call_requirement_points_to_call_site() {
+    let ws = workspace_from_modules(&[(
+        "visibility_call",
+        r#"
+        proc needs_u32
+            push.1
+            u32wrapping_add
+            drop
+        end
+
+        pub proc public_exec
+            exec.needs_u32
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let diagnostics = diagnostics_for(&decompiler, "visibility_call::public_exec");
+    let proc = decompiled_proc(&decompiler, "visibility_call::public_exec");
+    let exec_span = find_exec_span(&proc, "needs_u32");
+
+    let diag = diagnostics
+        .iter()
+        .find(|d| d.message.contains("public procedure input"))
+        .expect("expected public input diagnostic");
+    assert_eq!(
+        diag.source_span,
+        Some(exec_span),
+        "related span should point at exec.needs_u32: {diag:?}"
+    );
+    assert_eq!(
+        diag.source_description.as_deref(),
+        Some("call to needs_u32 expects a U32 value here"),
+        "call-based requirement should identify the callee use"
+    );
+}
+
+#[test]
+fn call_result_widening_uses_downstream_origin() {
+    let ws = workspace_from_modules(&[(
+        "result_origin",
+        r#"
+        proc produces_felt
+            add
+        end
+
+        pub proc consume_call_result
+            push.1
+            push.2
+            exec.produces_felt
+            push.3
+            u32wrapping_add
+            drop
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let diagnostics = diagnostics_for(&decompiler, "result_origin::consume_call_result");
+    let proc = decompiled_proc(&decompiler, "result_origin::consume_call_result");
+    let u32_add_span = find_assign_binop_span(&proc, BinOp::U32WrappingAdd);
+
+    let diag = diagnostics
+        .iter()
+        .find(|d| d.message.contains("call to") && d.message.contains("result 0"))
+        .expect("expected call result widening diagnostic");
+    assert_eq!(
+        diag.source_span,
+        Some(u32_add_span),
+        "result widening related span should point at the downstream U32 use: {diag:?}"
+    );
+    assert_eq!(
+        diag.source_description.as_deref(),
+        Some("this U32 operation requires U32"),
+        "result widening diagnostic should describe the consumer requirement site"
     );
 }
 
