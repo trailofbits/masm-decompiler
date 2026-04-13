@@ -20,7 +20,7 @@ struct Cli {
     /// Path to a MASM source file
     input: PathBuf,
 
-    /// Only decompile a single procedure by name
+    /// Only decompile a single procedure by name or fully-qualified path
     #[arg(long)]
     procedure: Option<String>,
 
@@ -97,18 +97,20 @@ fn run(cli: Cli) -> Result<(), String> {
         decompiler.signatures().len()
     );
 
-    let target_proc = cli.procedure.as_deref();
+    let target_proc = cli
+        .procedure
+        .as_deref()
+        .map(SymbolPath::new)
+        .map(SymbolPath::into_inner);
 
     for module in workspace.modules() {
         for proc in module.procedures() {
             let proc_name = proc.name().to_string();
-            if let Some(target) = target_proc
-                && proc_name != target
-            {
+            let fq = format!("{}::{}", module.module_path(), proc.name());
+            if !matches_procedure_filter(target_proc.as_deref(), &proc_name, &fq) {
                 continue;
             }
 
-            let fq = format!("{}::{}", module.module_path(), proc.name());
             match decompiler.decompile_proc(&fq) {
                 Ok(decompiled) => print!(
                     "{}",
@@ -120,6 +122,11 @@ fn run(cli: Cli) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Return true when `target` is absent or matches the short or fully-qualified procedure name.
+fn matches_procedure_filter(target: Option<&str>, proc_name: &str, fq_name: &str) -> bool {
+    target.is_none_or(|target| proc_name == target || fq_name == target)
 }
 
 fn parse_library_spec(spec: &str) -> Result<LibraryRoot, String> {
@@ -258,5 +265,37 @@ mod tests {
             configured_namespace_for_module(&module, &roots),
             Some("miden::core")
         );
+    }
+
+    /// Ensure procedure filters normalize leading absolute path separators.
+    #[test]
+    fn procedure_filter_normalizes_leading_separators() {
+        let target = SymbolPath::new("::miden::core::math::u64::overflowing_add").into_inner();
+
+        assert!(matches_procedure_filter(
+            Some(target.as_str()),
+            "overflowing_add",
+            "miden::core::math::u64::overflowing_add"
+        ));
+    }
+
+    /// Ensure short names still match when a fully-qualified target is absent.
+    #[test]
+    fn procedure_filter_matches_short_names() {
+        assert!(matches_procedure_filter(
+            Some("overflowing_add"),
+            "overflowing_add",
+            "miden::core::math::u64::overflowing_add"
+        ));
+    }
+
+    /// Ensure non-matching targets are rejected.
+    #[test]
+    fn procedure_filter_rejects_other_procedures() {
+        assert!(!matches_procedure_filter(
+            Some("miden::core::math::u64::wrapping_add"),
+            "overflowing_add",
+            "miden::core::math::u64::overflowing_add"
+        ));
     }
 }
