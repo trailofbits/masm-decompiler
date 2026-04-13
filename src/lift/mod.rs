@@ -302,12 +302,15 @@ fn lift_if(
     // Merge branch stacks with Phi nodes where needed.
     let mut phis = Vec::new();
     let mut merged = Vec::with_capacity(then_stack.len());
+    let then_entries = then_stack.to_entries();
+    let else_entries = else_stack.to_entries();
 
-    for (then_var, else_var) in then_stack.iter().zip(else_stack.iter()) {
-        if then_var.subscript != else_var.subscript {
+    for (then_entry, else_entry) in then_entries.iter().zip(else_entries.iter()) {
+        let then_var = &then_entry.var;
+        let else_var = &else_entry.var;
+        if !if_merge_subscripts_compatible(&then_var.subscript, &else_var.subscript) {
             return Err(LiftingError::IncompatibleIfMerge { span: op_span });
         }
-
         if then_var.base == else_var.base && then_var.subscript == else_var.subscript {
             merged.push(then_var.clone());
             continue;
@@ -331,6 +334,15 @@ fn lift_if(
         else_body,
         phis,
     }])
+}
+
+/// Return true when branch-exit subscripts can be represented by an `IfPhi`.
+///
+/// Straight-line branches can legitimately produce different constant
+/// subscripts after local stack reshaping, but loop-indexed subscripts must
+/// still agree exactly to avoid fabricating an unrepresentable merged index.
+fn if_merge_subscripts_compatible(lhs: &IndexExpr, rhs: &IndexExpr) -> bool {
+    matches!((lhs, rhs), (IndexExpr::Const(_), IndexExpr::Const(_))) || lhs == rhs
 }
 
 /// Lift a repeat loop construct.
@@ -2261,6 +2273,27 @@ mod tests {
         let adjusted = adjust_subscript_base(expr, 2);
         assert_eq!(constant_term(&adjusted), 2);
         assert!(contains_loop_var(&adjusted));
+    }
+
+    #[test]
+    fn if_merge_accepts_different_constant_subscripts() {
+        assert!(if_merge_subscripts_compatible(
+            &IndexExpr::Const(1),
+            &IndexExpr::Const(4)
+        ));
+    }
+
+    #[test]
+    fn if_merge_rejects_different_loop_indexed_subscripts() {
+        let lhs = IndexExpr::Add(
+            Box::new(IndexExpr::Const(0)),
+            Box::new(IndexExpr::LoopVar(0)),
+        );
+        let rhs = IndexExpr::Add(
+            Box::new(IndexExpr::Const(1)),
+            Box::new(IndexExpr::LoopVar(0)),
+        );
+        assert!(!if_merge_subscripts_compatible(&lhs, &rhs));
     }
 
     #[test]
