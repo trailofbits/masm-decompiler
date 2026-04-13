@@ -249,6 +249,9 @@ fn lift_u32_inst(
         Instruction::U32WideningMadd => {
             return lift_u32_intrinsic(inst, span, "u32widening_madd", resolver, sigs, stack);
         }
+        Instruction::U32WrappingMadd => {
+            return lift_u32_intrinsic(inst, span, "u32wrapping_madd", resolver, sigs, stack);
+        }
         Instruction::U32DivMod => {
             return lift_u32_intrinsic(inst, span, "u32divmod", resolver, sigs, stack);
         }

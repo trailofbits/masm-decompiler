@@ -582,3 +582,91 @@ pub proc wrapping_mul(rhs: u256, lhs: u256) -> u256
     loc_loadw_be.16
     swapw
 end
+
+#! Reorders the top u256 value between LE and BE limb order. This is an involution.
+proc u256_le_to_be
+    reversew
+    swapw
+    reversew
+end
+
+#! Reorders two u256 values between LE and BE limb order.
+proc u256_le_to_be_pair
+    exec.u256_le_to_be
+    swapdw
+    exec.u256_le_to_be
+    swapdw
+end
+
+#! Subtracts rhs (b) from lhs (a) in BE limb order.
+proc sub_with_borrow_be(rhs: u256, lhs: u256) -> (i1, u256)
+    swapw.3
+    movup.3
+    movup.7
+    u32overflowing_sub
+
+    movup.7
+    u32widening_add
+    movup.5
+    swap
+    u32overflowing_sub
+    movup.2
+    add
+
+    movup.6
+    u32widening_add
+    movup.5
+    swap
+    u32overflowing_sub
+    movup.2
+    add
+
+    movup.5
+    u32widening_add
+    movup.5
+    swap
+    u32overflowing_sub
+    movup.2
+    add
+
+    movup.12
+    u32widening_add
+    movup.9
+    swap
+    u32overflowing_sub
+    movup.2
+    add
+
+    movup.11
+    u32widening_add
+    movup.9
+    swap
+    u32overflowing_sub
+    movup.2
+    add
+
+    movup.10
+    u32widening_add
+    movup.9
+    swap
+    u32overflowing_sub
+    movup.2
+    add
+
+    movup.9
+    u32widening_add
+    movup.9
+    swap
+    u32overflowing_sub
+    movup.2
+    add
+end
+
+#! Performs subtraction of two unsigned 256 bit integers preserving the underflow.
+pub proc overflowing_sub(rhs: u256, lhs: u256) -> (i1, u256)
+    exec.u256_le_to_be_pair
+    exec.sub_with_borrow_be
+    movdn.8
+    exec.u256_le_to_be
+    movup.8
+end

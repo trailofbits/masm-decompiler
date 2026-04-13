@@ -16,8 +16,12 @@ pub mod testing;
 /// A library root maps a MASM path prefix (e.g. `miden::core`) to a filesystem directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryRoot {
+    /// MASM namespace prefix served by this root.
     pub namespace: String,
+    /// Filesystem directory backing this root.
     pub path: FsPathBuf,
+    /// Whether this root is trusted to carry stdlib-only semantic refinements.
+    pub trusted_stdlib: bool,
 }
 
 impl LibraryRoot {
@@ -26,6 +30,16 @@ impl LibraryRoot {
         Self {
             namespace: normalize_namespace(namespace.into()),
             path,
+            trusted_stdlib: false,
+        }
+    }
+
+    /// Create a trusted stdlib library root mapping.
+    pub fn trusted_stdlib(namespace: impl Into<String>, path: FsPathBuf) -> Self {
+        Self {
+            namespace: normalize_namespace(namespace.into()),
+            path,
+            trusted_stdlib: true,
         }
     }
 

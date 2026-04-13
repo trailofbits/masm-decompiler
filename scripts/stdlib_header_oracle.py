@@ -276,7 +276,7 @@ def run_decompiler(
         "run",
         "--",
         "--no-color",
-        "--library",
+        "--trusted-library",
         f"{namespace}={stdlib_root}",
         "--procedure",
         case.fq_proc_name,

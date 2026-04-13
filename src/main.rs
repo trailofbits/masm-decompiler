@@ -40,6 +40,10 @@ struct Cli {
     #[arg(long = "library", value_parser = parse_library_spec)]
     libraries: Vec<LibraryRoot>,
 
+    /// Register a trusted library root: <namespace>=<path>
+    #[arg(long = "trusted-library", value_parser = parse_trusted_library_spec)]
+    trusted_libraries: Vec<LibraryRoot>,
+
     /// Disable colored output for decompiled code
     #[arg(long)]
     no_color: bool,
@@ -66,6 +70,7 @@ fn run(cli: Cli) -> Result<(), String> {
     let entry_path = normalize_cli_path(&cli.input, &cwd);
 
     let mut roots = normalize_library_roots(&cli.libraries, &cwd);
+    roots.extend(normalize_library_roots(&cli.trusted_libraries, &cwd));
     // Always include the workspace root (empty namespace).
     roots.push(LibraryRoot::new("", normalize_cli_path(&cwd, &cwd)));
 
@@ -130,6 +135,20 @@ fn matches_procedure_filter(target: Option<&str>, proc_name: &str, fq_name: &str
 }
 
 fn parse_library_spec(spec: &str) -> Result<LibraryRoot, String> {
+    let (ns, path) = split_library_spec(spec)?;
+    let pb = PathBuf::from(path);
+    Ok(LibraryRoot::new(ns, pb))
+}
+
+/// Parse a trusted library-root CLI argument.
+fn parse_trusted_library_spec(spec: &str) -> Result<LibraryRoot, String> {
+    let (ns, path) = split_library_spec(spec)?;
+    let pb = PathBuf::from(path);
+    Ok(LibraryRoot::trusted_stdlib(ns, pb))
+}
+
+/// Split and validate a library-root CLI argument.
+fn split_library_spec(spec: &str) -> Result<(&str, &str), String> {
     let (ns, path) = spec
         .split_once('=')
         .ok_or_else(|| "library spec must be <namespace>=<path>".to_string())?;
@@ -139,8 +158,7 @@ fn parse_library_spec(spec: &str) -> Result<LibraryRoot, String> {
     if path.is_empty() {
         return Err("library path cannot be empty".to_string());
     }
-    let pb = PathBuf::from(path);
-    Ok(LibraryRoot::new(ns, pb))
+    Ok((ns, path))
 }
 
 /// Normalize a CLI path for stable path matching.
@@ -160,7 +178,14 @@ fn normalize_cli_path(path: &Path, cwd: &Path) -> PathBuf {
 fn normalize_library_roots(roots: &[LibraryRoot], cwd: &Path) -> Vec<LibraryRoot> {
     roots
         .iter()
-        .map(|root| LibraryRoot::new(&root.namespace, normalize_cli_path(&root.path, cwd)))
+        .map(|root| {
+            let normalized_path = normalize_cli_path(&root.path, cwd);
+            if root.trusted_stdlib {
+                LibraryRoot::trusted_stdlib(&root.namespace, normalized_path)
+            } else {
+                LibraryRoot::new(&root.namespace, normalized_path)
+            }
+        })
         .collect()
 }
 
@@ -242,6 +267,17 @@ mod tests {
         let root = parse_library_spec("miden::core=../path/to/miden/core").expect("library root");
         assert_eq!(root.namespace, "miden::core");
         assert_eq!(root.path, PathBuf::from("../path/to/miden/core"));
+        assert!(!root.trusted_stdlib);
+    }
+
+    /// Ensure trusted library specs carry the explicit trust bit.
+    #[test]
+    fn parse_trusted_library_spec_sets_trust_bit() {
+        let root = parse_trusted_library_spec("miden::core=../path/to/miden/core")
+            .expect("trusted library root");
+        assert_eq!(root.namespace, "miden::core");
+        assert_eq!(root.path, PathBuf::from("../path/to/miden/core"));
+        assert!(root.trusted_stdlib);
     }
 
     /// Ensure legacy `:` separators are rejected because they are ambiguous with `::`.
