@@ -1,0 +1,141 @@
+pub proc clz(a: u128) -> u8
+    movup.3
+    dup.0
+    eq.0
+
+    if.true
+        drop
+        movup.2
+        dup.0
+        eq.0
+
+        if.true
+            drop
+            swap
+            dup.0
+            eq.0
+
+            if.true
+                drop
+                u32clz
+                add.96
+            else
+                swap drop
+                u32clz
+                add.64
+            end
+        else
+            movdn.2 drop drop
+            u32clz
+            add.32
+        end
+    else
+        movdn.3 drop drop drop
+        u32clz
+    end
+end
+
+pub proc ctz(a: u128) -> u8
+    dup.0
+    eq.0
+
+    if.true
+        drop
+        dup.0
+        eq.0
+
+        if.true
+            drop
+            dup.0
+            eq.0
+
+            if.true
+                drop
+                u32ctz
+                add.96
+            else
+                swap drop
+                u32ctz
+                add.64
+            end
+        else
+            movdn.2 drop drop
+            u32ctz
+            add.32
+        end
+    else
+        movdn.3 drop drop drop
+        u32ctz
+    end
+end
+
+pub proc clo(a: u128) -> u8
+    movup.3
+    dup.0
+    eq.4294967295
+
+    if.true
+        drop
+        movup.2
+        dup.0
+        eq.4294967295
+
+        if.true
+            drop
+            swap
+            dup.0
+            eq.4294967295
+
+            if.true
+                drop
+                u32clo
+                add.96
+            else
+                swap drop
+                u32clo
+                add.64
+            end
+        else
+            movdn.2 drop drop
+            u32clo
+            add.32
+        end
+    else
+        movdn.3 drop drop drop
+        u32clo
+    end
+end
+
+pub proc cto(a: u128) -> u8
+    dup.0
+    eq.4294967295
+
+    if.true
+        drop
+        dup.0
+        eq.4294967295
+
+        if.true
+            drop
+            dup.0
+            eq.4294967295
+
+            if.true
+                drop
+                u32cto
+                add.96
+            else
+                swap drop
+                u32cto
+                add.64
+            end
+        else
+            movdn.2 drop drop
+            u32cto
+            add.32
+        end
+    else
+        movdn.3 drop drop drop
+        u32cto
+    end
+end

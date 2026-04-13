@@ -1,6 +1,6 @@
 //! Intraprocedural type inference and mismatch checking.
 
-use std::{collections::HashMap, hash::Hash};
+use std::collections::HashMap;
 
 use miden_assembly_syntax::ast::Visibility;
 use miden_assembly_syntax::debuginfo::SourceSpan;
@@ -46,119 +46,21 @@ enum MemAddressKey {
     LocalAddrOffset(u16, u32),
 }
 
-/// Requirement fact paired with provenance metadata.
-type RequirementEntry = (TypeFact, RequirementOrigin);
-
-/// Origin of a non-`Felt` type requirement.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RequirementOrigin {
-    /// Span of the use site that imposed the requirement.
-    span: SourceSpan,
-    /// Kind of use that imposed the requirement.
-    kind: RequirementOriginKind,
-}
-
-impl RequirementOrigin {
-    /// Construct an origin for a boolean-only use site.
-    fn bool_use(span: SourceSpan) -> Self {
-        Self {
-            span,
-            kind: RequirementOriginKind::BoolUse,
-        }
-    }
-
-    /// Construct an origin for a U32-only operation.
-    fn u32_operation(span: SourceSpan) -> Self {
-        Self {
-            span,
-            kind: RequirementOriginKind::U32Operation,
-        }
-    }
-
-    /// Construct an origin for a memory-address use.
-    fn memory_address(span: SourceSpan) -> Self {
-        Self {
-            span,
-            kind: RequirementOriginKind::MemoryAddress,
-        }
-    }
-
-    /// Construct an origin for a call argument requirement.
-    fn call_argument(span: SourceSpan, target: &str) -> Self {
-        Self {
-            span,
-            kind: RequirementOriginKind::CallArgument {
-                target: SymbolPath::new(target).name().to_string(),
-            },
-        }
-    }
-
-    /// Construct an origin for an intrinsic argument requirement.
-    fn intrinsic_argument(span: SourceSpan, name: &str, role: Option<&'static str>) -> Self {
-        let display_name = name.split_once('.').map_or(name, |(base, _)| base);
-        Self {
-            span,
-            kind: RequirementOriginKind::IntrinsicArgument {
-                name: display_name.to_string(),
-                role,
-            },
-        }
-    }
-
-    /// Render a user-facing description of the requirement site.
-    fn description(&self, req: TypeFact) -> String {
-        match &self.kind {
-            RequirementOriginKind::U32Operation => {
-                format!("this U32 operation requires {}", req.to_requirement())
-            }
-            RequirementOriginKind::BoolUse => {
-                format!("this use requires {}", req.to_requirement())
-            }
-            RequirementOriginKind::MemoryAddress => "this memory address must be U32".to_string(),
-            RequirementOriginKind::CallArgument { target } => {
-                format!(
-                    "call to {} expects a {} value here",
-                    target,
-                    req.to_requirement()
-                )
-            }
-            RequirementOriginKind::IntrinsicArgument { name, role } => {
-                if let Some(role) = role {
-                    format!(
-                        "{} requires its {} to be {}",
-                        name,
-                        role,
-                        req.to_requirement()
-                    )
-                } else {
-                    format!("{} expects a {} value here", name, req.to_requirement())
-                }
-            }
-        }
-    }
-}
-
-/// Category of use that imposed a requirement.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum RequirementOriginKind {
-    /// Requirement imposed by a U32-only operation.
-    U32Operation,
-    /// Requirement imposed by a boolean-only use.
-    BoolUse,
-    /// Requirement imposed by using a value as a memory address.
-    MemoryAddress,
-    /// Requirement imported from a callee signature.
-    CallArgument {
-        /// Display name of the callee.
-        target: String,
-    },
-    /// Requirement imposed by an intrinsic argument.
-    IntrinsicArgument {
-        /// Display name of the intrinsic.
-        name: String,
-        /// Optional semantic role of the argument.
-        role: Option<&'static str>,
-    },
+/// Provenance of a variable in the output summary.
+///
+/// Used to determine whether a return variable is an unmodified copy of
+/// a procedure input, enabling type narrowing based on the input's
+/// backward-propagated requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// Variable traces back to the procedure input at the given index.
+    ///
+    /// The index corresponds to the stack position (0 = deepest input,
+    /// matching the convention used by `input_var_key`).
+    Input(usize),
+    /// Variable was produced by a computation (arithmetic, call result,
+    /// memory load, etc.) or by merging incompatible origins.
+    Computed,
 }
 
 /// Output of type analysis for a single procedure.
@@ -208,7 +110,7 @@ struct ProcTypeAnalyzer<'a> {
     /// Inferred type guarantees for variables.
     inferred: HashMap<VarKey, TypeFact>,
     /// Inferred requirements for variables.
-    required: HashMap<VarKey, RequirementEntry>,
+    required: HashMap<VarKey, TypeFact>,
     /// Collected diagnostics.
     diagnostics: Vec<TypeDiagnostic>,
     /// Inferred types for local variable slots.
@@ -227,9 +129,20 @@ struct ProcTypeAnalyzer<'a> {
     /// Inferred types for memory locations, keyed by abstract address.
     mem_types: HashMap<MemAddressKey, TypeFact>,
     /// Requirements propagated backward to local variable slots.
-    local_requirements: HashMap<u16, RequirementEntry>,
+    local_requirements: HashMap<u16, TypeFact>,
     /// Requirements propagated backward to memory locations.
-    mem_requirements: HashMap<MemAddressKey, RequirementEntry>,
+    mem_requirements: HashMap<MemAddressKey, TypeFact>,
+    /// Input-backed provenance for SSA variables.
+    ///
+    /// This is computed once from the lifted body and callee passthrough maps.
+    /// It lets selector typing distinguish real input-backed values from
+    /// computed values that only happen to inherit a downstream requirement.
+    origins: HashMap<VarKey, Origin>,
+    /// Direct expression definitions for SSA assignments.
+    ///
+    /// This supports small sound structural refinements such as preserving the
+    /// `u32` result of bit-count operations through known-safe constant offsets.
+    expr_defs: HashMap<VarKey, Expr>,
 }
 
 impl<'a> ProcTypeAnalyzer<'a> {
@@ -257,11 +170,16 @@ impl<'a> ProcTypeAnalyzer<'a> {
             mem_types: HashMap::new(),
             local_requirements: HashMap::new(),
             mem_requirements: HashMap::new(),
+            origins: HashMap::new(),
+            expr_defs: HashMap::new(),
         }
     }
 
     /// Run fixed-point inference and mismatch checks.
     fn analyze(&mut self, stmts: &[Stmt]) -> ProcTypeAnalysisResult {
+        self.origins = self.compute_origins(stmts);
+        self.expr_defs = Self::collect_expr_defs(stmts);
+
         for _ in 0..MAX_TYPE_PASSES {
             let prev_inferred = self.inferred.clone();
             let prev_required = self.required.clone();
@@ -274,8 +192,8 @@ impl<'a> ProcTypeAnalyzer<'a> {
             // Return values are intentionally discarded: convergence is
             // detected by comparing full state snapshots (below), not by
             // per-call `changed` flags, which can oscillate within a pass.
-            let _ = self.infer_types_in_block(stmts);
-            let _ = self.seed_requirements_in_block(stmts);
+            let _ = self.infer_types_in_block(stmts, true);
+            let _ = self.seed_requirements_in_block(stmts, true);
             let _ = self.propagate_requirements_in_block(stmts);
 
             if self.inferred == prev_inferred
@@ -292,13 +210,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
 
         self.collect_diagnostics_in_block(stmts);
         self.collect_input_diagnostics();
-        let passthrough_map = crate::passthrough::compute_passthrough_map(
-            stmts,
-            self.input_count,
-            self.output_count,
-            Some(self.callee_summaries),
-        );
-        let summary = self.build_summary(stmts, passthrough_map);
+        let summary = self.build_summary(stmts);
         let diagnostics = std::mem::take(&mut self.diagnostics);
 
         ProcTypeAnalysisResult {
@@ -307,48 +219,69 @@ impl<'a> ProcTypeAnalyzer<'a> {
         }
     }
 
+    /// Collect direct assignment expressions keyed by destination SSA variable.
+    fn collect_expr_defs(stmts: &[Stmt]) -> HashMap<VarKey, Expr> {
+        let mut defs = HashMap::new();
+        Self::collect_expr_defs_in_block(stmts, &mut defs);
+        defs
+    }
+
+    /// Collect direct assignment expressions in a structured statement block.
+    fn collect_expr_defs_in_block(stmts: &[Stmt], defs: &mut HashMap<VarKey, Expr>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Assign { dest, expr, .. } => {
+                    defs.insert(VarKey::from_var(dest), expr.clone());
+                }
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    Self::collect_expr_defs_in_block(then_body, defs);
+                    Self::collect_expr_defs_in_block(else_body, defs);
+                }
+                Stmt::Repeat { body, .. } | Stmt::While { body, .. } => {
+                    Self::collect_expr_defs_in_block(body, defs);
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Build the final procedure summary from inferred state.
-    ///
-    /// `output_input_map` is a pre-computed passthrough map where
-    /// `output_input_map[i] == Some(j)` means output `i` is an unmodified
-    /// copy of input `j`.
-    fn build_summary(&self, stmts: &[Stmt], output_input_map: Vec<Option<usize>>) -> TypeSummary {
+    fn build_summary(&self, stmts: &[Stmt]) -> TypeSummary {
         let mut inputs = Vec::with_capacity(self.input_count);
         for index in (0..self.input_count).rev() {
             let key = Self::input_var_key(index);
-            let req = self
-                .required
-                .get(&key)
-                .map(|(fact, _)| *fact)
-                .unwrap_or(TypeFact::Felt);
+            let req = self.required.get(&key).copied().unwrap_or(TypeFact::Felt);
             inputs.push(req.to_requirement());
         }
 
         let mut outputs = Vec::with_capacity(self.output_count);
+        let mut output_input_map = Vec::with_capacity(self.output_count);
         let return_values = Self::find_return_values(stmts);
-        for (map_idx, origin_input) in output_input_map.iter().enumerate() {
-            // The passthrough map is built in the same order as the output
-            // positions (reversed stack depth), so map_idx corresponds to
-            // the reverse-depth index used by find_return_values.
-            let index = self.output_count.saturating_sub(1 + map_idx);
-            let ty = return_values
+        for index in (0..self.output_count).rev() {
+            let (ty, origin_input) = return_values
                 .and_then(|values| values.get(index))
                 .map(|var| {
                     let inferred = self.inferred_type_for_var(var);
-                    if let Some(input_idx) = origin_input {
+                    let key = VarKey::from_var(var);
+                    if let Some(Origin::Input(input_idx)) = self.origins.get(&key) {
                         let input_key = Self::input_var_key(*input_idx);
                         let input_req = self
                             .required
                             .get(&input_key)
-                            .map(|(fact, _)| *fact)
+                            .copied()
                             .unwrap_or(TypeFact::Felt);
-                        inferred.glb(input_req)
+                        (inferred.glb(input_req), Some(*input_idx))
                     } else {
-                        inferred
+                        (inferred, None)
                     }
                 })
-                .unwrap_or(TypeFact::Felt);
+                .unwrap_or((TypeFact::Felt, None));
             outputs.push(ty.to_inferred_type());
+            output_input_map.push(origin_input);
         }
 
         TypeSummary::new_with_map(inputs, outputs, output_input_map)
@@ -364,6 +297,242 @@ impl<'a> ProcTypeAnalyzer<'a> {
         None
     }
 
+    /// Compute the origin of each variable in the procedure body.
+    ///
+    /// This is a post-hoc structural analysis run after the fixed-point
+    /// converges. It determines which variables are unmodified copies of
+    /// procedure inputs, tracing through variable copies (`Assign { expr:
+    /// Var(_) }`), ternary selects, if-phi merges, and loop-phi merges.
+    ///
+    /// A variable has `Origin::Input(i)` only if every path from the input
+    /// to the variable consists exclusively of copy operations and phi/ternary
+    /// nodes where all incoming edges agree on the same input index.
+    ///
+    /// The analysis iterates to a fixed point to handle nested loops: an
+    /// inner loop phi may optimistically inherit `Input(i)` from an outer
+    /// loop phi that is later demoted to `Computed`. Fixed-point iteration
+    /// ensures such stale origins are corrected.
+    fn compute_origins(&self, stmts: &[Stmt]) -> HashMap<VarKey, Origin> {
+        let mut origins: HashMap<VarKey, Origin> = HashMap::new();
+
+        // Seed input variables.
+        for index in 0..self.input_count {
+            let key = Self::input_var_key(index);
+            origins.insert(key, Origin::Input(index));
+        }
+
+        // Iterate to a fixed point. Each pass may demote origins from
+        // Input to Computed (monotonic — never the reverse), so
+        // convergence is guaranteed in at most N passes where N is the
+        // number of variables.
+        loop {
+            let prev = origins.clone();
+            self.propagate_origins_in_block(stmts, &mut origins);
+            if origins == prev {
+                break;
+            }
+        }
+
+        origins
+    }
+
+    /// Propagate origins through a statement block.
+    fn propagate_origins_in_block(&self, stmts: &[Stmt], origins: &mut HashMap<VarKey, Origin>) {
+        for stmt in stmts {
+            self.propagate_origins_in_stmt(stmt, origins);
+        }
+    }
+
+    /// Look up the origin for a variable expression, or `Computed` if not a variable.
+    fn origin_of_expr(expr: &Expr, origins: &HashMap<VarKey, Origin>) -> Origin {
+        match expr {
+            Expr::Var(var) => origins
+                .get(&VarKey::from_var(var))
+                .copied()
+                .unwrap_or(Origin::Computed),
+            _ => Origin::Computed,
+        }
+    }
+
+    /// Merge two origins: both must agree on the same `Input(i)`, otherwise `Computed`.
+    fn merge_origins(a: Origin, b: Origin) -> Origin {
+        match (a, b) {
+            (Origin::Input(i), Origin::Input(j)) if i == j => Origin::Input(i),
+            _ => Origin::Computed,
+        }
+    }
+
+    /// Propagate origins through a single statement.
+    fn propagate_origins_in_stmt(&self, stmt: &Stmt, origins: &mut HashMap<VarKey, Origin>) {
+        match stmt {
+            Stmt::Assign { dest, expr, .. } => {
+                let origin = match expr {
+                    // Variable copy: propagate the source's origin.
+                    Expr::Var(src) => origins
+                        .get(&VarKey::from_var(src))
+                        .copied()
+                        .unwrap_or(Origin::Computed),
+                    // Ternary select (cdrop/cswap): both branches must agree.
+                    Expr::Ternary {
+                        then_expr,
+                        else_expr,
+                        ..
+                    } => {
+                        let then_origin = Self::origin_of_expr(then_expr, origins);
+                        let else_origin = Self::origin_of_expr(else_expr, origins);
+                        Self::merge_origins(then_origin, else_origin)
+                    }
+                    // Any other expression: the value is computed.
+                    _ => Origin::Computed,
+                };
+                origins.insert(VarKey::from_var(dest), origin);
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                phis,
+                ..
+            } => {
+                self.propagate_origins_in_block(then_body, origins);
+                self.propagate_origins_in_block(else_body, origins);
+                for phi in phis {
+                    let then_origin = origins
+                        .get(&VarKey::from_var(&phi.then_var))
+                        .copied()
+                        .unwrap_or(Origin::Computed);
+                    let else_origin = origins
+                        .get(&VarKey::from_var(&phi.else_var))
+                        .copied()
+                        .unwrap_or(Origin::Computed);
+                    let merged = Self::merge_origins(then_origin, else_origin);
+                    origins.insert(VarKey::from_var(&phi.dest), merged);
+                }
+            }
+            Stmt::While { body, phis, .. } => {
+                // Seed loop-phi dests from their init values.
+                for phi in phis {
+                    let init_origin = origins
+                        .get(&VarKey::from_var(&phi.init))
+                        .copied()
+                        .unwrap_or(Origin::Computed);
+                    // Only narrow (Input→Computed), never widen.
+                    let current = origins
+                        .get(&VarKey::from_var(&phi.dest))
+                        .copied()
+                        .unwrap_or(init_origin);
+                    let updated = Self::merge_origins(current, init_origin);
+                    origins.insert(VarKey::from_var(&phi.dest), updated);
+                }
+                self.propagate_origins_in_block(body, origins);
+                // Verify step agrees with dest; demote if not.
+                for phi in phis {
+                    let dest_origin = origins
+                        .get(&VarKey::from_var(&phi.dest))
+                        .copied()
+                        .unwrap_or(Origin::Computed);
+                    let step_origin = origins
+                        .get(&VarKey::from_var(&phi.step))
+                        .copied()
+                        .unwrap_or(Origin::Computed);
+                    let merged = Self::merge_origins(dest_origin, step_origin);
+                    origins.insert(VarKey::from_var(&phi.dest), merged);
+                }
+            }
+            Stmt::Repeat {
+                body,
+                phis,
+                loop_count,
+                ..
+            } => {
+                for phi in phis {
+                    let init_origin = origins
+                        .get(&VarKey::from_var(&phi.init))
+                        .copied()
+                        .unwrap_or(Origin::Computed);
+                    if *loop_count == 0 {
+                        origins.insert(VarKey::from_var(&phi.dest), init_origin);
+                    } else {
+                        let current = origins
+                            .get(&VarKey::from_var(&phi.dest))
+                            .copied()
+                            .unwrap_or(init_origin);
+                        let updated = Self::merge_origins(current, init_origin);
+                        origins.insert(VarKey::from_var(&phi.dest), updated);
+                    }
+                }
+                if *loop_count == 0 {
+                    return;
+                }
+                self.propagate_origins_in_block(body, origins);
+                for phi in phis {
+                    let dest_origin = origins
+                        .get(&VarKey::from_var(&phi.dest))
+                        .copied()
+                        .unwrap_or(Origin::Computed);
+                    let step_origin = origins
+                        .get(&VarKey::from_var(&phi.step))
+                        .copied()
+                        .unwrap_or(Origin::Computed);
+                    let merged = Self::merge_origins(dest_origin, step_origin);
+                    origins.insert(VarKey::from_var(&phi.dest), merged);
+                }
+            }
+            Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
+                let callee_map = self
+                    .summary_for_target(&call.target)
+                    .map(|s| &s.output_input_map);
+                for (idx, result) in call.results.iter().enumerate() {
+                    let origin = if let Some(Some(input_idx)) = callee_map.and_then(|m| m.get(idx))
+                    {
+                        // Callee output traces to callee input — inherit
+                        // the origin of the corresponding caller argument.
+                        // Origin::Input uses 0=deepest, args uses 0=topmost.
+                        call.args
+                            .len()
+                            .checked_sub(1 + *input_idx)
+                            .and_then(|i| call.args.get(i))
+                            .and_then(|arg| origins.get(&VarKey::from_var(arg)).copied())
+                            .unwrap_or(Origin::Computed)
+                    } else {
+                        Origin::Computed
+                    };
+                    origins.insert(VarKey::from_var(result), origin);
+                }
+            }
+            Stmt::DynCall { results, .. } => {
+                for result in results {
+                    origins.insert(VarKey::from_var(result), Origin::Computed);
+                }
+            }
+            Stmt::Intrinsic { intrinsic, .. } => {
+                for result in &intrinsic.results {
+                    origins.insert(VarKey::from_var(result), Origin::Computed);
+                }
+            }
+            Stmt::MemLoad { load, .. } => {
+                for output in &load.outputs {
+                    origins.insert(VarKey::from_var(output), Origin::Computed);
+                }
+            }
+            Stmt::LocalLoad { load, .. } => {
+                for output in &load.outputs {
+                    origins.insert(VarKey::from_var(output), Origin::Computed);
+                }
+            }
+            Stmt::AdvLoad { load, .. } => {
+                for output in &load.outputs {
+                    origins.insert(VarKey::from_var(output), Origin::Computed);
+                }
+            }
+            // Statements that don't define new variables.
+            Stmt::MemStore { .. }
+            | Stmt::AdvStore { .. }
+            | Stmt::LocalStore { .. }
+            | Stmt::LocalStoreW { .. }
+            | Stmt::Return { .. } => {}
+        }
+    }
+
     /// Build the canonical key for an input variable by stack index.
     fn input_var_key(index: usize) -> VarKey {
         let var = Var::new(ValueId::new(index as u64), index);
@@ -371,16 +540,16 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Infer type guarantees in a statement block.
-    fn infer_types_in_block(&mut self, stmts: &[Stmt]) -> bool {
+    fn infer_types_in_block(&mut self, stmts: &[Stmt], allow_proof_narrowing: bool) -> bool {
         let mut changed = false;
         for stmt in stmts {
-            changed |= self.infer_types_in_stmt(stmt);
+            changed |= self.infer_types_in_stmt(stmt, allow_proof_narrowing);
         }
         changed
     }
 
     /// Infer type guarantees for one statement.
-    fn infer_types_in_stmt(&mut self, stmt: &Stmt) -> bool {
+    fn infer_types_in_stmt(&mut self, stmt: &Stmt, allow_proof_narrowing: bool) -> bool {
         match stmt {
             Stmt::Assign { dest, expr, .. } => {
                 let changed = self.set_inferred_type_for_var(dest, self.infer_expr_type(expr));
@@ -463,12 +632,24 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 let output_count = intrinsic.results.len();
                 let mut changed = false;
                 for (idx, result) in intrinsic.results.iter().enumerate() {
-                    let result_ty = Self::intrinsic_output_type(&intrinsic.name, idx, output_count);
+                    let result_ty = self.intrinsic_output_type(
+                        &intrinsic.name,
+                        idx,
+                        output_count,
+                        &intrinsic.args,
+                    );
                     changed |= self.set_inferred_type_for_var(result, result_ty);
                 }
-                if Self::intrinsic_asserts_u32_args(&intrinsic.name) {
+                if allow_proof_narrowing && Self::intrinsic_asserts_u32_args(&intrinsic.name) {
                     for arg in &intrinsic.args {
                         changed |= self.set_inferred_type_for_var(arg, TypeFact::U32);
+                    }
+                }
+                if allow_proof_narrowing
+                    && let Some(common_fact) = self.assert_eq_common_fact(intrinsic)
+                {
+                    for arg in &intrinsic.args {
+                        changed |= self.set_inferred_type_for_var(arg, common_fact);
                     }
                 }
                 // Track locaddr results for memory address key mapping.
@@ -489,24 +670,51 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 ..
             } => {
                 let mut changed = false;
-                changed |= self.infer_types_in_block(then_body);
-                changed |= self.infer_types_in_block(else_body);
+                changed |= self.infer_types_in_block(then_body, false);
+                changed |= self.infer_types_in_block(else_body, false);
                 for phi in phis {
-                    let then_ty = self.inferred_type_for_var(&phi.then_var);
-                    let else_ty = self.inferred_type_for_var(&phi.else_var);
+                    let then_ty = self.inferred_phi_source_type(&phi.then_var);
+                    let else_ty = self.inferred_phi_source_type(&phi.else_var);
                     changed |= self.set_inferred_type_for_var(&phi.dest, then_ty.join(else_ty));
                     self.propagate_phi_address_key(&phi.dest, &phi.then_var, &phi.else_var);
                 }
                 changed
             }
-            Stmt::While { body, phis, .. } | Stmt::Repeat { body, phis, .. } => {
+            Stmt::While { body, phis, .. } => {
                 let mut changed = false;
-                changed |= self.infer_types_in_block(body);
+                changed |= self.infer_types_in_block(body, false);
                 for phi in phis {
                     let init_ty = self.inferred_type_for_var(&phi.init);
                     let step_ty = self.inferred_type_for_var(&phi.step);
                     changed |= self.set_inferred_type_for_var(&phi.dest, init_ty.join(step_ty));
                     self.propagate_phi_address_key(&phi.dest, &phi.init, &phi.step);
+                }
+                changed
+            }
+            Stmt::Repeat {
+                body,
+                phis,
+                loop_count,
+                ..
+            } => {
+                let mut changed = false;
+                let executes_body = *loop_count > 0;
+                if executes_body {
+                    changed |= self.infer_types_in_block(body, allow_proof_narrowing);
+                }
+                for phi in phis {
+                    let init_ty = self.inferred_type_for_var(&phi.init);
+                    if executes_body {
+                        let step_ty = self.inferred_type_for_var(&phi.step);
+                        changed |= self.set_inferred_type_for_var(&phi.dest, init_ty.join(step_ty));
+                        self.propagate_phi_address_key(&phi.dest, &phi.init, &phi.step);
+                    } else {
+                        changed |= self.set_inferred_type_for_var(&phi.dest, init_ty);
+                        if let Some(key) = self.mem_address_key_for_var(&phi.init) {
+                            self.var_address_keys
+                                .insert(VarKey::from_var(&phi.dest), key);
+                        }
+                    }
                 }
                 changed
             }
@@ -583,23 +791,49 @@ impl<'a> ProcTypeAnalyzer<'a> {
     ///
     /// Position 0 is the first pushed result (deepest on stack for multi-output
     /// intrinsics). The last position is the topmost result on the stack.
-    fn intrinsic_output_type(name: &str, output_index: usize, output_count: usize) -> TypeFact {
+    fn intrinsic_output_type(
+        &self,
+        name: &str,
+        output_index: usize,
+        output_count: usize,
+        args: &[Var],
+    ) -> TypeFact {
         let base = Self::intrinsic_base_name(name);
         match base {
             // Multi-output intrinsics with Bool carry/borrow flag as last output.
-            "u32overflowing_add"
-            | "u32overflowing_sub"
-            | "u32overflowing_add3"
-            | "u32widening_add" => {
+            "u32overflowing_add" | "u32overflowing_sub" | "u32overflowing_add3" => {
                 if output_index == output_count - 1 {
                     TypeFact::Bool
                 } else {
                     TypeFact::U32
                 }
             }
+            // `u32widening_add` leaves the low limb on top of the stack and the
+            // carry underneath it.
+            "u32widening_add" => {
+                if output_index == output_count - 1 {
+                    TypeFact::U32
+                } else {
+                    TypeFact::Bool
+                }
+            }
+            // `u32widening_add3` also leaves the low limb on top. When the
+            // carry input is already known Bool, the carry output stays Bool.
+            "u32widening_add3" => {
+                if output_index == output_count - 1 {
+                    TypeFact::U32
+                } else if args
+                    .iter()
+                    .any(|arg| self.inferred_type_for_var(arg) == TypeFact::Bool)
+                {
+                    TypeFact::Bool
+                } else {
+                    TypeFact::U32
+                }
+            }
             // Multi-output intrinsics where all outputs are U32.
-            "u32widening_add3" | "u32widening_mul" | "u32widening_madd" | "u32divmod"
-            | "u32split" | "u32mod" | "u32wrapping_add3" => TypeFact::U32,
+            "u32widening_mul" | "u32widening_madd" | "u32divmod" | "u32split" | "u32mod"
+            | "u32wrapping_add3" | "u32wrapping_madd" => TypeFact::U32,
             // Other u32 intrinsics and sdepth: all outputs U32.
             _ if base.starts_with("u32") || name == "sdepth" => TypeFact::U32,
             // locaddr: U32. Note: uses `name` (not `base`) because
@@ -632,12 +866,13 @@ impl<'a> ProcTypeAnalyzer<'a> {
 
     /// Return true if intrinsic arguments require a caller-side u32 precondition.
     fn intrinsic_requires_u32_precondition(name: &str) -> bool {
+        let base = Self::intrinsic_base_name(name);
         if !name.starts_with("u32") {
             return false;
         }
 
         !matches!(
-            Self::intrinsic_base_name(name),
+            base,
             "u32assert" | "u32assert2" | "u32assertw" | "u32split" | "u32cast"
         )
     }
@@ -666,8 +901,62 @@ impl<'a> ProcTypeAnalyzer<'a> {
             } => {
                 let then_ty = self.infer_expr_type(then_expr);
                 let else_ty = self.infer_expr_type(else_expr);
-                then_ty.join(else_ty)
+                let selector_floor = self
+                    .selector_input_lower_bound(then_expr)
+                    .join(self.selector_input_lower_bound(else_expr));
+                then_ty.join(else_ty).glb(selector_floor)
             }
+        }
+    }
+
+    /// Read a control-flow merge source type, preserving input-backed requirements.
+    ///
+    /// This keeps branch merges precise when one arm returns an unchanged
+    /// input-backed value and the other arm computes a value with the same
+    /// proven `U32`/`Bool` requirement.
+    fn inferred_phi_source_type(&self, var: &Var) -> TypeFact {
+        let inferred = self.inferred_type_for_var(var);
+        if let Some(Origin::Input(input_idx)) = self.origins.get(&VarKey::from_var(var)) {
+            let input_req = self
+                .required
+                .get(&Self::input_var_key(*input_idx))
+                .copied()
+                .unwrap_or(TypeFact::Felt);
+            inferred.glb(input_req)
+        } else {
+            inferred
+        }
+    }
+
+    /// Return the shared lower bound guaranteed by an input-backed selector arm.
+    ///
+    /// Only input-backed values may inherit requirements as proven facts. A
+    /// computed value with a downstream obligation must stay broad until some
+    /// validating instruction proves that obligation.
+    fn selector_input_lower_bound(&self, expr: &Expr) -> TypeFact {
+        match expr {
+            Expr::Var(var)
+                if matches!(
+                    self.origins.get(&VarKey::from_var(var)),
+                    Some(Origin::Input(_))
+                ) =>
+            {
+                self.requirement_for_var(var)
+            }
+            Expr::Ternary {
+                then_expr,
+                else_expr,
+                ..
+            } => self
+                .selector_input_lower_bound(then_expr)
+                .join(self.selector_input_lower_bound(else_expr)),
+            Expr::True
+            | Expr::False
+            | Expr::Var(_)
+            | Expr::Constant(_)
+            | Expr::Unary(..)
+            | Expr::Binary(..)
+            | Expr::EqW { .. } => TypeFact::Felt,
         }
     }
 
@@ -702,7 +991,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Infer type for a binary expression.
-    fn infer_binary_expr_type(&self, op: BinOp, _lhs: &Expr, _rhs: &Expr) -> TypeFact {
+    fn infer_binary_expr_type(&self, op: BinOp, lhs: &Expr, rhs: &Expr) -> TypeFact {
         match op {
             BinOp::Eq
             | BinOp::Neq
@@ -726,7 +1015,39 @@ impl<'a> ProcTypeAnalyzer<'a> {
             | BinOp::U32WrappingAdd
             | BinOp::U32WrappingSub
             | BinOp::U32WrappingMul => TypeFact::U32,
+            BinOp::Add if self.is_u32_count_offset_expr(lhs, rhs) => TypeFact::U32,
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::U32Exp => TypeFact::Felt,
+        }
+    }
+
+    /// Return true when an addition preserves a `u32` bit-count result plus a safe constant.
+    fn is_u32_count_offset_expr(&self, lhs: &Expr, rhs: &Expr) -> bool {
+        self.count_offset_operands(lhs, rhs)
+            .or_else(|| self.count_offset_operands(rhs, lhs))
+            .is_some()
+    }
+
+    /// Match `count_expr + constant` where the count expression comes from a `u32` count op.
+    fn count_offset_operands(&self, count_expr: &Expr, other: &Expr) -> Option<()> {
+        let offset = match other {
+            Expr::Constant(Constant::Felt(value)) => *value,
+            _ => return None,
+        };
+        if offset > (u32::MAX as u64).saturating_sub(32) {
+            return None;
+        }
+        self.is_direct_u32_count_expr(count_expr).then_some(())
+    }
+
+    /// Return true when the expression is a `u32` count result, following local copy chains.
+    fn is_direct_u32_count_expr(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Unary(UnOp::U32Clz | UnOp::U32Ctz | UnOp::U32Clo | UnOp::U32Cto, _) => true,
+            Expr::Var(var) => self
+                .expr_defs
+                .get(&VarKey::from_var(var))
+                .is_some_and(|def| self.is_direct_u32_count_expr(def)),
+            _ => false,
         }
     }
 
@@ -818,15 +1139,17 @@ impl<'a> ProcTypeAnalyzer<'a> {
     /// applies it to each stored value. Returns `true` if any requirement
     /// changed.
     fn propagate_local_store_requirement(&mut self, index: u16, values: &[Var]) -> bool {
-        let Some((req, origin)) = self.local_requirements.get(&index).cloned() else {
-            return false;
-        };
+        let req = self
+            .local_requirements
+            .get(&index)
+            .copied()
+            .unwrap_or(TypeFact::Felt);
         if req == TypeFact::Felt {
             return false;
         }
         let mut changed = false;
         for value in values {
-            changed |= self.apply_requirement_to_var(value, req, origin.clone());
+            changed |= self.apply_requirement_to_var(value, req);
         }
         changed
     }
@@ -844,75 +1167,85 @@ impl<'a> ProcTypeAnalyzer<'a> {
         }
     }
 
+    /// Return the common proven fact established by a scalar equality assertion.
+    ///
+    /// When `assert_eq(lhs, rhs)` succeeds, both operands must satisfy the
+    /// greatest lower bound of their already-proven facts.
+    fn assert_eq_common_fact(&self, intrinsic: &crate::ir::Intrinsic) -> Option<TypeFact> {
+        if Self::intrinsic_base_name(&intrinsic.name) != "assert_eq" || intrinsic.args.len() != 2 {
+            return None;
+        }
+
+        let lhs = self.inferred_type_for_var(&intrinsic.args[0]);
+        let rhs = self.inferred_type_for_var(&intrinsic.args[1]);
+        let common = lhs.glb(rhs);
+        (common != TypeFact::Felt).then_some(common)
+    }
+
     /// Seed type requirements from direct statement semantics.
-    fn seed_requirements_in_block(&mut self, stmts: &[Stmt]) -> bool {
+    fn seed_requirements_in_block(&mut self, stmts: &[Stmt], allow_proof_narrowing: bool) -> bool {
         let mut changed = false;
         for stmt in stmts {
-            changed |= self.seed_requirements_in_stmt(stmt);
+            changed |= self.seed_requirements_in_stmt(stmt, allow_proof_narrowing);
         }
         changed
     }
 
     /// Seed type requirements from one statement.
-    fn seed_requirements_in_stmt(&mut self, stmt: &Stmt) -> bool {
+    fn seed_requirements_in_stmt(&mut self, stmt: &Stmt, allow_proof_narrowing: bool) -> bool {
         match stmt {
-            Stmt::Assign { span, expr, .. } => self.seed_requirements_in_expr(expr, *span),
-            Stmt::MemLoad { span, load } => {
+            Stmt::Assign { expr, .. } => self.seed_requirements_in_expr(expr),
+            Stmt::MemLoad { load, .. } => {
                 let mut changed = false;
                 for address in &load.address {
                     if self.mem_address_key_for_var(address).is_some() {
                         continue;
                     }
-                    changed |= self.apply_requirement_to_var(
-                        address,
-                        TypeFact::U32,
-                        RequirementOrigin::memory_address(*span),
-                    );
+                    changed |= self.apply_requirement_to_var(address, TypeFact::U32);
                 }
                 changed
             }
-            Stmt::MemStore { span, store } => {
+            Stmt::MemStore { store, .. } => {
                 let mut changed = false;
                 for address in &store.address {
                     if self.mem_address_key_for_var(address).is_some() {
                         continue;
                     }
-                    changed |= self.apply_requirement_to_var(
-                        address,
-                        TypeFact::U32,
-                        RequirementOrigin::memory_address(*span),
-                    );
+                    changed |= self.apply_requirement_to_var(address, TypeFact::U32);
                 }
                 changed
             }
-            Stmt::Call { span, call }
-            | Stmt::Exec { span, call }
-            | Stmt::SysCall { span, call } => {
-                self.seed_call_arg_requirements(&call.target, &call.args, *span)
+            Stmt::Call { call, .. } | Stmt::Exec { call, .. } | Stmt::SysCall { call, .. } => {
+                self.seed_call_arg_requirements(&call.target, &call.args)
             }
-            Stmt::Intrinsic { span, intrinsic } => {
-                self.seed_intrinsic_arg_requirements(intrinsic, *span)
+            Stmt::Intrinsic { intrinsic, .. } => {
+                self.seed_intrinsic_arg_requirements(intrinsic, allow_proof_narrowing)
             }
             Stmt::If {
-                span,
                 cond,
                 then_body,
                 else_body,
                 ..
             } => {
-                let mut changed = self.require_bool_expr(cond, RequirementOrigin::bool_use(*span));
-                changed |= self.seed_requirements_in_block(then_body);
-                changed |= self.seed_requirements_in_block(else_body);
+                let mut changed = self.require_bool_expr(cond);
+                changed |= self.seed_requirements_in_block(then_body, false);
+                changed |= self.seed_requirements_in_block(else_body, false);
                 changed
             }
-            Stmt::While {
-                span, cond, body, ..
+            Stmt::While { cond, body, .. } => {
+                let mut changed = self.require_bool_expr(cond);
+                changed |= self.seed_requirements_in_block(body, false);
+                changed
+            }
+            Stmt::Repeat {
+                body, loop_count, ..
             } => {
-                let mut changed = self.require_bool_expr(cond, RequirementOrigin::bool_use(*span));
-                changed |= self.seed_requirements_in_block(body);
-                changed
+                if *loop_count == 0 {
+                    false
+                } else {
+                    self.seed_requirements_in_block(body, allow_proof_narrowing)
+                }
             }
-            Stmt::Repeat { body, .. } => self.seed_requirements_in_block(body),
             Stmt::AdvLoad { .. }
             | Stmt::AdvStore { .. }
             | Stmt::LocalLoad { .. }
@@ -924,7 +1257,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Seed requirements from a call argument list.
-    fn seed_call_arg_requirements(&mut self, target: &str, args: &[Var], span: SourceSpan) -> bool {
+    fn seed_call_arg_requirements(&mut self, target: &str, args: &[Var]) -> bool {
         let Some(summary) = self.summary_for_target(target).cloned() else {
             return false;
         };
@@ -932,13 +1265,8 @@ impl<'a> ProcTypeAnalyzer<'a> {
             return false;
         }
         let mut changed = false;
-        let origin = RequirementOrigin::call_argument(span, target);
         for (arg, expected) in args.iter().zip(summary.inputs.iter().copied()) {
-            changed |= self.apply_requirement_to_var(
-                arg,
-                TypeFact::from_requirement(expected),
-                origin.clone(),
-            );
+            changed |= self.apply_requirement_to_var(arg, TypeFact::from_requirement(expected));
         }
         changed
     }
@@ -947,15 +1275,14 @@ impl<'a> ProcTypeAnalyzer<'a> {
     fn seed_intrinsic_arg_requirements(
         &mut self,
         intrinsic: &crate::ir::Intrinsic,
-        span: SourceSpan,
+        allow_proof_narrowing: bool,
     ) -> bool {
         let mut changed = false;
 
         // Blanket u32 precondition for u32 arithmetic intrinsics.
         if Self::intrinsic_requires_u32_precondition(&intrinsic.name) {
-            let origin = RequirementOrigin::intrinsic_argument(span, &intrinsic.name, None);
             for arg in &intrinsic.args {
-                changed |= self.require_u32_var_if_not_guaranteed(arg, origin.clone());
+                changed |= self.require_u32_var_if_not_guaranteed(arg);
             }
         }
 
@@ -964,85 +1291,64 @@ impl<'a> ProcTypeAnalyzer<'a> {
         match base {
             // mtree_get: [d, i, R, ...] — depth (arg 0) and index (arg 1) are U32.
             "mtree_get" => {
-                for (role, arg) in ["depth", "index"]
-                    .into_iter()
-                    .zip(intrinsic.args.iter().take(2))
-                {
-                    changed |= self.require_u32_var_if_not_guaranteed(
-                        arg,
-                        RequirementOrigin::intrinsic_argument(span, &intrinsic.name, Some(role)),
-                    );
+                for arg in intrinsic.args.iter().take(2) {
+                    changed |= self.require_u32_var_if_not_guaranteed(arg);
                 }
             }
             // mtree_set: [d, i, R, V', ...] — depth (arg 0) and index (arg 1) are U32.
             "mtree_set" => {
-                for (role, arg) in ["depth", "index"]
-                    .into_iter()
-                    .zip(intrinsic.args.iter().take(2))
-                {
-                    changed |= self.require_u32_var_if_not_guaranteed(
-                        arg,
-                        RequirementOrigin::intrinsic_argument(span, &intrinsic.name, Some(role)),
-                    );
+                for arg in intrinsic.args.iter().take(2) {
+                    changed |= self.require_u32_var_if_not_guaranteed(arg);
                 }
             }
             // mtree_verify: [V, d, i, R, ...] — depth (arg 4) and index (arg 5) are U32.
             "mtree_verify" => {
-                for (role, arg) in ["depth", "index"]
-                    .into_iter()
-                    .zip(intrinsic.args.iter().skip(4).take(2))
-                {
-                    changed |= self.require_u32_var_if_not_guaranteed(
-                        arg,
-                        RequirementOrigin::intrinsic_argument(span, &intrinsic.name, Some(role)),
-                    );
+                for arg in intrinsic.args.iter().skip(4).take(2) {
+                    changed |= self.require_u32_var_if_not_guaranteed(arg);
                 }
             }
             // mem_stream / adv_pipe: address is the last argument.
             "mem_stream" | "adv_pipe" => {
                 if let Some(addr) = intrinsic.args.last() {
-                    changed |= self.require_u32_var_if_not_guaranteed(
-                        addr,
-                        RequirementOrigin::intrinsic_argument(
-                            span,
-                            &intrinsic.name,
-                            Some("address"),
-                        ),
-                    );
+                    changed |= self.require_u32_var_if_not_guaranteed(addr);
                 }
             }
             _ => {}
+        }
+
+        if allow_proof_narrowing && let Some(common_fact) = self.assert_eq_common_fact(intrinsic) {
+            for arg in &intrinsic.args {
+                changed |= self.apply_requirement_to_var(arg, common_fact);
+            }
         }
 
         changed
     }
 
     /// Seed requirements from expression semantics.
-    fn seed_requirements_in_expr(&mut self, expr: &Expr, span: SourceSpan) -> bool {
+    fn seed_requirements_in_expr(&mut self, expr: &Expr) -> bool {
         match expr {
             Expr::True | Expr::False | Expr::Var(_) | Expr::Constant(_) => false,
             Expr::Unary(op, inner) => {
-                let mut changed = self.seed_requirements_in_expr(inner, span);
+                let mut changed = self.seed_requirements_in_expr(inner);
                 match op {
-                    UnOp::Not => {
-                        changed |= self.require_bool_expr(inner, RequirementOrigin::bool_use(span));
-                    }
+                    UnOp::Not => changed |= self.require_bool_expr(inner),
                     UnOp::U32Cast | UnOp::U32Test => {}
-                    UnOp::U32Not | UnOp::U32Clz | UnOp::U32Ctz | UnOp::U32Clo | UnOp::U32Cto => {
-                        changed |= self.require_u32_expr_if_not_guaranteed(
-                            inner,
-                            RequirementOrigin::u32_operation(span),
-                        );
+                    UnOp::Pow2 => {
+                        changed |= self.require_u32_expr_if_not_guaranteed(inner);
                     }
-                    UnOp::Neg | UnOp::Inv | UnOp::Pow2 => {
-                        changed |= self.require_felt_expr(inner, span);
+                    UnOp::U32Not | UnOp::U32Clz | UnOp::U32Ctz | UnOp::U32Clo | UnOp::U32Cto => {
+                        changed |= self.require_u32_expr_if_not_guaranteed(inner);
+                    }
+                    UnOp::Neg | UnOp::Inv => {
+                        changed |= self.require_felt_expr(inner);
                     }
                 }
                 changed
             }
             Expr::Binary(op, lhs, rhs) => {
-                let mut changed = self.seed_requirements_in_expr(lhs, span);
-                changed |= self.seed_requirements_in_expr(rhs, span);
+                let mut changed = self.seed_requirements_in_expr(lhs);
+                changed |= self.seed_requirements_in_expr(rhs);
                 match op {
                     BinOp::U32And
                     | BinOp::U32Or
@@ -1057,21 +1363,16 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     | BinOp::U32WrappingAdd
                     | BinOp::U32WrappingSub
                     | BinOp::U32WrappingMul => {
-                        let origin = RequirementOrigin::u32_operation(span);
-                        changed |= self.require_u32_expr_if_not_guaranteed(lhs, origin.clone());
-                        changed |= self.require_u32_expr_if_not_guaranteed(rhs, origin);
+                        changed |= self.require_u32_expr_if_not_guaranteed(lhs);
+                        changed |= self.require_u32_expr_if_not_guaranteed(rhs);
                     }
                     BinOp::U32Exp => {
-                        changed |= self.require_felt_expr(lhs, span);
-                        changed |= self.require_u32_expr_if_not_guaranteed(
-                            rhs,
-                            RequirementOrigin::u32_operation(span),
-                        );
+                        changed |= self.require_felt_expr(lhs);
+                        changed |= self.require_u32_expr_if_not_guaranteed(rhs);
                     }
                     BinOp::And | BinOp::Or | BinOp::Xor => {
-                        let origin = RequirementOrigin::bool_use(span);
-                        changed |= self.require_bool_expr(lhs, origin.clone());
-                        changed |= self.require_bool_expr(rhs, origin);
+                        changed |= self.require_bool_expr(lhs);
+                        changed |= self.require_bool_expr(rhs);
                     }
                     BinOp::Add
                     | BinOp::Sub
@@ -1083,8 +1384,8 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     | BinOp::Lte
                     | BinOp::Gt
                     | BinOp::Gte => {
-                        changed |= self.require_felt_expr(lhs, span);
-                        changed |= self.require_felt_expr(rhs, span);
+                        changed |= self.require_felt_expr(lhs);
+                        changed |= self.require_felt_expr(rhs);
                     }
                 }
                 changed
@@ -1092,18 +1393,10 @@ impl<'a> ProcTypeAnalyzer<'a> {
             Expr::EqW { lhs, rhs } => {
                 let mut changed = false;
                 for var in lhs.iter() {
-                    changed |= self.apply_requirement_to_var(
-                        var,
-                        TypeFact::Felt,
-                        RequirementOrigin::bool_use(span),
-                    );
+                    changed |= self.apply_requirement_to_var(var, TypeFact::Felt);
                 }
                 for var in rhs.iter() {
-                    changed |= self.apply_requirement_to_var(
-                        var,
-                        TypeFact::Felt,
-                        RequirementOrigin::bool_use(span),
-                    );
+                    changed |= self.apply_requirement_to_var(var, TypeFact::Felt);
                 }
                 changed
             }
@@ -1112,9 +1405,9 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 then_expr,
                 else_expr,
             } => {
-                let mut changed = self.require_bool_expr(cond, RequirementOrigin::bool_use(span));
-                changed |= self.seed_requirements_in_expr(then_expr, span);
-                changed |= self.seed_requirements_in_expr(else_expr, span);
+                let mut changed = self.require_bool_expr(cond);
+                changed |= self.seed_requirements_in_expr(then_expr);
+                changed |= self.seed_requirements_in_expr(else_expr);
                 changed
             }
         }
@@ -1132,16 +1425,12 @@ impl<'a> ProcTypeAnalyzer<'a> {
     /// Propagate requirements through one statement.
     fn propagate_requirements_in_stmt(&mut self, stmt: &Stmt) -> bool {
         match stmt {
-            Stmt::Assign {
-                span, dest, expr, ..
-            } => {
-                let Some((req, origin)) = self.requirement_with_origin_for_var(dest) else {
-                    return false;
-                };
+            Stmt::Assign { dest, expr, .. } => {
+                let req = self.requirement_for_var(dest);
                 if req == TypeFact::Felt {
                     return false;
                 }
-                self.apply_requirement_to_expr(expr, req, origin, *span)
+                self.apply_requirement_to_expr(expr, req)
             }
             Stmt::If {
                 then_body,
@@ -1153,44 +1442,67 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 changed |= self.propagate_requirements_in_block(then_body);
                 changed |= self.propagate_requirements_in_block(else_body);
                 for phi in phis {
-                    let Some((req, origin)) = self.requirement_with_origin_for_var(&phi.dest)
-                    else {
-                        continue;
-                    };
+                    let req = self.requirement_for_var(&phi.dest);
                     if req == TypeFact::Felt {
                         continue;
                     }
-                    changed |= self.apply_requirement_to_var(&phi.then_var, req, origin.clone());
-                    changed |= self.apply_requirement_to_var(&phi.else_var, req, origin);
+                    changed |= self.apply_requirement_to_var(&phi.then_var, req);
+                    changed |= self.apply_requirement_to_var(&phi.else_var, req);
                 }
                 changed
             }
-            Stmt::While { body, phis, .. } | Stmt::Repeat { body, phis, .. } => {
+            Stmt::While { body, phis, .. } => {
                 let mut changed = false;
                 changed |= self.propagate_requirements_in_block(body);
                 for phi in phis {
-                    let Some((req, origin)) = self.requirement_with_origin_for_var(&phi.dest)
-                    else {
-                        continue;
-                    };
+                    let req = self.requirement_for_var(&phi.dest);
                     if req == TypeFact::Felt {
                         continue;
                     }
-                    changed |= self.apply_requirement_to_var(&phi.init, req, origin.clone());
-                    changed |= self.apply_requirement_to_var(&phi.step, req, origin);
+                    changed |= self.apply_requirement_to_var(&phi.init, req);
+                    changed |= self.apply_requirement_to_var(&phi.step, req);
+                }
+                changed
+            }
+            Stmt::Repeat {
+                body,
+                phis,
+                loop_count,
+                ..
+            } => {
+                let mut changed = false;
+                if *loop_count > 0 {
+                    changed |= self.propagate_requirements_in_block(body);
+                }
+                for phi in phis {
+                    let req = self.requirement_for_var(&phi.dest);
+                    if req == TypeFact::Felt {
+                        continue;
+                    }
+                    changed |= self.apply_requirement_to_var(&phi.init, req);
+                    if *loop_count > 0 {
+                        changed |= self.apply_requirement_to_var(&phi.step, req);
+                    }
                 }
                 changed
             }
             Stmt::LocalLoad { load, .. } => {
                 let mut changed = false;
                 for output in &load.outputs {
-                    let Some((req, origin)) = self.requirement_with_origin_for_var(output) else {
-                        continue;
-                    };
+                    let req = self.requirement_for_var(output);
                     if req == TypeFact::Felt {
                         continue;
                     }
-                    changed |= self.apply_requirement_to_local(load.index, req, origin);
+                    let current = self
+                        .local_requirements
+                        .get(&load.index)
+                        .copied()
+                        .unwrap_or(TypeFact::Felt);
+                    let updated = current.glb(req);
+                    if updated != current {
+                        self.local_requirements.insert(load.index, updated);
+                        changed = true;
+                    }
                 }
                 changed
             }
@@ -1208,14 +1520,20 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     .and_then(|v| self.mem_address_key_for_var(v))
                 {
                     for output in &load.outputs {
-                        let Some((req, origin)) = self.requirement_with_origin_for_var(output)
-                        else {
-                            continue;
-                        };
+                        let req = self.requirement_for_var(output);
                         if req == TypeFact::Felt {
                             continue;
                         }
-                        changed |= self.apply_requirement_to_mem(addr_key, req, origin);
+                        let current = self
+                            .mem_requirements
+                            .get(&addr_key)
+                            .copied()
+                            .unwrap_or(TypeFact::Felt);
+                        let updated = current.glb(req);
+                        if updated != current {
+                            self.mem_requirements.insert(addr_key, updated);
+                            changed = true;
+                        }
                     }
                 }
                 changed
@@ -1227,12 +1545,14 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     .first()
                     .and_then(|v| self.mem_address_key_for_var(v))
                 {
-                    let Some((req, origin)) = self.mem_requirements.get(&addr_key).cloned() else {
-                        return false;
-                    };
+                    let req = self
+                        .mem_requirements
+                        .get(&addr_key)
+                        .copied()
+                        .unwrap_or(TypeFact::Felt);
                     if req != TypeFact::Felt {
                         for value in &store.values {
-                            changed |= self.apply_requirement_to_var(value, req, origin.clone());
+                            changed |= self.apply_requirement_to_var(value, req);
                         }
                     }
                 }
@@ -1242,10 +1562,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 let mut changed = false;
                 if let Some(summary) = self.summary_for_target(&call.target).cloned() {
                     for (idx, result) in call.results.iter().enumerate() {
-                        let Some((req, origin)) = self.requirement_with_origin_for_var(result)
-                        else {
-                            continue;
-                        };
+                        let req = self.requirement_for_var(result);
                         if req == TypeFact::Felt {
                             continue;
                         }
@@ -1256,7 +1573,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
                                 .checked_sub(1 + *input_idx)
                                 .and_then(|i| call.args.get(i))
                         {
-                            changed |= self.apply_requirement_to_var(arg, req, origin);
+                            changed |= self.apply_requirement_to_var(arg, req);
                         }
                     }
                 }
@@ -1271,25 +1588,17 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Apply a requirement to an expression from a required destination.
-    fn apply_requirement_to_expr(
-        &mut self,
-        expr: &Expr,
-        req: TypeFact,
-        origin: RequirementOrigin,
-        expr_span: SourceSpan,
-    ) -> bool {
+    fn apply_requirement_to_expr(&mut self, expr: &Expr, req: TypeFact) -> bool {
         match expr {
-            Expr::Var(var) => self.apply_requirement_to_var(var, req, origin),
+            Expr::Var(var) => self.apply_requirement_to_var(var, req),
             Expr::Ternary {
                 cond,
                 then_expr,
                 else_expr,
             } => {
-                let mut changed =
-                    self.require_bool_expr(cond, RequirementOrigin::bool_use(expr_span));
-                changed |=
-                    self.apply_requirement_to_expr(then_expr, req, origin.clone(), expr_span);
-                changed |= self.apply_requirement_to_expr(else_expr, req, origin, expr_span);
+                let mut changed = self.require_bool_expr(cond);
+                changed |= self.apply_requirement_to_expr(then_expr, req);
+                changed |= self.apply_requirement_to_expr(else_expr, req);
                 changed
             }
             Expr::EqW { .. } => false,
@@ -1303,110 +1612,60 @@ impl<'a> ProcTypeAnalyzer<'a> {
     fn requirement_for_var(&self, var: &Var) -> TypeFact {
         self.required
             .get(&VarKey::from_var(var))
-            .map(|(fact, _)| *fact)
+            .copied()
             .unwrap_or(TypeFact::Felt)
     }
 
-    /// Read the current requirement and origin for a variable.
-    fn requirement_with_origin_for_var(&self, var: &Var) -> Option<RequirementEntry> {
-        self.required.get(&VarKey::from_var(var)).cloned()
-    }
-
-    /// Update a requirement map entry, preserving the original origin when the
-    /// incoming fact is equal to the existing one.
-    fn update_requirement_map<K>(
-        map: &mut HashMap<K, RequirementEntry>,
-        key: K,
-        req: TypeFact,
-        origin: RequirementOrigin,
-    ) -> bool
-    where
-        K: Eq + Hash,
-    {
+    /// Apply a requirement to a variable.
+    fn apply_requirement_to_var(&mut self, var: &Var, req: TypeFact) -> bool {
         if req == TypeFact::Felt {
             return false;
         }
-        match map.get(&key).cloned() {
-            Some((current_fact, _)) => {
-                let updated = current_fact.glb(req);
-                if updated != current_fact {
-                    map.insert(key, (updated, origin));
-                    true
-                } else {
-                    false
-                }
-            }
-            None => {
-                map.insert(key, (req, origin));
-                true
-            }
+        let key = VarKey::from_var(var);
+        let current = self.required.get(&key).copied().unwrap_or(TypeFact::Felt);
+        let updated = current.glb(req);
+        if updated != current {
+            self.required.insert(key, updated);
+            true
+        } else {
+            false
         }
     }
 
-    /// Apply a requirement to a variable.
-    fn apply_requirement_to_var(
-        &mut self,
-        var: &Var,
-        req: TypeFact,
-        origin: RequirementOrigin,
-    ) -> bool {
-        Self::update_requirement_map(&mut self.required, VarKey::from_var(var), req, origin)
-    }
-
-    /// Apply a requirement to a local slot.
-    fn apply_requirement_to_local(
-        &mut self,
-        index: u16,
-        req: TypeFact,
-        origin: RequirementOrigin,
-    ) -> bool {
-        Self::update_requirement_map(&mut self.local_requirements, index, req, origin)
-    }
-
-    /// Apply a requirement to a memory location.
-    fn apply_requirement_to_mem(
-        &mut self,
-        key: MemAddressKey,
-        req: TypeFact,
-        origin: RequirementOrigin,
-    ) -> bool {
-        Self::update_requirement_map(&mut self.mem_requirements, key, req, origin)
-    }
-
     /// Require a variable to be u32 only if it is not already guaranteed u32.
-    fn require_u32_var_if_not_guaranteed(&mut self, var: &Var, origin: RequirementOrigin) -> bool {
+    fn require_u32_var_if_not_guaranteed(&mut self, var: &Var) -> bool {
         let actual = self.inferred_type_for_var(var);
         if actual.satisfies(TypeFact::U32) {
             false
         } else {
-            self.apply_requirement_to_var(var, TypeFact::U32, origin)
+            self.apply_requirement_to_var(var, TypeFact::U32)
         }
     }
 
     /// Require that an expression is boolean.
-    fn require_bool_expr(&mut self, expr: &Expr, origin: RequirementOrigin) -> bool {
+    fn require_bool_expr(&mut self, expr: &Expr) -> bool {
         match expr {
-            Expr::Var(var) => self.apply_requirement_to_var(var, TypeFact::Bool, origin),
-            Expr::Unary(UnOp::Not, inner) => self.require_bool_expr(inner, origin),
+            Expr::Var(var) => self.apply_requirement_to_var(var, TypeFact::Bool),
+            Expr::Unary(UnOp::Not, inner) => self.require_bool_expr(inner),
             Expr::Binary(BinOp::And | BinOp::Or, lhs, rhs) => {
-                self.require_bool_expr(lhs, origin.clone()) | self.require_bool_expr(rhs, origin)
+                self.require_bool_expr(lhs) | self.require_bool_expr(rhs)
             }
             Expr::Ternary {
                 cond,
                 then_expr,
                 else_expr,
             } => {
-                self.require_bool_expr(cond, RequirementOrigin::bool_use(origin.span))
-                    | self.require_bool_expr(then_expr, origin.clone())
-                    | self.require_bool_expr(else_expr, origin)
+                self.require_bool_expr(cond)
+                    | self.require_bool_expr(then_expr)
+                    | self.require_bool_expr(else_expr)
             }
             Expr::EqW { lhs, rhs } => {
                 let mut changed = false;
                 for var in lhs.iter() {
-                    changed |= self.apply_requirement_to_var(var, TypeFact::Felt, origin.clone());
+                    changed |= self.apply_requirement_to_var(var, TypeFact::Felt);
                 }
                 for var in rhs.iter() {
-                    changed |= self.apply_requirement_to_var(var, TypeFact::Felt, origin.clone());
+                    changed |= self.apply_requirement_to_var(var, TypeFact::Felt);
                 }
                 changed
             }
@@ -1417,17 +1676,17 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Require that an expression is U32.
-    fn require_u32_expr(&mut self, expr: &Expr, origin: RequirementOrigin) -> bool {
+    fn require_u32_expr(&mut self, expr: &Expr) -> bool {
         match expr {
-            Expr::Var(var) => self.apply_requirement_to_var(var, TypeFact::U32, origin),
+            Expr::Var(var) => self.apply_requirement_to_var(var, TypeFact::U32),
             Expr::Ternary {
                 cond,
                 then_expr,
                 else_expr,
             } => {
-                self.require_bool_expr(cond, RequirementOrigin::bool_use(origin.span))
-                    | self.require_u32_expr(then_expr, origin.clone())
-                    | self.require_u32_expr(else_expr, origin)
+                self.require_bool_expr(cond)
+                    | self.require_u32_expr(then_expr)
+                    | self.require_u32_expr(else_expr)
             }
             Expr::EqW { .. } => false,
             Expr::True | Expr::False | Expr::Constant(_) | Expr::Binary(..) | Expr::Unary(..) => {
@@ -1437,33 +1696,38 @@ impl<'a> ProcTypeAnalyzer<'a> {
     }
 
     /// Require an expression to be u32 only if it is not already guaranteed u32.
-    fn require_u32_expr_if_not_guaranteed(
-        &mut self,
-        expr: &Expr,
-        origin: RequirementOrigin,
-    ) -> bool {
+    fn require_u32_expr_if_not_guaranteed(&mut self, expr: &Expr) -> bool {
         let actual = self.infer_expr_type(expr);
         if actual.satisfies(TypeFact::U32) {
             false
         } else {
-            self.require_u32_expr(expr, origin)
+            self.require_u32_expr(expr)
         }
     }
 
     /// Require that an expression is Felt-compatible.
-    fn require_felt_expr(&mut self, expr: &Expr, span: SourceSpan) -> bool {
+    fn require_felt_expr(&mut self, expr: &Expr) -> bool {
         match expr {
-            Expr::Var(_) => false,
+            Expr::Var(var) => self.apply_requirement_to_var(var, TypeFact::Felt),
             Expr::Ternary {
                 cond,
                 then_expr,
                 else_expr,
             } => {
-                self.require_bool_expr(cond, RequirementOrigin::bool_use(span))
-                    | self.require_felt_expr(then_expr, span)
-                    | self.require_felt_expr(else_expr, span)
+                self.require_bool_expr(cond)
+                    | self.require_felt_expr(then_expr)
+                    | self.require_felt_expr(else_expr)
             }
-            Expr::EqW { .. } => false,
+            Expr::EqW { lhs, rhs } => {
+                let mut changed = false;
+                for var in lhs.iter() {
+                    changed |= self.apply_requirement_to_var(var, TypeFact::Felt);
+                }
+                for var in rhs.iter() {
+                    changed |= self.apply_requirement_to_var(var, TypeFact::Felt);
+                }
+                changed
+            }
             Expr::True | Expr::False | Expr::Constant(_) | Expr::Binary(..) | Expr::Unary(..) => {
                 false
             }
@@ -1491,9 +1755,6 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 if req != TypeFact::Felt {
                     let actual = self.infer_expr_type(expr);
                     if !actual.satisfies(req) && !matches!(expr, Expr::Var(_)) {
-                        let (_, origin) = self
-                            .requirement_with_origin_for_var(dest)
-                            .expect("non-Felt assignment requirement must carry an origin");
                         let mut diag = TypeDiagnostic::new(
                             self.proc_path.clone(),
                             *span,
@@ -1505,8 +1766,11 @@ impl<'a> ProcTypeAnalyzer<'a> {
                         );
                         diag.expected = Some(req.to_requirement());
                         diag.actual = Some(actual.to_inferred_type());
-                        diag.source_span = Some(origin.span);
-                        diag.source_description = Some(origin.description(req));
+                        diag.source_span = Some(*span);
+                        diag.source_description = Some(format!(
+                            "Felt arithmetic can produce values outside the {} range",
+                            req.to_requirement(),
+                        ));
                         self.diagnostics.push(diag);
                     }
                 }
@@ -1551,8 +1815,15 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 self.collect_diagnostics_in_block(then_body);
                 self.collect_diagnostics_in_block(else_body);
             }
-            Stmt::While { body, .. } | Stmt::Repeat { body, .. } => {
+            Stmt::While { body, .. } => {
                 self.collect_diagnostics_in_block(body);
+            }
+            Stmt::Repeat {
+                body, loop_count, ..
+            } => {
+                if *loop_count > 0 {
+                    self.collect_diagnostics_in_block(body);
+                }
             }
             Stmt::AdvLoad { .. }
             | Stmt::AdvStore { .. }
@@ -1570,9 +1841,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
         }
         for index in (0..self.input_count).rev() {
             let key = Self::input_var_key(index);
-            let Some((req, origin)) = self.required.get(&key).cloned() else {
-                continue;
-            };
+            let req = self.required.get(&key).copied().unwrap_or(TypeFact::Felt);
             if req == TypeFact::Felt {
                 continue; // No specific requirement.
             }
@@ -1582,15 +1851,19 @@ impl<'a> ProcTypeAnalyzer<'a> {
                     self.proc_path.clone(),
                     self.proc_span,
                     format!(
-                        "public procedure input {} must be validated as {} before a use that requires it",
+                        "public procedure input {} requires {} but is not validated (inferred {})",
                         index + 1,
                         req.to_requirement(),
+                        inferred.to_inferred_type(),
                     ),
                 );
                 diag.expected = Some(req.to_requirement());
                 diag.actual = Some(inferred.to_inferred_type());
-                diag.source_span = Some(origin.span);
-                diag.source_description = Some(origin.description(req));
+                diag.source_span = Some(self.proc_span);
+                diag.source_description = Some(format!(
+                    "public procedure input must be validated as {} (e.g. via u32assert)",
+                    req.to_requirement(),
+                ));
                 self.diagnostics.push(diag);
             }
         }
@@ -1647,7 +1920,7 @@ impl<'a> ProcTypeAnalyzer<'a> {
         &mut self,
         span: SourceSpan,
         results: &[Var],
-        label: &str,
+        origin: &str,
         suppress: &[bool],
     ) {
         for (idx, result) in results.iter().enumerate() {
@@ -1660,15 +1933,12 @@ impl<'a> ProcTypeAnalyzer<'a> {
             }
             let actual = self.inferred_type_for_var(result);
             if !actual.satisfies(req) {
-                let (_, origin) = self
-                    .requirement_with_origin_for_var(result)
-                    .expect("non-Felt result requirement must carry an origin");
                 let mut diag = TypeDiagnostic::new(
                     self.proc_path.clone(),
                     span,
                     format!(
                         "{} result {} produces {} but {} is required",
-                        label,
+                        origin,
                         idx,
                         actual.to_inferred_type(),
                         req.to_requirement(),
@@ -1676,8 +1946,13 @@ impl<'a> ProcTypeAnalyzer<'a> {
                 );
                 diag.expected = Some(req.to_requirement());
                 diag.actual = Some(actual.to_inferred_type());
-                diag.source_span = Some(origin.span);
-                diag.source_description = Some(origin.description(req));
+                diag.source_span = Some(span);
+                diag.source_description = Some(format!(
+                    "{} produces {} which does not satisfy the {} requirement",
+                    origin,
+                    actual.to_inferred_type(),
+                    req.to_requirement(),
+                ));
                 self.diagnostics.push(diag);
             }
         }
@@ -1692,7 +1967,842 @@ impl<'a> ProcTypeAnalyzer<'a> {
 
 #[cfg(test)]
 mod tests {
-    // Origin-tracing tests have been moved to `crate::passthrough::tests`,
-    // which provides equivalent (and broader) coverage using the standalone
-    // `compute_passthrough_map` function.
+    use super::*;
+    use crate::ir::{Expr, IfPhi, Intrinsic, LoopPhi, LoopVar, Stmt, ValueId, Var};
+    use crate::types::TypeRequirement;
+    use miden_assembly_syntax::ast::Visibility;
+    use miden_assembly_syntax::debuginfo::SourceSpan;
+
+    /// Helper to create a variable with a given value ID and stack depth.
+    fn var(id: u64, depth: usize) -> Var {
+        Var::new(ValueId::new(id), depth)
+    }
+
+    /// Helper to create an analyzer with given input/output counts.
+    fn analyzer(input_count: usize, output_count: usize) -> ProcTypeAnalyzer<'static> {
+        let summaries: &'static TypeSummaryMap = Box::leak(Box::default());
+        ProcTypeAnalyzer::new(
+            SymbolPath::new("test::proc".to_string()),
+            input_count,
+            output_count,
+            Visibility::Private,
+            SourceSpan::default(),
+            summaries,
+        )
+    }
+
+    #[test]
+    fn ternary_infers_shared_u32_floor_from_input_backed_branches() {
+        let mut analyzer = analyzer(2, 1);
+        let input_0 = var(0, 0);
+        let input_1 = var(1, 1);
+        let cond = var(10, 2);
+
+        analyzer
+            .origins
+            .insert(ProcTypeAnalyzer::input_var_key(0), Origin::Input(0));
+        analyzer
+            .origins
+            .insert(ProcTypeAnalyzer::input_var_key(1), Origin::Input(1));
+        analyzer
+            .required
+            .insert(ProcTypeAnalyzer::input_var_key(0), TypeFact::U32);
+        analyzer
+            .required
+            .insert(ProcTypeAnalyzer::input_var_key(1), TypeFact::U32);
+
+        let expr = Expr::Ternary {
+            cond: Box::new(Expr::Var(cond)),
+            then_expr: Box::new(Expr::Var(input_0)),
+            else_expr: Box::new(Expr::Var(input_1)),
+        };
+
+        assert_eq!(analyzer.infer_expr_type(&expr), TypeFact::U32);
+    }
+
+    #[test]
+    fn ternary_keeps_computed_required_branches_broad() {
+        let mut analyzer = analyzer(0, 1);
+        let computed_then = var(10, 0);
+        let computed_else = var(11, 1);
+        let cond = var(12, 2);
+
+        analyzer
+            .origins
+            .insert(VarKey::from_var(&computed_then), Origin::Computed);
+        analyzer
+            .origins
+            .insert(VarKey::from_var(&computed_else), Origin::Computed);
+        analyzer
+            .required
+            .insert(VarKey::from_var(&computed_then), TypeFact::U32);
+        analyzer
+            .required
+            .insert(VarKey::from_var(&computed_else), TypeFact::U32);
+
+        let expr = Expr::Ternary {
+            cond: Box::new(Expr::Var(cond)),
+            then_expr: Box::new(Expr::Var(computed_then)),
+            else_expr: Box::new(Expr::Var(computed_else)),
+        };
+
+        assert_eq!(analyzer.infer_expr_type(&expr), TypeFact::Felt);
+    }
+
+    #[test]
+    fn origin_seeds_inputs() {
+        let analyzer = analyzer(3, 0);
+        let stmts: Vec<Stmt> = vec![];
+        let origins = analyzer.compute_origins(&stmts);
+
+        for i in 0..3 {
+            let key = ProcTypeAnalyzer::input_var_key(i);
+            assert_eq!(
+                origins.get(&key),
+                Some(&Origin::Input(i)),
+                "input {i} should have Origin::Input({i})"
+            );
+        }
+    }
+
+    #[test]
+    fn origin_propagates_through_var_copy() {
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let copy = var(10, 0);
+        let stmts = vec![Stmt::Assign {
+            span: SourceSpan::default(),
+            dest: copy.clone(),
+            expr: Expr::Var(input_0),
+        }];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&copy)),
+            Some(&Origin::Input(0)),
+            "copy of input should trace to Input(0)"
+        );
+    }
+
+    #[test]
+    fn origin_propagates_through_chained_copies() {
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let copy1 = var(10, 0);
+        let copy2 = var(11, 0);
+        let copy3 = var(12, 0);
+        let stmts = vec![
+            Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: copy1.clone(),
+                expr: Expr::Var(input_0),
+            },
+            Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: copy2.clone(),
+                expr: Expr::Var(copy1),
+            },
+            Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: copy3.clone(),
+                expr: Expr::Var(copy2),
+            },
+        ];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&copy3)),
+            Some(&Origin::Input(0)),
+            "chained copy A→B→C should trace back to Input(0)"
+        );
+    }
+
+    #[test]
+    fn origin_computed_for_arithmetic() {
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let result = var(10, 0);
+        let stmts = vec![Stmt::Assign {
+            span: SourceSpan::default(),
+            dest: result.clone(),
+            expr: Expr::Binary(
+                BinOp::Add,
+                Box::new(Expr::Var(input_0)),
+                Box::new(Expr::Constant(Constant::Felt(1))),
+            ),
+        }];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&result)),
+            Some(&Origin::Computed),
+            "arithmetic result should be Computed"
+        );
+    }
+
+    #[test]
+    fn origin_ternary_same_input() {
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let cond = var(10, 1);
+        let result = var(11, 0);
+        let stmts = vec![
+            Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: cond.clone(),
+                expr: Expr::True,
+            },
+            Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: result.clone(),
+                expr: Expr::Ternary {
+                    cond: Box::new(Expr::Var(cond)),
+                    then_expr: Box::new(Expr::Var(input_0.clone())),
+                    else_expr: Box::new(Expr::Var(input_0)),
+                },
+            },
+        ];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&result)),
+            Some(&Origin::Input(0)),
+            "ternary with both branches from same input should trace to Input(0)"
+        );
+    }
+
+    #[test]
+    fn origin_ternary_different_inputs_is_computed() {
+        let analyzer = analyzer(2, 1);
+        let input_0 = var(0, 0);
+        let input_1 = var(1, 1);
+        let cond = var(10, 2);
+        let result = var(11, 0);
+        let stmts = vec![
+            Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: cond.clone(),
+                expr: Expr::True,
+            },
+            Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: result.clone(),
+                expr: Expr::Ternary {
+                    cond: Box::new(Expr::Var(cond)),
+                    then_expr: Box::new(Expr::Var(input_0)),
+                    else_expr: Box::new(Expr::Var(input_1)),
+                },
+            },
+        ];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&result)),
+            Some(&Origin::Computed),
+            "ternary with different input origins should be Computed"
+        );
+    }
+
+    #[test]
+    fn origin_if_phi_same_input() {
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let then_copy = var(10, 0);
+        let else_copy = var(11, 0);
+        let phi_dest = var(12, 0);
+
+        let stmts = vec![Stmt::If {
+            span: SourceSpan::default(),
+            cond: Expr::True,
+            then_body: vec![Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: then_copy.clone(),
+                expr: Expr::Var(input_0.clone()),
+            }],
+            else_body: vec![Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: else_copy.clone(),
+                expr: Expr::Var(input_0),
+            }],
+            phis: vec![IfPhi {
+                dest: phi_dest.clone(),
+                then_var: then_copy,
+                else_var: else_copy,
+            }],
+        }];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&phi_dest)),
+            Some(&Origin::Input(0)),
+            "if-phi with both branches from same input should trace to Input(0)"
+        );
+    }
+
+    #[test]
+    fn origin_if_phi_different_inputs_is_computed() {
+        let analyzer = analyzer(2, 1);
+        let input_0 = var(0, 0);
+        let input_1 = var(1, 1);
+        let phi_dest = var(12, 0);
+
+        let stmts = vec![Stmt::If {
+            span: SourceSpan::default(),
+            cond: Expr::True,
+            then_body: vec![],
+            else_body: vec![],
+            phis: vec![IfPhi {
+                dest: phi_dest.clone(),
+                then_var: input_0,
+                else_var: input_1,
+            }],
+        }];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&phi_dest)),
+            Some(&Origin::Computed),
+            "if-phi with different input origins should be Computed"
+        );
+    }
+
+    #[test]
+    fn origin_loop_phi_preserves_input() {
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let phi_dest = var(10, 0);
+        let step_copy = var(11, 0);
+
+        let stmts = vec![Stmt::Repeat {
+            span: SourceSpan::default(),
+            loop_var: LoopVar::new(0),
+            loop_count: 3,
+            body: vec![Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: step_copy.clone(),
+                expr: Expr::Var(phi_dest.clone()),
+            }],
+            phis: vec![LoopPhi {
+                dest: phi_dest.clone(),
+                init: input_0,
+                step: step_copy,
+            }],
+        }];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&phi_dest)),
+            Some(&Origin::Input(0)),
+            "loop-phi preserving input should trace to Input(0)"
+        );
+    }
+
+    #[test]
+    fn origin_loop_phi_modified_step_is_computed() {
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let phi_dest = var(10, 0);
+        let modified = var(11, 0);
+
+        let stmts = vec![Stmt::Repeat {
+            span: SourceSpan::default(),
+            loop_var: LoopVar::new(0),
+            loop_count: 3,
+            body: vec![Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: modified.clone(),
+                expr: Expr::Binary(
+                    BinOp::Add,
+                    Box::new(Expr::Var(phi_dest.clone())),
+                    Box::new(Expr::Constant(Constant::Felt(1))),
+                ),
+            }],
+            phis: vec![LoopPhi {
+                dest: phi_dest.clone(),
+                init: input_0,
+                step: modified,
+            }],
+        }];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&phi_dest)),
+            Some(&Origin::Computed),
+            "loop-phi with modified step should be Computed"
+        );
+    }
+
+    #[test]
+    fn origin_zero_repeat_phi_ignores_body_step() {
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let phi_dest = var(10, 0);
+        let modified = var(11, 0);
+
+        let stmts = vec![Stmt::Repeat {
+            span: SourceSpan::default(),
+            loop_var: LoopVar::new(0),
+            loop_count: 0,
+            body: vec![Stmt::Assign {
+                span: SourceSpan::default(),
+                dest: modified.clone(),
+                expr: Expr::Binary(
+                    BinOp::Add,
+                    Box::new(Expr::Var(phi_dest.clone())),
+                    Box::new(Expr::Constant(Constant::Felt(1))),
+                ),
+            }],
+            phis: vec![LoopPhi {
+                dest: phi_dest.clone(),
+                init: input_0,
+                step: modified,
+            }],
+        }];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&phi_dest)),
+            Some(&Origin::Input(0)),
+            "repeat.0 should leave loop-phi destinations at their init origin"
+        );
+    }
+
+    #[test]
+    fn origin_nested_loop_outer_demotion_propagates() {
+        // Outer loop modifies a value. Inner loop inherits from outer phi.
+        // After outer step verification demotes the outer phi to Computed,
+        // the fixed-point iteration must also demote the inner phi.
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let outer_phi = var(10, 0);
+        let inner_phi = var(20, 0);
+        let inner_step = var(21, 0);
+        let outer_modified = var(11, 0);
+
+        let stmts = vec![Stmt::Repeat {
+            span: SourceSpan::default(),
+            loop_var: LoopVar::new(0),
+            loop_count: 2,
+            body: vec![
+                Stmt::Repeat {
+                    span: SourceSpan::default(),
+                    loop_var: LoopVar::new(1),
+                    loop_count: 2,
+                    body: vec![Stmt::Assign {
+                        span: SourceSpan::default(),
+                        dest: inner_step.clone(),
+                        expr: Expr::Var(inner_phi.clone()),
+                    }],
+                    phis: vec![LoopPhi {
+                        dest: inner_phi.clone(),
+                        init: outer_phi.clone(),
+                        step: inner_step.clone(),
+                    }],
+                },
+                Stmt::Assign {
+                    span: SourceSpan::default(),
+                    dest: outer_modified.clone(),
+                    expr: Expr::Binary(
+                        BinOp::Add,
+                        Box::new(Expr::Var(outer_phi.clone())),
+                        Box::new(Expr::Constant(Constant::Felt(1))),
+                    ),
+                },
+            ],
+            phis: vec![LoopPhi {
+                dest: outer_phi.clone(),
+                init: input_0,
+                step: outer_modified,
+            }],
+        }];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&outer_phi)),
+            Some(&Origin::Computed),
+            "outer loop phi with modified step should be Computed"
+        );
+        assert_eq!(
+            origins.get(&VarKey::from_var(&inner_phi)),
+            Some(&Origin::Computed),
+            "inner loop phi inheriting from Computed outer phi should also be Computed"
+        );
+    }
+
+    #[test]
+    fn origin_local_store_load_is_computed() {
+        // Passthrough through local storage is conservatively Computed.
+        let analyzer = analyzer(1, 1);
+        let input_0 = var(0, 0);
+        let loaded = var(10, 0);
+        let stmts = vec![
+            Stmt::LocalStore {
+                span: SourceSpan::default(),
+                store: crate::ir::LocalStore {
+                    index: 0,
+                    values: vec![input_0],
+                },
+            },
+            Stmt::LocalLoad {
+                span: SourceSpan::default(),
+                load: crate::ir::LocalLoad {
+                    kind: crate::ir::LocalAccessKind::Element,
+                    index: 0,
+                    outputs: vec![loaded.clone()],
+                },
+            },
+        ];
+
+        let origins = analyzer.compute_origins(&stmts);
+        assert_eq!(
+            origins.get(&VarKey::from_var(&loaded)),
+            Some(&Origin::Computed),
+            "local store/load passthrough is conservatively Computed"
+        );
+    }
+
+    #[test]
+    fn proof_intrinsics_in_if_body_do_not_leak() {
+        let mut analyzer = analyzer(1, 0);
+        let input = var(0, 0);
+        let cond = var(1, 1);
+        let sdepth_result = var(10, 0);
+        let stmts = vec![Stmt::If {
+            span: SourceSpan::default(),
+            cond: Expr::Var(cond),
+            then_body: vec![
+                Stmt::Intrinsic {
+                    span: SourceSpan::default(),
+                    intrinsic: Intrinsic {
+                        name: "u32assert".to_string(),
+                        args: vec![input.clone()],
+                        results: vec![],
+                    },
+                },
+                Stmt::Intrinsic {
+                    span: SourceSpan::default(),
+                    intrinsic: Intrinsic {
+                        name: "sdepth".to_string(),
+                        args: vec![],
+                        results: vec![sdepth_result.clone()],
+                    },
+                },
+                Stmt::Intrinsic {
+                    span: SourceSpan::default(),
+                    intrinsic: Intrinsic {
+                        name: "assert_eq".to_string(),
+                        args: vec![input.clone(), sdepth_result],
+                        results: vec![],
+                    },
+                },
+            ],
+            else_body: vec![],
+            phis: vec![],
+        }];
+
+        let _ = analyzer.infer_types_in_block(&stmts, true);
+        let _ = analyzer.seed_requirements_in_block(&stmts, true);
+
+        assert_eq!(analyzer.inferred_type_for_var(&input), TypeFact::Felt);
+        assert_eq!(
+            analyzer.requirement_for_var(&input),
+            TypeFact::Felt,
+            "conditional assert_eq should not seed a guaranteed input requirement"
+        );
+    }
+
+    #[test]
+    fn u32assert_in_positive_repeat_body_propagates() {
+        let mut analyzer = analyzer(1, 0);
+        let input = var(0, 0);
+        let stmts = vec![Stmt::Repeat {
+            span: SourceSpan::default(),
+            loop_var: LoopVar::new(0),
+            loop_count: 1,
+            body: vec![Stmt::Intrinsic {
+                span: SourceSpan::default(),
+                intrinsic: Intrinsic {
+                    name: "u32assert".to_string(),
+                    args: vec![input.clone()],
+                    results: vec![],
+                },
+            }],
+            phis: vec![],
+        }];
+
+        let _ = analyzer.infer_types_in_block(&stmts, true);
+
+        assert_eq!(
+            analyzer.inferred_type_for_var(&input),
+            TypeFact::U32,
+            "repeat.1 executes its body, so proof-producing intrinsics should propagate"
+        );
+    }
+
+    #[test]
+    fn u32assert_in_zero_repeat_body_does_not_propagate() {
+        let mut analyzer = analyzer(1, 0);
+        let input = var(0, 0);
+        let stmts = vec![Stmt::Repeat {
+            span: SourceSpan::default(),
+            loop_var: LoopVar::new(0),
+            loop_count: 0,
+            body: vec![Stmt::Intrinsic {
+                span: SourceSpan::default(),
+                intrinsic: Intrinsic {
+                    name: "u32assert".to_string(),
+                    args: vec![input.clone()],
+                    results: vec![],
+                },
+            }],
+            phis: vec![],
+        }];
+
+        let _ = analyzer.infer_types_in_block(&stmts, true);
+
+        assert_eq!(
+            analyzer.inferred_type_for_var(&input),
+            TypeFact::Felt,
+            "repeat.0 does not execute its body, so proof-producing intrinsics must not leak"
+        );
+    }
+
+    #[test]
+    fn zero_repeat_loop_phi_keeps_init_type() {
+        let mut analyzer = analyzer(1, 1);
+        let input = var(0, 0);
+        let phi_dest = var(10, 0);
+        let step_result = var(11, 0);
+        let stmts = vec![Stmt::Repeat {
+            span: SourceSpan::default(),
+            loop_var: LoopVar::new(0),
+            loop_count: 0,
+            body: vec![Stmt::Intrinsic {
+                span: SourceSpan::default(),
+                intrinsic: Intrinsic {
+                    name: "sdepth".to_string(),
+                    args: vec![],
+                    results: vec![step_result.clone()],
+                },
+            }],
+            phis: vec![LoopPhi {
+                dest: phi_dest.clone(),
+                init: input,
+                step: step_result,
+            }],
+        }];
+
+        let _ = analyzer.infer_types_in_block(&stmts, true);
+
+        assert_eq!(
+            analyzer.inferred_type_for_var(&phi_dest),
+            TypeFact::Felt,
+            "repeat.0 should keep loop-phi destinations at their init type"
+        );
+    }
+
+    #[test]
+    fn repeat_assert_eq_seeds_input_requirement_only_when_body_executes() {
+        let input = var(0, 0);
+        let sdepth_zero = var(10, 0);
+        let sdepth_positive = var(11, 0);
+
+        let zero_repeat = vec![Stmt::Repeat {
+            span: SourceSpan::default(),
+            loop_var: LoopVar::new(0),
+            loop_count: 0,
+            body: vec![
+                Stmt::Intrinsic {
+                    span: SourceSpan::default(),
+                    intrinsic: Intrinsic {
+                        name: "sdepth".to_string(),
+                        args: vec![],
+                        results: vec![sdepth_zero.clone()],
+                    },
+                },
+                Stmt::Intrinsic {
+                    span: SourceSpan::default(),
+                    intrinsic: Intrinsic {
+                        name: "assert_eq".to_string(),
+                        args: vec![input.clone(), sdepth_zero],
+                        results: vec![],
+                    },
+                },
+            ],
+            phis: vec![],
+        }];
+        let positive_repeat = vec![Stmt::Repeat {
+            span: SourceSpan::default(),
+            loop_var: LoopVar::new(0),
+            loop_count: 2,
+            body: vec![
+                Stmt::Intrinsic {
+                    span: SourceSpan::default(),
+                    intrinsic: Intrinsic {
+                        name: "sdepth".to_string(),
+                        args: vec![],
+                        results: vec![sdepth_positive.clone()],
+                    },
+                },
+                Stmt::Intrinsic {
+                    span: SourceSpan::default(),
+                    intrinsic: Intrinsic {
+                        name: "assert_eq".to_string(),
+                        args: vec![input.clone(), sdepth_positive],
+                        results: vec![],
+                    },
+                },
+            ],
+            phis: vec![],
+        }];
+
+        let mut zero_analyzer = analyzer(1, 0);
+        let zero_summary = zero_analyzer.analyze(&zero_repeat).summary;
+        assert_eq!(zero_summary.inputs, vec![TypeRequirement::Felt]);
+
+        let mut positive_analyzer = analyzer(1, 0);
+        let positive_summary = positive_analyzer.analyze(&positive_repeat).summary;
+        assert_eq!(positive_summary.inputs, vec![TypeRequirement::U32]);
+    }
+
+    #[test]
+    fn repeat_zero_u32_precondition_does_not_seed_input_requirement() {
+        let lhs = var(0, 0);
+        let rhs = var(1, 1);
+        let zero_result = var(10, 0);
+        let positive_result = var(11, 0);
+
+        let zero_repeat = vec![Stmt::Repeat {
+            span: SourceSpan::default(),
+            loop_var: LoopVar::new(0),
+            loop_count: 0,
+            body: vec![Stmt::Intrinsic {
+                span: SourceSpan::default(),
+                intrinsic: Intrinsic {
+                    name: "u32wrapping_add".to_string(),
+                    args: vec![lhs.clone(), rhs.clone()],
+                    results: vec![zero_result],
+                },
+            }],
+            phis: vec![],
+        }];
+        let positive_repeat = vec![Stmt::Repeat {
+            span: SourceSpan::default(),
+            loop_var: LoopVar::new(0),
+            loop_count: 1,
+            body: vec![Stmt::Intrinsic {
+                span: SourceSpan::default(),
+                intrinsic: Intrinsic {
+                    name: "u32wrapping_add".to_string(),
+                    args: vec![lhs.clone(), rhs.clone()],
+                    results: vec![positive_result],
+                },
+            }],
+            phis: vec![],
+        }];
+
+        let mut zero_analyzer = analyzer(2, 0);
+        let zero_summary = zero_analyzer.analyze(&zero_repeat).summary;
+        assert_eq!(
+            zero_summary.inputs,
+            vec![TypeRequirement::Felt, TypeRequirement::Felt]
+        );
+
+        let mut positive_analyzer = analyzer(2, 0);
+        let positive_summary = positive_analyzer.analyze(&positive_repeat).summary;
+        assert_eq!(
+            positive_summary.inputs,
+            vec![TypeRequirement::U32, TypeRequirement::U32]
+        );
+    }
+
+    #[test]
+    fn repeat_assert_eq_on_loop_phi_seeds_input_requirement() {
+        let input = var(0, 0);
+        let phi_dest = var(10, 0);
+        let phi_step = var(11, 0);
+        let sdepth_result = var(12, 0);
+        let stmts = vec![Stmt::Repeat {
+            span: SourceSpan::default(),
+            loop_var: LoopVar::new(0),
+            loop_count: 2,
+            body: vec![
+                Stmt::Assign {
+                    span: SourceSpan::default(),
+                    dest: phi_step.clone(),
+                    expr: Expr::Var(phi_dest.clone()),
+                },
+                Stmt::Intrinsic {
+                    span: SourceSpan::default(),
+                    intrinsic: Intrinsic {
+                        name: "sdepth".to_string(),
+                        args: vec![],
+                        results: vec![sdepth_result.clone()],
+                    },
+                },
+                Stmt::Intrinsic {
+                    span: SourceSpan::default(),
+                    intrinsic: Intrinsic {
+                        name: "assert_eq".to_string(),
+                        args: vec![phi_step.clone(), sdepth_result],
+                        results: vec![],
+                    },
+                },
+            ],
+            phis: vec![LoopPhi {
+                dest: phi_dest.clone(),
+                init: input,
+                step: phi_step,
+            }],
+        }];
+
+        let mut analyzer = analyzer(1, 0);
+        let summary = analyzer.analyze(&stmts).summary;
+        assert_eq!(summary.inputs, vec![TypeRequirement::U32]);
+    }
+
+    #[test]
+    fn zero_repeat_assert_eq_on_loop_phi_keeps_input_requirement_broad() {
+        let input = var(0, 0);
+        let phi_dest = var(10, 0);
+        let phi_step = var(11, 0);
+        let sdepth_result = var(12, 0);
+        let stmts = vec![Stmt::Repeat {
+            span: SourceSpan::default(),
+            loop_var: LoopVar::new(0),
+            loop_count: 0,
+            body: vec![
+                Stmt::Assign {
+                    span: SourceSpan::default(),
+                    dest: phi_step.clone(),
+                    expr: Expr::Var(phi_dest.clone()),
+                },
+                Stmt::Intrinsic {
+                    span: SourceSpan::default(),
+                    intrinsic: Intrinsic {
+                        name: "sdepth".to_string(),
+                        args: vec![],
+                        results: vec![sdepth_result.clone()],
+                    },
+                },
+                Stmt::Intrinsic {
+                    span: SourceSpan::default(),
+                    intrinsic: Intrinsic {
+                        name: "assert_eq".to_string(),
+                        args: vec![phi_step.clone(), sdepth_result],
+                        results: vec![],
+                    },
+                },
+            ],
+            phis: vec![LoopPhi {
+                dest: phi_dest,
+                init: input,
+                step: phi_step,
+            }],
+        }];
+
+        let mut analyzer = analyzer(1, 0);
+        let summary = analyzer.analyze(&stmts).summary;
+        assert_eq!(summary.inputs, vec![TypeRequirement::Felt]);
+    }
 }
