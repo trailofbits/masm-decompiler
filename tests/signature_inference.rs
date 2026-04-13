@@ -35,7 +35,7 @@ fn infers_produce_and_consume() {
             inputs, outputs, ..
         } => {
             assert_eq!(*inputs, 2);
-            assert_eq!(*outputs, 2);
+            assert_eq!(*outputs, 3);
         }
         ProcSignature::Unknown => panic!("expected known signature"),
     }
@@ -278,7 +278,7 @@ fn infers_while_with_condition_produced() {
 #[test]
 fn infers_while_condition_from_body() {
     // Body manufactures the next condition by duplicating an input. When the
-    // loop exits, the remaining value is an unchanged input, not an output.
+    // loop exits, the remaining input is still semantically visible.
     let ws = workspace_from_modules(&[(
         "loop_body_cond",
         r#"
@@ -297,7 +297,7 @@ fn infers_while_condition_from_body() {
             inputs, outputs, ..
         } => {
             assert_eq!(*inputs, 2);
-            assert_eq!(*outputs, 0);
+            assert_eq!(*outputs, 1);
         }
         ProcSignature::Unknown => panic!("expected known signature"),
     }
@@ -379,9 +379,41 @@ fn infers_correct_number_of_arguments_for_testz() {
     let sigs = infer_signatures(&ws, &cg);
     let sig = sigs.get("word::testz").expect("sig");
     match sig {
-        ProcSignature::Known { inputs, .. } => {
+        ProcSignature::Known {
+            inputs, outputs, ..
+        } => {
             // testz consumes 4 arguments (1 word)
             assert_eq!(*inputs, 4);
+            // testz preserves the input word and produces one Bool.
+            assert_eq!(*outputs, 5);
+        }
+        ProcSignature::Unknown => panic!("expected known signature"),
+    }
+}
+
+#[test]
+fn infers_preserved_outputs_for_test_eq() {
+    let ws = workspace_from_modules(&[(
+        "word",
+        r#"
+        pub proc test_eq
+            dup.7 dup.4 eq
+            dup.7 dup.4 eq and
+            dup.6 dup.3 eq and
+            dup.5 dup.2 eq and
+        end
+        "#,
+    )]);
+    let cg = CallGraph::from(&ws);
+    let sigs = infer_signatures(&ws, &cg);
+    let sig = sigs.get("word::test_eq").expect("sig");
+    match sig {
+        ProcSignature::Known {
+            inputs, outputs, ..
+        } => {
+            assert_eq!(*inputs, 8);
+            // test_eq preserves both input words and produces one Bool.
+            assert_eq!(*outputs, 9);
         }
         ProcSignature::Unknown => panic!("expected known signature"),
     }

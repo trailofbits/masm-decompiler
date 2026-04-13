@@ -202,8 +202,22 @@ pub fn lift_proc(
     let mut loop_ctx = LoopContext::new();
 
     // Initialize stack with input variables from signature.
-    if let Some(ProcSignature::Known { inputs, .. }) = sigs.get(proc_path) {
-        stack.ensure_depth(*inputs);
+    if let Some(ProcSignature::Known {
+        inputs,
+        public_inputs,
+        ..
+    }) = sigs.get(proc_path)
+    {
+        if public_inputs < inputs {
+            for hidden_depth in *public_inputs..*inputs {
+                stack.push_fresh_with_value_id(ValueId::new(hidden_depth as u64), hidden_depth);
+            }
+            for display_depth in 0..*public_inputs {
+                stack.push_fresh_with_value_id(ValueId::new(display_depth as u64), display_depth);
+            }
+        } else {
+            stack.ensure_depth(*inputs);
+        }
     }
 
     let mut stmts = lift_block(proc.body(), &mut stack, &mut loop_ctx, resolver, sigs)?;
@@ -422,7 +436,7 @@ fn lift_repeat(
             )
         })
         .collect();
-    let loop_input_ids = collect_loop_input_ids(&entry_entries, &exit_entries);
+    let loop_input_ids = collect_loop_input_ids(&entry_entries, &slot_indices, &loop_carried_ids);
     if !loop_input_ids.is_empty() {
         body_stmts = transform_loop_input_bases(body_stmts, &loop_input_ids, loop_depth);
         repeat_phis = repeat_phis
@@ -488,7 +502,10 @@ fn loop_term(loop_var_id: usize, coeff: i64) -> IndexExpr {
 #[derive(Debug, Clone, Copy)]
 struct SlotIndex {
     /// Linear shift applied per iteration.
+    #[allow(dead_code)]
     delta: i64,
+    /// Change in relative depth from the top of the stack per iteration.
+    access_delta: i64,
 }
 
 /// Transform loop subscripts using slot provenance.
@@ -773,7 +790,7 @@ fn transform_var_loop_subscripts(
     let slot_id = value_slots.get(&value_id).copied();
     let slot_delta = slot_id
         .and_then(|slot_id| slot_indices.get(&slot_id))
-        .map(|index| index.delta)
+        .map(|index| index.access_delta)
         .unwrap_or(0);
     let loop_delta = if produced_value_ids.contains(&value_id) {
         produced_stride
@@ -928,13 +945,22 @@ fn constant_term(expr: &IndexExpr) -> i64 {
 /// Identify entry values that must be treated as loop inputs.
 fn collect_loop_input_ids(
     entry_entries: &[StackEntry],
-    exit_entries: &[StackEntry],
+    slot_indices: &HashMap<SlotId, SlotIndex>,
+    loop_carried_value_ids: &HashSet<ValueId>,
 ) -> HashSet<ValueId> {
-    let exit_slots: HashSet<SlotId> = exit_entries.iter().map(|entry| entry.slot_id).collect();
     entry_entries
         .iter()
-        .filter(|entry| !exit_slots.contains(&entry.slot_id))
-        .filter_map(|entry| entry.var.base.value_id())
+        .filter_map(|entry| {
+            let value_id = entry.var.base.value_id()?;
+            if loop_carried_value_ids.contains(&value_id) {
+                return None;
+            }
+            let access_delta = slot_indices
+                .get(&entry.slot_id)
+                .map(|index| index.access_delta)
+                .unwrap_or(0);
+            (access_delta != 0).then_some(value_id)
+        })
         .collect()
 }
 
@@ -1136,19 +1162,36 @@ fn compute_slot_indices(
                                 .to_string(),
                         });
                     }
-                    delta1
+                    let access_delta =
+                        (exit_entries.len() as i64 - entry_entries.len() as i64) - delta1;
+                    slot_indices.insert(
+                        entry.slot_id,
+                        SlotIndex {
+                            delta: delta1,
+                            access_delta,
+                        },
+                    );
+                    continue;
                 } else {
                     -consumed_stride
                 }
             } else {
                 -consumed_stride
             };
-            slot_indices.insert(entry.slot_id, SlotIndex { delta });
-        } else {
             slot_indices.insert(
                 entry.slot_id,
                 SlotIndex {
-                    delta: -consumed_stride,
+                    delta,
+                    access_delta: delta,
+                },
+            );
+        } else {
+            let delta = -consumed_stride;
+            slot_indices.insert(
+                entry.slot_id,
+                SlotIndex {
+                    delta,
+                    access_delta: delta,
                 },
             );
         }
@@ -1173,7 +1216,13 @@ fn compute_slot_indices(
         } else {
             0
         };
-        slot_indices.insert(exit.slot_id, SlotIndex { delta });
+        slot_indices.insert(
+            exit.slot_id,
+            SlotIndex {
+                delta,
+                access_delta: delta,
+            },
+        );
     }
 
     Ok(slot_indices)
@@ -2309,8 +2358,41 @@ mod tests {
                 .expect("slot index computation should succeed");
         let entry_index = indices.get(&SlotId::new(0)).expect("entry slot");
         assert_eq!(entry_index.delta, 1);
+        assert_eq!(entry_index.access_delta, 0);
         let produced_index = indices.get(&SlotId::new(1)).expect("produced slot");
         assert_eq!(produced_index.delta, 0);
+        assert_eq!(produced_index.access_delta, 0);
+    }
+
+    #[test]
+    fn compute_slot_indices_tracks_relative_depth_growth() {
+        let entry = vec![
+            StackEntry::new(make_var(0, 0, 0), SlotId::new(0)),
+            StackEntry::new(make_var(1, 1, 1), SlotId::new(1)),
+            StackEntry::new(make_var(2, 2, 2), SlotId::new(2)),
+            StackEntry::new(make_var(3, 3, 3), SlotId::new(3)),
+        ];
+        let exit = vec![
+            StackEntry::new(make_var(0, 0, 0), SlotId::new(0)),
+            StackEntry::new(make_var(1, 1, 1), SlotId::new(1)),
+            StackEntry::new(make_var(2, 2, 2), SlotId::new(2)),
+            StackEntry::new(make_var(3, 3, 3), SlotId::new(3)),
+            StackEntry::new(make_var(4, 4, 4), SlotId::new(4)),
+        ];
+        let exit2_slots = vec![
+            SlotId::new(0),
+            SlotId::new(1),
+            SlotId::new(2),
+            SlotId::new(3),
+            SlotId::new(4),
+            SlotId::new(5),
+        ];
+        let indices =
+            compute_slot_indices(SourceSpan::UNKNOWN, &entry, &exit, Some(&exit2_slots), 2)
+                .expect("slot index computation should succeed");
+        let entry_index = indices.get(&SlotId::new(0)).expect("entry slot");
+        assert_eq!(entry_index.delta, 0);
+        assert_eq!(entry_index.access_delta, 1);
     }
 
     #[test]

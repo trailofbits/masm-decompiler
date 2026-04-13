@@ -33,6 +33,14 @@ impl ValueIdGen {
         self.next.set(current + 1);
         ValueId::new(current)
     }
+
+    /// Ensure the next value identifier is at least the provided value.
+    pub fn ensure_next_at_least(&self, next: u64) {
+        let current = self.next.get();
+        if current < next {
+            self.next.set(next);
+        }
+    }
 }
 
 impl Default for ValueIdGen {
@@ -164,6 +172,22 @@ impl SymbolicStack {
     pub fn push_fresh(&mut self) -> Var {
         let depth = self.stack.len();
         let var = self.fresh_var(depth);
+        let slot_id = self.slots.next();
+        self.register_value_slot(&var, slot_id);
+        self.stack.push_back(StackEntry::new(var.clone(), slot_id));
+        var
+    }
+
+    /// Create and push a fresh variable with an explicit value identifier and
+    /// display depth.
+    ///
+    /// This is used when lifting needs hidden stack scaffolding below the
+    /// public procedure inputs. The rendered variable name follows
+    /// `display_depth`, while `value_id` preserves any invariants expected by
+    /// later analyses.
+    pub fn push_fresh_with_value_id(&mut self, value_id: ValueId, display_depth: usize) -> Var {
+        self.ids.ensure_next_at_least(value_id.as_u64() + 1);
+        let var = Var::new(value_id, display_depth);
         let slot_id = self.slots.next();
         self.register_value_slot(&var, slot_id);
         self.stack.push_back(StackEntry::new(var.clone(), slot_id));
@@ -810,5 +834,23 @@ mod tests {
 
             prop_assert_eq!(ids.len(), (count_a as usize) + (count_b as usize));
         }
+    }
+
+    #[test]
+    fn explicit_value_id_seeding_preserves_canonical_input_ids() {
+        let mut stack = SymbolicStack::new();
+        stack.push_fresh_with_value_id(ValueId::new(16), 16);
+        stack.push_fresh_with_value_id(ValueId::new(17), 17);
+        stack.push_fresh_with_value_id(ValueId::new(0), 0);
+        stack.push_fresh_with_value_id(ValueId::new(1), 1);
+
+        let vars = stack.to_vec();
+        assert_eq!(vars[0], Var::new(ValueId::new(16), 16));
+        assert_eq!(vars[1], Var::new(ValueId::new(17), 17));
+        assert_eq!(vars[2], Var::new(ValueId::new(0), 0));
+        assert_eq!(vars[3], Var::new(ValueId::new(1), 1));
+
+        let fresh = stack.push_fresh();
+        assert_eq!(fresh.base.value_id(), Some(ValueId::new(18)));
     }
 }

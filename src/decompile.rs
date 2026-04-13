@@ -205,7 +205,7 @@ impl DecompiledProc {
     /// Returns the number of input parameters, if known.
     pub fn inputs(&self) -> Option<usize> {
         match &self.signature {
-            Some(ProcSignature::Known { inputs, .. }) => Some(*inputs),
+            Some(ProcSignature::Known { public_inputs, .. }) => Some(*public_inputs),
             _ => None,
         }
     }
@@ -340,7 +340,8 @@ impl<'a> Decompiler<'a> {
     /// Create a new decompiler for the given workspace.
     pub fn new(workspace: &'a Workspace) -> Self {
         let callgraph = CallGraph::from(workspace);
-        let signatures = infer_signatures(workspace, &callgraph);
+        let mut signatures = infer_signatures(workspace, &callgraph);
+        refine_public_signature_inputs(workspace, &mut signatures);
         let (type_summaries, type_diagnostics) =
             infer_type_summaries(workspace, &callgraph, &signatures);
         Self {
@@ -438,7 +439,7 @@ impl<'a> Decompiler<'a> {
 
         let signature = self.signatures.get(&proc_path).cloned();
         let type_summary = self.type_summaries.get(&proc_path).cloned();
-        let declared_type_summary = crate::types::declared_summary_for_proc(proc);
+        let declared_type_summary = crate::types::declared_summary_for_proc(program, proc);
         let body = DecompiledBody::new(stmts);
 
         Ok(DecompiledProc {
@@ -485,5 +486,36 @@ impl<'a> Decompiler<'a> {
         }
 
         Ok(result)
+    }
+}
+
+/// Refine the public input arity for procedures with exact declared signatures.
+///
+/// This keeps the internal lifting depth unchanged while allowing rendered
+/// headers to hide preserved-stack scaffolding that is not part of the
+/// procedure's semantic input surface.
+fn refine_public_signature_inputs(workspace: &Workspace, signatures: &mut SignatureMap) {
+    for module in workspace.modules() {
+        let module_path = module.module_path().to_string();
+        for proc in module.procedures() {
+            let proc_path = SymbolPath::new(format!("{}::{}", module_path, proc.name()));
+            let Some(
+                signature @ ProcSignature::Known {
+                    inputs, outputs, ..
+                },
+            ) = signatures.get(&proc_path).cloned()
+            else {
+                continue;
+            };
+            let Some(declared) = crate::types::declared_summary_for_proc(module, proc) else {
+                continue;
+            };
+            let declared_inputs = declared.inputs.len();
+            let declared_outputs = declared.outputs.len();
+            if declared_outputs != outputs || declared_inputs >= inputs {
+                continue;
+            }
+            signatures.insert(proc_path, signature.with_public_inputs(declared_inputs));
+        }
     }
 }

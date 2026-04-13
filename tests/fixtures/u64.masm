@@ -569,9 +569,9 @@ end
 #! The shift value should be in the range [0, 64), otherwise it will result in an
 #! error.
 #! Stack transition looks as follows:
-#! [b, a_hi, a_lo, ...] -> [c_hi, c_lo, ...], where c = a << b mod 2^64.
+#! [b, a_hi, a_lo, ...] -> [c_hi, c_lo, ...], where c = a >>> b.
 #! This takes 44 cycles.
-pub proc rotr(b: u64, a: u64) -> u64
+pub proc rotr(b: u32, a: u64) -> u64
     push.31
     dup.1
     u32lt

@@ -96,8 +96,8 @@ fn exec_call_args_reflect_required_depth() {
     );
     assert_eq!(
         call.results.len(),
-        1,
-        "exec.helper should have 1 result, got {}",
+        3,
+        "exec.helper should expose the full semantic outputs, got {}",
         call.results.len()
     );
 }
