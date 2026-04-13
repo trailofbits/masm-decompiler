@@ -187,6 +187,11 @@ pub struct DecompiledProc {
     pub signature: Option<ProcSignature>,
     /// Inferred procedure type summary, if available.
     pub type_summary: Option<TypeSummary>,
+    /// Exact declared procedure type summary, if available.
+    ///
+    /// This preserves source-level declaration information for tooling, but it
+    /// is not used as the source of truth for rendered headers.
+    pub declared_type_summary: Option<TypeSummary>,
     /// The decompiled procedure body.
     pub body: DecompiledBody,
 }
@@ -433,6 +438,7 @@ impl<'a> Decompiler<'a> {
 
         let signature = self.signatures.get(&proc_path).cloned();
         let type_summary = self.type_summaries.get(&proc_path).cloned();
+        let declared_type_summary = crate::types::declared_summary_for_proc(proc);
         let body = DecompiledBody::new(stmts);
 
         Ok(DecompiledProc {
@@ -441,6 +447,7 @@ impl<'a> Decompiler<'a> {
             visibility: proc.visibility(),
             signature,
             type_summary,
+            declared_type_summary,
             body,
         })
     }

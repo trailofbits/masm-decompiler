@@ -5,6 +5,7 @@ use masm_decompiler::{
     fmt::FormattingConfig,
     frontend::testing::workspace_from_modules,
     ir::Stmt,
+    types::{InferredType, TypeRequirement},
 };
 
 /// Render a decompiled procedure without ANSI color codes.
@@ -332,6 +333,83 @@ fn shortens_local_call_targets_to_symbol_names() {
 
     assert!(output.contains("exec callee("), "{output}");
     assert!(!output.contains("exec entry::callee("), "{output}");
+}
+
+#[test]
+fn public_declared_headers_do_not_override_semantic_surface() {
+    let ws = workspace_from_modules(&[(
+        "typed",
+        r#"
+        pub proc eqz64(a: u64) -> i1
+            eq.0
+            swap
+            eq.0
+            and
+        end
+        "#,
+    )]);
+
+    let decompiled = Decompiler::new(&ws)
+        .decompile_proc("typed::eqz64")
+        .expect("decompilation should succeed");
+    let output = decompiled.render(FormattingConfig::new().with_color(false));
+    let first_line = output.lines().next().unwrap_or_default();
+
+    assert_eq!(first_line, "pub proc eqz64(v_0: Felt, v_1: Felt) -> Bool {");
+}
+
+#[test]
+fn public_declared_headers_keep_unsupported_small_ints_broad() {
+    let ws = workspace_from_modules(&[(
+        "typed",
+        r#"
+        pub proc inc16(a: u16) -> u16
+            push.1
+            add
+        end
+        "#,
+    )]);
+
+    let decompiled = Decompiler::new(&ws)
+        .decompile_proc("typed::inc16")
+        .expect("decompilation should succeed");
+    let output = decompiled.render(FormattingConfig::new().with_color(false));
+    let first_line = output.lines().next().unwrap_or_default();
+
+    assert_eq!(first_line, "pub proc inc16(v_0: Felt) -> Felt {");
+}
+
+#[test]
+fn declared_type_summary_preserves_declared_shape_on_arity_mismatch() {
+    let ws = workspace_from_modules(&[(
+        "typed",
+        r#"
+        pub proc declared_mismatch(a: u64) -> i1
+            push.1
+        end
+        "#,
+    )]);
+
+    let decompiled = Decompiler::new(&ws)
+        .decompile_proc("typed::declared_mismatch")
+        .expect("decompilation should succeed");
+
+    let semantic_signature = decompiled
+        .signature
+        .expect("semantic signature should exist");
+    let declared_summary = decompiled
+        .declared_type_summary
+        .expect("declared summary should preserve the source signature");
+
+    assert_eq!(
+        semantic_signature,
+        masm_decompiler::signature::ProcSignature::known(0, 1, 1)
+    );
+    assert_eq!(
+        declared_summary.inputs,
+        vec![TypeRequirement::U32, TypeRequirement::U32]
+    );
+    assert_eq!(declared_summary.outputs, vec![InferredType::Bool]);
 }
 
 #[test]

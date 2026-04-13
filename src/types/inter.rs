@@ -9,6 +9,7 @@ use crate::lift;
 use crate::signature::{ProcSignature, SignatureMap};
 use crate::symbol::resolution::create_resolver;
 
+use super::declared_summary_for_proc_with_arity;
 use super::intra::analyze_proc_types;
 use super::summary::{TypeDiagnosticsMap, TypeSummary, TypeSummaryMap};
 
@@ -63,6 +64,7 @@ fn infer_summary_for_node(
     let Some((program, proc)) = workspace.lookup_proc_entry(&proc_path) else {
         return TypeSummary::opaque_with_arity(inputs, outputs);
     };
+    let declared_summary = declared_summary_for_proc_with_arity(proc, inputs, outputs);
     let visibility = proc.visibility();
     // Use the procedure name span rather than the full body span for
     // diagnostics. MASM procedures have implicit stack arguments, so
@@ -71,7 +73,10 @@ fn infer_summary_for_node(
     let resolver = create_resolver(program.module(), workspace.source_manager());
     let stmts = match lift::lift_proc(proc, &proc_path, &resolver, signatures) {
         Ok(stmts) => stmts,
-        Err(_err) => return TypeSummary::opaque_with_arity(inputs, outputs),
+        Err(_err) => {
+            return declared_summary
+                .unwrap_or_else(|| TypeSummary::opaque_with_arity(inputs, outputs));
+        }
     };
 
     let analysis = analyze_proc_types(

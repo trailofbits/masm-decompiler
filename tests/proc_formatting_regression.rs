@@ -40,6 +40,7 @@ fn proc_with_colliding_names() -> DecompiledProc {
         visibility: Visibility::Private,
         signature: Some(ProcSignature::known(12, 0, 0)),
         type_summary: None,
+        declared_type_summary: None,
         body: DecompiledBody::new(vec![
             Stmt::Assign {
                 span: TEST_SPAN,
