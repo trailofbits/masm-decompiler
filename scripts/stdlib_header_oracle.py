@@ -35,6 +35,17 @@ class OracleError(RuntimeError):
     """Raised when the oracle cannot parse an expected or rendered header."""
 
 
+KNOWN_SOURCE_ANNOTATION_EXCLUSIONS: dict[tuple[str, str], str] = {
+    (
+        "miden::core::math::u256::eqz",
+        "pub proc eqz(rhs: u256, lhs: u256) -> i1",
+    ): (
+        "source declaration is malformed: the stack-transition docs and body "
+        "consume one u256 value, but the pub proc annotation declares two u256 inputs"
+    ),
+}
+
+
 @dataclasses.dataclass(frozen=True)
 class RawOracleCase:
     """One annotated public procedure from the stdlib before type expansion."""
@@ -70,10 +81,13 @@ class OracleResult:
     actual_outputs: tuple[str, ...] | None
     rendered_header: str | None
     error: str | None
+    excluded_reason: str | None = None
 
     @property
     def matches(self) -> bool:
         return (
+            self.excluded_reason is None
+            and
             self.error is None
             and self.actual_inputs == self.case.expected_inputs
             and self.actual_outputs == self.case.expected_outputs
@@ -349,6 +363,7 @@ def main() -> int:
         raise SystemExit("no annotated public procedures found")
 
     results: list[OracleResult] = []
+    excluded: list[OracleResult] = []
     for raw_case in raw_cases:
         try:
             case = build_oracle_case(raw_case)
@@ -371,25 +386,42 @@ def main() -> int:
                 )
             )
             continue
+        exclusion_key = (case.fq_proc_name, case.source_header)
+        if excluded_reason := KNOWN_SOURCE_ANNOTATION_EXCLUSIONS.get(exclusion_key):
+            excluded.append(
+                OracleResult(
+                    case=case,
+                    actual_inputs=None,
+                    actual_outputs=None,
+                    rendered_header=None,
+                    error=None,
+                    excluded_reason=excluded_reason,
+                )
+            )
+            continue
         results.append(run_decompiler(repo_root, stdlib_root, namespace, case))
     failures = [result for result in results if not result.matches]
 
     print(f"repo: {repo_root}")
     print(f"stdlib: {stdlib_root}")
     print(f"namespace: {namespace}")
-    print(f"annotated_cases: {len(results)}")
+    print(f"annotated_cases: {len(results) + len(excluded)}")
+    print(f"checked_cases: {len(results)}")
     print(f"matches: {len(results) - len(failures)}")
     print(f"mismatches: {len(failures)}")
+    print(f"excluded_cases: {len(excluded)}")
     print()
 
-    for result in results:
+    for result in [*results, *excluded]:
         if result.matches and not args.show_passes:
             continue
         print(f"{result.case.file_path.relative_to(stdlib_root)}::{result.case.proc_name}")
         print(f"  source:   {result.case.source_header}")
         if result.rendered_header is not None:
             print(f"  rendered: {result.rendered_header}")
-        if result.error is not None:
+        if result.excluded_reason is not None:
+            print(f"  excluded: {result.excluded_reason}")
+        elif result.error is not None:
             print(f"  error:    {result.error}")
         else:
             print(f"  expected: {result.case.expected_inputs} -> {result.case.expected_outputs}")

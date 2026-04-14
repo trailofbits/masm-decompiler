@@ -155,3 +155,109 @@ fn stdlib_header_oracle_disambiguates_duplicate_proc_names() {
 
     fs::remove_dir_all(&temp).expect("remove temporary stdlib root");
 }
+
+#[test]
+fn stdlib_header_oracle_excludes_known_bad_source_annotations() {
+    if skip_without_python3("stdlib_header_oracle_excludes_known_bad_source_annotations") {
+        return;
+    }
+
+    let temp = temp_stdlib_root("stdlib-header-oracle-excluded-annotation");
+    fs::write(
+        temp.join("miden-project.toml"),
+        "[lib]\nnamespace = \"miden::core\"\n",
+    )
+    .expect("write miden-project.toml");
+    fs::create_dir_all(temp.join("math")).expect("create math dir");
+    fs::write(
+        temp.join("math/u256.masm"),
+        r#"
+        #! Returns 1 if the top u256 value is zero; lower stack values are preserved.
+        #! Stack transition looks as follows:
+        #! [a0, a1, a2, a3, a4, a5, a6, a7, ...] -> [is_zero, ...].
+        pub proc eqz(rhs: u256, lhs: u256) -> i1
+            eq.0
+            repeat.7
+                swap
+                eq.0
+                and
+            end
+        end
+        "#,
+    )
+    .expect("write excluded annotation fixture");
+
+    let output = run_oracle(&temp);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "expected oracle success, got status {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        stdout,
+        stderr
+    );
+    assert!(stdout.contains("annotated_cases: 1"), "stdout:\n{stdout}");
+    assert!(stdout.contains("checked_cases: 0"), "stdout:\n{stdout}");
+    assert!(stdout.contains("matches: 0"), "stdout:\n{stdout}");
+    assert!(stdout.contains("mismatches: 0"), "stdout:\n{stdout}");
+    assert!(stdout.contains("excluded_cases: 1"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("source declaration is malformed"),
+        "stdout:\n{stdout}"
+    );
+
+    fs::remove_dir_all(&temp).expect("remove temporary stdlib root");
+}
+
+#[test]
+fn stdlib_header_oracle_does_not_exclude_corrected_u256_eqz_annotation() {
+    if skip_without_python3("stdlib_header_oracle_does_not_exclude_corrected_u256_eqz_annotation") {
+        return;
+    }
+
+    let temp = temp_stdlib_root("stdlib-header-oracle-corrected-u256-eqz");
+    fs::write(
+        temp.join("miden-project.toml"),
+        "[lib]\nnamespace = \"miden::core\"\n",
+    )
+    .expect("write miden-project.toml");
+    fs::create_dir_all(temp.join("math")).expect("create math dir");
+    fs::write(
+        temp.join("math/u256.masm"),
+        r#"
+        #! Returns 1 if the top u256 value is zero; lower stack values are preserved.
+        #! Stack transition looks as follows:
+        #! [a0, a1, a2, a3, a4, a5, a6, a7, ...] -> [is_zero, ...].
+        pub proc eqz(lhs: u256) -> i1
+            eq.0
+            repeat.7
+                swap
+                eq.0
+                and
+            end
+        end
+        "#,
+    )
+    .expect("write corrected annotation fixture");
+
+    let output = run_oracle(&temp);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "expected oracle mismatch, got status {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        stdout,
+        stderr
+    );
+    assert!(stdout.contains("annotated_cases: 1"), "stdout:\n{stdout}");
+    assert!(stdout.contains("checked_cases: 1"), "stdout:\n{stdout}");
+    assert!(stdout.contains("matches: 0"), "stdout:\n{stdout}");
+    assert!(stdout.contains("mismatches: 1"), "stdout:\n{stdout}");
+    assert!(stdout.contains("excluded_cases: 0"), "stdout:\n{stdout}");
+
+    fs::remove_dir_all(&temp).expect("remove temporary stdlib root");
+}
