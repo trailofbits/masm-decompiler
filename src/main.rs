@@ -20,7 +20,7 @@ struct Cli {
     /// Path to a MASM source file
     input: PathBuf,
 
-    /// Only decompile a single procedure by name
+    /// Only decompile a single procedure by name or fully-qualified path
     #[arg(long)]
     procedure: Option<String>,
 
@@ -39,6 +39,10 @@ struct Cli {
     /// Register an additional library root: <namespace>=<path>
     #[arg(long = "library", value_parser = parse_library_spec)]
     libraries: Vec<LibraryRoot>,
+
+    /// Register a trusted library root: <namespace>=<path>
+    #[arg(long = "trusted-library", value_parser = parse_trusted_library_spec)]
+    trusted_libraries: Vec<LibraryRoot>,
 
     /// Disable colored output for decompiled code
     #[arg(long)]
@@ -66,6 +70,7 @@ fn run(cli: Cli) -> Result<(), String> {
     let entry_path = normalize_cli_path(&cli.input, &cwd);
 
     let mut roots = normalize_library_roots(&cli.libraries, &cwd);
+    roots.extend(normalize_library_roots(&cli.trusted_libraries, &cwd));
     // Always include the workspace root (empty namespace).
     roots.push(LibraryRoot::new("", normalize_cli_path(&cwd, &cwd)));
 
@@ -97,18 +102,20 @@ fn run(cli: Cli) -> Result<(), String> {
         decompiler.signatures().len()
     );
 
-    let target_proc = cli.procedure.as_deref();
+    let target_proc = cli
+        .procedure
+        .as_deref()
+        .map(SymbolPath::new)
+        .map(SymbolPath::into_inner);
 
     for module in workspace.modules() {
         for proc in module.procedures() {
             let proc_name = proc.name().to_string();
-            if let Some(target) = target_proc
-                && proc_name != target
-            {
+            let fq = format!("{}::{}", module.module_path(), proc.name());
+            if !matches_procedure_filter(target_proc.as_deref(), &proc_name, &fq) {
                 continue;
             }
 
-            let fq = format!("{}::{}", module.module_path(), proc.name());
             match decompiler.decompile_proc(&fq) {
                 Ok(decompiled) => print!(
                     "{}",
@@ -122,7 +129,26 @@ fn run(cli: Cli) -> Result<(), String> {
     Ok(())
 }
 
+/// Return true when `target` is absent or matches the short or fully-qualified procedure name.
+fn matches_procedure_filter(target: Option<&str>, proc_name: &str, fq_name: &str) -> bool {
+    target.is_none_or(|target| proc_name == target || fq_name == target)
+}
+
 fn parse_library_spec(spec: &str) -> Result<LibraryRoot, String> {
+    let (ns, path) = split_library_spec(spec)?;
+    let pb = PathBuf::from(path);
+    Ok(LibraryRoot::new(ns, pb))
+}
+
+/// Parse a trusted library-root CLI argument.
+fn parse_trusted_library_spec(spec: &str) -> Result<LibraryRoot, String> {
+    let (ns, path) = split_library_spec(spec)?;
+    let pb = PathBuf::from(path);
+    Ok(LibraryRoot::trusted_stdlib(ns, pb))
+}
+
+/// Split and validate a library-root CLI argument.
+fn split_library_spec(spec: &str) -> Result<(&str, &str), String> {
     let (ns, path) = spec
         .split_once('=')
         .ok_or_else(|| "library spec must be <namespace>=<path>".to_string())?;
@@ -132,8 +158,7 @@ fn parse_library_spec(spec: &str) -> Result<LibraryRoot, String> {
     if path.is_empty() {
         return Err("library path cannot be empty".to_string());
     }
-    let pb = PathBuf::from(path);
-    Ok(LibraryRoot::new(ns, pb))
+    Ok((ns, path))
 }
 
 /// Normalize a CLI path for stable path matching.
@@ -153,7 +178,14 @@ fn normalize_cli_path(path: &Path, cwd: &Path) -> PathBuf {
 fn normalize_library_roots(roots: &[LibraryRoot], cwd: &Path) -> Vec<LibraryRoot> {
     roots
         .iter()
-        .map(|root| LibraryRoot::new(&root.namespace, normalize_cli_path(&root.path, cwd)))
+        .map(|root| {
+            let normalized_path = normalize_cli_path(&root.path, cwd);
+            if root.trusted_stdlib {
+                LibraryRoot::trusted_stdlib(&root.namespace, normalized_path)
+            } else {
+                LibraryRoot::new(&root.namespace, normalized_path)
+            }
+        })
         .collect()
 }
 
@@ -235,6 +267,17 @@ mod tests {
         let root = parse_library_spec("miden::core=../path/to/miden/core").expect("library root");
         assert_eq!(root.namespace, "miden::core");
         assert_eq!(root.path, PathBuf::from("../path/to/miden/core"));
+        assert!(!root.trusted_stdlib);
+    }
+
+    /// Ensure trusted library specs carry the explicit trust bit.
+    #[test]
+    fn parse_trusted_library_spec_sets_trust_bit() {
+        let root = parse_trusted_library_spec("miden::core=../path/to/miden/core")
+            .expect("trusted library root");
+        assert_eq!(root.namespace, "miden::core");
+        assert_eq!(root.path, PathBuf::from("../path/to/miden/core"));
+        assert!(root.trusted_stdlib);
     }
 
     /// Ensure legacy `:` separators are rejected because they are ambiguous with `::`.
@@ -258,5 +301,37 @@ mod tests {
             configured_namespace_for_module(&module, &roots),
             Some("miden::core")
         );
+    }
+
+    /// Ensure procedure filters normalize leading absolute path separators.
+    #[test]
+    fn procedure_filter_normalizes_leading_separators() {
+        let target = SymbolPath::new("::miden::core::math::u64::overflowing_add").into_inner();
+
+        assert!(matches_procedure_filter(
+            Some(target.as_str()),
+            "overflowing_add",
+            "miden::core::math::u64::overflowing_add"
+        ));
+    }
+
+    /// Ensure short names still match when a fully-qualified target is absent.
+    #[test]
+    fn procedure_filter_matches_short_names() {
+        assert!(matches_procedure_filter(
+            Some("overflowing_add"),
+            "overflowing_add",
+            "miden::core::math::u64::overflowing_add"
+        ));
+    }
+
+    /// Ensure non-matching targets are rejected.
+    #[test]
+    fn procedure_filter_rejects_other_procedures() {
+        assert!(!matches_procedure_filter(
+            Some("miden::core::math::u64::wrapping_add"),
+            "overflowing_add",
+            "miden::core::math::u64::overflowing_add"
+        ));
     }
 }

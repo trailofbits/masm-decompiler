@@ -32,14 +32,19 @@ use crate::symbol::path::SymbolPath;
 ///         Required depth                          Net effect < 0
 ///
 /// When the procedure exits, the number of inputs are given by the required
-/// depth. The number of outputs are determined to be the difference between the
-/// current depth (i.e. the depth on exit) and the depth of the first local
-/// value.
+/// depth. The number of outputs are determined by the full final stack shape,
+/// including any preserved inputs that remain semantically visible to callers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcSignature {
     Known {
         /// The number of inputs to the procedure
         inputs: usize,
+        /// The number of public inputs rendered in the decompiled header.
+        ///
+        /// This may be smaller than `inputs` when lifting requires hidden
+        /// preserved-stack scaffolding that should not be exposed as part of
+        /// the procedure's public semantic surface.
+        public_inputs: usize,
         /// The number of outputs from the procedure
         outputs: usize,
         /// Net stack effect of the procedure
@@ -52,6 +57,7 @@ impl ProcSignature {
     pub fn known(inputs: usize, outputs: usize, net_effect: isize) -> Self {
         ProcSignature::Known {
             inputs,
+            public_inputs: inputs,
             outputs,
             net_effect,
         }
@@ -59,6 +65,24 @@ impl ProcSignature {
 
     pub fn unknown() -> Self {
         ProcSignature::Unknown
+    }
+
+    /// Return a copy with a refined public input arity.
+    pub fn with_public_inputs(self, public_inputs: usize) -> Self {
+        match self {
+            ProcSignature::Known {
+                inputs,
+                outputs,
+                net_effect,
+                ..
+            } => ProcSignature::Known {
+                inputs,
+                public_inputs,
+                outputs,
+                net_effect,
+            },
+            ProcSignature::Unknown => ProcSignature::Unknown,
+        }
     }
 }
 
@@ -79,6 +103,7 @@ impl From<&ProcSignature> for StackEffect {
                 inputs,
                 outputs,
                 net_effect,
+                ..
             } => {
                 assert!(net_effect <= (outputs as isize));
                 StackEffect::Known {
@@ -96,6 +121,7 @@ impl From<&ProvenanceStack> for ProcSignature {
     fn from(stack: &ProvenanceStack) -> Self {
         ProcSignature::Known {
             inputs: stack.inputs(),
+            public_inputs: stack.inputs(),
             outputs: stack.outputs(),
             net_effect: stack.net_effect(),
         }
@@ -130,7 +156,7 @@ pub type SignatureMap = HashMap<SymbolPath, ProcSignature>;
 ///
 /// Required depth tracks the required stack depth compared to the depth at
 /// procedure entry. This is the number of inputs to the procedure. The number
-/// of outputs is given by the number of local values on the stack on exit.
+/// of outputs is given by the full stack height on exit.
 ///
 /// If the procedure contains branches with different stack effects, non-neutral
 /// while loops, or calls to procedures with unknown stack effects, the analysis
@@ -184,13 +210,7 @@ impl ProvenanceStack {
 
     /// Returns the number of outputs from the procedure.
     pub fn outputs(&self) -> usize {
-        let remaining_inputs = self
-            .stack
-            .iter()
-            .position(|value| matches!(value, Provenance::Local))
-            .unwrap_or(self.stack.len());
-        // This cannot underflow.
-        self.stack.len() - remaining_inputs
+        self.stack.len()
     }
 
     /// Returns the net stack effect of the procedure on exit.

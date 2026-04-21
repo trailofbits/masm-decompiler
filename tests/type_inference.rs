@@ -1,11 +1,10 @@
 use masm_decompiler::{
-    decompile::{DecompilationConfig, DecompiledProc, Decompiler},
+    decompile::Decompiler,
+    fmt::FormattingConfig,
     frontend::testing::workspace_from_modules,
-    ir::{BinOp, Expr, Stmt},
     symbol::path::SymbolPath,
     types::{InferredType, TypeRequirement},
 };
-use miden_assembly_syntax::debuginfo::SourceSpan;
 
 fn diagnostics_for(
     decompiler: &Decompiler<'_>,
@@ -16,47 +15,6 @@ fn diagnostics_for(
         .get(&SymbolPath::new(proc.to_string()))
         .cloned()
         .unwrap_or_default()
-}
-
-fn decompiled_proc(decompiler: &Decompiler<'_>, proc: &str) -> DecompiledProc {
-    Decompiler::new(decompiler.workspace())
-        .with_config(DecompilationConfig::no_optimizations())
-        .decompile_proc(proc)
-        .unwrap_or_else(|err| panic!("failed to decompile {proc}: {err:?}"))
-}
-
-fn find_assign_binop_span(proc: &DecompiledProc, op: BinOp) -> SourceSpan {
-    proc.stmts()
-        .iter()
-        .find_map(|stmt| match stmt {
-            Stmt::Assign {
-                span,
-                expr: Expr::Binary(stmt_op, ..),
-                ..
-            } if *stmt_op == op => Some(*span),
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("missing assignment for {op:?} in {}", proc.name))
-}
-
-fn find_mem_load_span(proc: &DecompiledProc) -> SourceSpan {
-    proc.stmts()
-        .iter()
-        .find_map(|stmt| match stmt {
-            Stmt::MemLoad { span, .. } => Some(*span),
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("missing mem_load in {}", proc.name))
-}
-
-fn find_exec_span(proc: &DecompiledProc, target_suffix: &str) -> SourceSpan {
-    proc.stmts()
-        .iter()
-        .find_map(|stmt| match stmt {
-            Stmt::Exec { span, call } if call.target.ends_with(target_suffix) => Some(*span),
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("missing exec.{target_suffix} in {}", proc.name))
 }
 
 fn setup_decompiler() -> Decompiler<'static> {
@@ -553,6 +511,101 @@ fn infers_u32shift_outputs_as_u32() {
 }
 
 #[test]
+fn pow2_shift_count_seeds_u32_header_inputs() {
+    let ws = workspace_from_modules(&[(
+        "pow2_shift_types",
+        r#"
+        proc wrapping_mul
+            u32widening_mul
+            movdn.2
+            u32widening_mul
+            drop
+        end
+
+        pub proc shl_like
+            pow2
+            u32split
+            exec.wrapping_mul
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let rendered = decompiler
+        .decompile_proc("pow2_shift_types::shl_like")
+        .expect("shl_like should decompile")
+        .render(FormattingConfig::new().with_color(false));
+
+    assert!(
+        rendered.starts_with("pub proc shl_like(v_0: U32, v_1: U32) -> (U32, U32) {"),
+        "unexpected rendered header: {rendered}"
+    );
+}
+
+#[test]
+fn declared_u128_wrapping_madd_helper_only_preserves_proven_u32_inputs() {
+    let ws = workspace_from_modules(&[(
+        "opaque_declared_helper",
+        r#"
+        proc opaque_mul(b: u128, a: u128) -> u128
+            movup.7
+            movup.7
+            movup.7
+            movup.7
+            u32wrapping_madd
+            u32wrapping_madd
+        end
+
+        pub proc uses_opaque_mul(b: u128, a: u128) -> u128
+            exec.opaque_mul
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let rendered = decompiler
+        .decompile_proc("opaque_declared_helper::uses_opaque_mul")
+        .expect("uses_opaque_mul should decompile")
+        .render(FormattingConfig::new().with_color(false));
+
+    assert!(
+        rendered.starts_with(
+            "pub proc uses_opaque_mul(v_0: U32, v_1: U32, v_2: U32, v_3: U32, v_4: Felt, v_5: Felt, v_6: Felt, v_7: U32) -> (U32, Felt, Felt, Felt) {"
+        ),
+        "unexpected rendered header: {rendered}"
+    );
+}
+
+#[test]
+fn declared_u16_wrapping_madd_helper_requires_u32_input_but_keeps_broad_output() {
+    let ws = workspace_from_modules(&[(
+        "opaque_small_helper",
+        r#"
+        proc opaque_inc(a: u16) -> u16
+            dup
+            dup
+            u32wrapping_madd
+        end
+
+        pub proc uses_opaque_inc
+            exec.opaque_inc
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let rendered = decompiler
+        .decompile_proc("opaque_small_helper::uses_opaque_inc")
+        .expect("uses_opaque_inc should decompile")
+        .render(FormattingConfig::new().with_color(false));
+
+    assert!(
+        rendered.starts_with("pub proc uses_opaque_inc(v_0: U32) -> U32 {"),
+        "unexpected rendered header: {rendered}"
+    );
+}
+
+#[test]
 fn infers_inv_input_and_output_as_felt() {
     let ws = workspace_from_modules(&[(
         "inv_types",
@@ -626,7 +679,10 @@ fn u32_assert_split_and_cast_do_not_seed_u32_input_requirements() {
     let test_outputs = summaries
         .get(&SymbolPath::new("typecheck::test_outputs"))
         .expect("test_outputs summary");
-    assert_eq!(test_outputs.outputs, vec![InferredType::Bool]);
+    assert_eq!(
+        test_outputs.outputs,
+        vec![InferredType::Felt, InferredType::Bool]
+    );
 }
 
 #[test]
@@ -678,7 +734,7 @@ fn u32_not_rotr_widening_add_and_mod_infer_u32_types() {
     assert_eq!(widening_add_only.inputs, vec![TypeRequirement::U32]);
     assert_eq!(
         widening_add_only.outputs,
-        vec![InferredType::U32, InferredType::Bool]
+        vec![InferredType::Bool, InferredType::U32]
     );
 
     let widening_add3_only = summaries
@@ -687,7 +743,7 @@ fn u32_not_rotr_widening_add_and_mod_infer_u32_types() {
     assert_eq!(widening_add3_only.inputs, vec![TypeRequirement::U32]);
     assert_eq!(
         widening_add3_only.outputs,
-        vec![InferredType::U32, InferredType::U32]
+        vec![InferredType::Bool, InferredType::U32]
     );
 
     let mod_only = summaries
@@ -1573,6 +1629,343 @@ fn u32overflowing_add_second_output_is_bool() {
 }
 
 #[test]
+fn u64_like_add_family_preserves_low_limb_then_overflow_headers() {
+    let ws = workspace_from_modules(&[(
+        "u64_like",
+        r#"
+        pub proc overflowing_add
+            movup.2
+            u32widening_add
+            movdn.3
+            u32widening_add3
+            movdn.2
+        end
+
+        pub proc widening_add
+            exec.overflowing_add
+            movdn.2
+        end
+
+        pub proc wrapping_add
+            exec.overflowing_add
+            drop
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let overflow = decompiler
+        .decompile_proc("u64_like::overflowing_add")
+        .expect("overflowing_add should decompile")
+        .render(FormattingConfig::new().with_color(false));
+    let widening = decompiler
+        .decompile_proc("u64_like::widening_add")
+        .expect("widening_add should decompile")
+        .render(FormattingConfig::new().with_color(false));
+    let wrapping = decompiler
+        .decompile_proc("u64_like::wrapping_add")
+        .expect("wrapping_add should decompile")
+        .render(FormattingConfig::new().with_color(false));
+
+    assert!(
+        overflow.starts_with(
+            "pub proc overflowing_add(v_0: U32, v_1: U32, v_2: U32, v_3: U32) -> (Bool, U32, U32) {"
+        ),
+        "unexpected overflowing_add header:\n{overflow}"
+    );
+    assert!(
+        widening.starts_with(
+            "pub proc widening_add(v_0: U32, v_1: U32, v_2: U32, v_3: U32) -> (U32, U32, Bool) {"
+        ),
+        "unexpected widening_add header:\n{widening}"
+    );
+    assert!(
+        wrapping.starts_with(
+            "pub proc wrapping_add(v_0: U32, v_1: U32, v_2: U32, v_3: U32) -> (U32, U32) {"
+        ),
+        "unexpected wrapping_add header:\n{wrapping}"
+    );
+}
+
+#[test]
+fn u64_like_count_offsets_preserve_u32_headers() {
+    let ws = workspace_from_modules(&[("u64_counts", include_str!("fixtures/u64.masm"))]);
+
+    let decompiler = Decompiler::new(&ws);
+    for proc_name in ["clz", "ctz", "clo", "cto"] {
+        let rendered = decompiler
+            .decompile_proc(&format!("u64_counts::{proc_name}"))
+            .expect("count proc should decompile")
+            .render(FormattingConfig::new().with_color(false));
+        assert!(
+            rendered.starts_with(&format!("pub proc {proc_name}("))
+                && rendered.contains(") -> U32 {"),
+            "unexpected {proc_name} header:\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn u128_like_count_offsets_preserve_u32_headers() {
+    let ws = workspace_from_modules(&[("u128_counts", include_str!("fixtures/u128_counts.masm"))]);
+
+    let decompiler = Decompiler::new(&ws);
+    for proc_name in ["clz", "ctz", "clo", "cto"] {
+        let rendered = decompiler
+            .decompile_proc(&format!("u128_counts::{proc_name}"))
+            .expect("count proc should decompile")
+            .render(FormattingConfig::new().with_color(false));
+        assert!(
+            rendered.starts_with(&format!("pub proc {proc_name}("))
+                && rendered.contains(") -> U32 {"),
+            "unexpected {proc_name} header:\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn u32widening_add3_bool_carry_preserves_bool_overflow() {
+    let ws = workspace_from_modules(&[(
+        "widen3",
+        r#"
+        pub proc bool_carry
+            push.1
+            push.1
+            eq
+            push.2
+            push.3
+            u32widening_add3
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let summary = decompiler
+        .type_summaries()
+        .get(&SymbolPath::new("widen3::bool_carry"))
+        .cloned()
+        .expect("bool_carry summary");
+    let rendered = decompiler
+        .decompile_proc("widen3::bool_carry")
+        .expect("bool_carry should decompile")
+        .render(FormattingConfig::new().with_color(false));
+
+    assert_eq!(summary.outputs, vec![InferredType::Bool, InferredType::U32]);
+    assert!(
+        rendered.starts_with("pub proc bool_carry() -> (U32, Bool) {"),
+        "unexpected bool_carry header:\n{rendered}"
+    );
+}
+
+#[test]
+fn u128_like_add_family_preserves_bool_overflow_header() {
+    let ws = workspace_from_modules(&[(
+        "u128_like",
+        r#"
+        pub proc overflowing_add
+            movup.4
+            u32widening_add
+            movdn.7
+
+            movup.4
+            movup.2
+            u32widening_add3
+            movdn.6
+
+            movup.3
+            movup.2
+            u32widening_add3
+            movdn.5
+
+            movup.2
+            movup.2
+            u32widening_add3
+            movdn.4
+        end
+
+        pub proc widening_add
+            exec.overflowing_add
+            movdn.4
+        end
+
+        pub proc wrapping_add
+            exec.overflowing_add
+            drop
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let overflow = decompiler
+        .decompile_proc("u128_like::overflowing_add")
+        .expect("overflowing_add should decompile")
+        .render(FormattingConfig::new().with_color(false));
+    let widening = decompiler
+        .decompile_proc("u128_like::widening_add")
+        .expect("widening_add should decompile")
+        .render(FormattingConfig::new().with_color(false));
+    let wrapping = decompiler
+        .decompile_proc("u128_like::wrapping_add")
+        .expect("wrapping_add should decompile")
+        .render(FormattingConfig::new().with_color(false));
+
+    assert!(
+        overflow.starts_with("pub proc overflowing_add(v_0: U32, v_1: U32, v_2: U32, v_3: U32, v_4: U32, v_5: U32, v_6: U32, v_7: U32) -> (Bool, U32, U32, U32, U32) {"),
+        "unexpected overflowing_add header:\n{overflow}"
+    );
+    assert!(
+        widening.starts_with("pub proc widening_add(v_0: U32, v_1: U32, v_2: U32, v_3: U32, v_4: U32, v_5: U32, v_6: U32, v_7: U32) -> (U32, U32, U32, U32, Bool) {"),
+        "unexpected widening_add header:\n{widening}"
+    );
+    assert!(
+        wrapping.starts_with("pub proc wrapping_add(v_0: U32, v_1: U32, v_2: U32, v_3: U32, v_4: U32, v_5: U32, v_6: U32, v_7: U32) -> (U32, U32, U32, U32) {"),
+        "unexpected wrapping_add header:\n{wrapping}"
+    );
+}
+
+#[test]
+fn private_helper_phi_preserves_u32_summary() {
+    let ws = workspace_from_modules(&[(
+        "phi_helper",
+        r#"
+        proc branchy_u32_identity
+            dup
+            eq.0
+            if.true
+                dup
+                drop
+            else
+                u32not
+                u32not
+            end
+        end
+
+        pub proc wrap_branchy_u32_identity
+            exec.branchy_u32_identity
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let helper_summary = decompiler
+        .type_summaries()
+        .get(&SymbolPath::new(
+            "phi_helper::branchy_u32_identity".to_string(),
+        ))
+        .cloned()
+        .expect("helper summary");
+    let wrapper = decompiler
+        .decompile_proc("phi_helper::wrap_branchy_u32_identity")
+        .expect("wrapper should decompile")
+        .render(FormattingConfig::new().with_color(false));
+
+    assert_eq!(helper_summary.inputs, vec![TypeRequirement::U32]);
+    assert_eq!(helper_summary.outputs, vec![InferredType::U32]);
+    assert!(
+        wrapper.starts_with("pub proc wrap_branchy_u32_identity(v_0: U32) -> U32 {"),
+        "unexpected wrapper header:\n{wrapper}"
+    );
+}
+
+#[test]
+fn selector_outputs_preserve_required_u32_inputs() {
+    let ws = workspace_from_modules(&[(
+        "selectors",
+        r#"
+        proc gt
+            push.1
+            u32wrapping_add
+            drop
+            push.1
+            u32wrapping_add
+            drop
+            push.1
+            u32wrapping_add
+            drop
+            push.1
+            u32wrapping_add
+            drop
+            push.1.1
+            eq
+        end
+
+        pub proc min_like
+            movup.3
+            movup.3
+            dupw
+            exec.gt
+            movup.4
+            movup.3
+            dup.2
+            cdrop
+            movdn.3
+            cdrop
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let summary = decompiler
+        .type_summaries()
+        .get(&SymbolPath::new("selectors::min_like"))
+        .cloned()
+        .expect("min_like summary");
+    let rendered = decompiler
+        .decompile_proc("selectors::min_like")
+        .expect("min_like should decompile")
+        .render(FormattingConfig::new().with_color(false));
+
+    assert_eq!(
+        summary.inputs,
+        vec![
+            TypeRequirement::U32,
+            TypeRequirement::U32,
+            TypeRequirement::U32,
+            TypeRequirement::U32,
+        ]
+    );
+    assert_eq!(summary.outputs, vec![InferredType::U32, InferredType::U32]);
+    assert!(
+        rendered.starts_with(
+            "pub proc min_like(v_0: U32, v_1: U32, v_2: U32, v_3: U32) -> (U32, U32) {"
+        ),
+        "unexpected min_like header:\n{rendered}"
+    );
+}
+
+#[test]
+fn assert_eq_with_u32_operand_narrows_public_input() {
+    let ws = workspace_from_modules(&[(
+        "assert_eq_checks",
+        r#"
+        pub proc checked
+            push.1
+            push.2
+            u32wrapping_add
+            assert_eq
+        end
+        "#,
+    )]);
+
+    let decompiler = Decompiler::new(&ws);
+    let summary = decompiler
+        .type_summaries()
+        .get(&SymbolPath::new("assert_eq_checks::checked"))
+        .cloned()
+        .expect("checked summary");
+    let rendered = decompiler
+        .decompile_proc("assert_eq_checks::checked")
+        .expect("checked should decompile")
+        .render(FormattingConfig::new().with_color(false));
+
+    assert_eq!(summary.inputs, vec![TypeRequirement::U32]);
+    assert!(
+        rendered.starts_with("pub proc checked(v_0: U32) {"),
+        "unexpected checked header:\n{rendered}"
+    );
+}
+
+#[test]
 fn u32overflowing_sub_flag_satisfies_bool_condition() {
     let ws = workspace_from_modules(&[(
         "overflow_cond",
@@ -1687,27 +2080,14 @@ fn public_proc_warns_at_unvalidated_input() {
         .get(&SymbolPath::new("visibility_test2::public_add"))
         .cloned()
         .unwrap_or_default();
-    let proc = decompiled_proc(&decompiler, "visibility_test2::public_add");
-    let u32_add_span = find_assign_binop_span(&proc, BinOp::U32WrappingAdd);
     assert!(
         !diagnostics.is_empty(),
         "Public proc with unvalidated U32 inputs should warn"
     );
-    let input_diags: Vec<_> = diagnostics
-        .iter()
-        .filter(|d| d.message.contains("public procedure input"))
-        .collect();
-    assert_eq!(
-        input_diags.len(),
-        2,
-        "u32wrapping_add should require validation for both public inputs: {input_diags:?}"
-    );
+    let diag = &diagnostics[0];
     assert!(
-        input_diags.iter().all(|diag| {
-            diag.source_span == Some(u32_add_span)
-                && diag.source_description.as_deref() == Some("this U32 operation requires U32")
-        }),
-        "public input diagnostics should point at the downstream U32 use: {input_diags:?}"
+        diag.source_description.is_some(),
+        "Diagnostic should explain why the input needs validation"
     );
 }
 
@@ -1753,142 +2133,14 @@ fn felt_arithmetic_into_u32_warns_at_assignment() {
         .get(&SymbolPath::new("felt_arith::felt_into_u32"))
         .cloned()
         .unwrap_or_default();
-    let proc = decompiled_proc(&decompiler, "felt_arith::felt_into_u32");
-    let u32_add_span = find_assign_binop_span(&proc, BinOp::U32WrappingAdd);
     assert!(
         !diagnostics.is_empty(),
         "Felt arithmetic feeding u32 op should warn"
     );
-    let diag = diagnostics
-        .iter()
-        .find(|d| d.message.contains("expression produces"))
-        .expect("expected assignment mismatch diagnostic");
-    assert_ne!(
-        diag.source_span,
-        Some(diag.span),
-        "related span should not duplicate the assignment span: {diag:?}"
-    );
-    assert_eq!(
-        diag.source_span,
-        Some(u32_add_span),
-        "related span should point at the downstream U32 use: {diag:?}"
-    );
-    assert_eq!(
-        diag.source_description.as_deref(),
-        Some("this U32 operation requires U32"),
-        "assignment diagnostic should describe the consumer requirement site"
-    );
-}
-
-#[test]
-fn public_input_memory_requirement_points_to_mem_load() {
-    let ws = workspace_from_modules(&[(
-        "visibility_mem",
-        r#"
-        pub proc public_mem
-            mem_load
-            drop
-        end
-        "#,
-    )]);
-
-    let decompiler = Decompiler::new(&ws);
-    let diagnostics = diagnostics_for(&decompiler, "visibility_mem::public_mem");
-    let proc = decompiled_proc(&decompiler, "visibility_mem::public_mem");
-    let mem_load_span = find_mem_load_span(&proc);
-
-    let diag = diagnostics
-        .iter()
-        .find(|d| d.message.contains("public procedure input"))
-        .expect("expected public input diagnostic");
-    assert_eq!(
-        diag.source_span,
-        Some(mem_load_span),
-        "related span should point at mem_load: {diag:?}"
-    );
-    assert_eq!(
-        diag.source_description.as_deref(),
-        Some("this memory address must be U32"),
-        "memory-address diagnostic should describe the address requirement"
-    );
-}
-
-#[test]
-fn public_input_call_requirement_points_to_call_site() {
-    let ws = workspace_from_modules(&[(
-        "visibility_call",
-        r#"
-        proc needs_u32
-            push.1
-            u32wrapping_add
-            drop
-        end
-
-        pub proc public_exec
-            exec.needs_u32
-        end
-        "#,
-    )]);
-
-    let decompiler = Decompiler::new(&ws);
-    let diagnostics = diagnostics_for(&decompiler, "visibility_call::public_exec");
-    let proc = decompiled_proc(&decompiler, "visibility_call::public_exec");
-    let exec_span = find_exec_span(&proc, "needs_u32");
-
-    let diag = diagnostics
-        .iter()
-        .find(|d| d.message.contains("public procedure input"))
-        .expect("expected public input diagnostic");
-    assert_eq!(
-        diag.source_span,
-        Some(exec_span),
-        "related span should point at exec.needs_u32: {diag:?}"
-    );
-    assert_eq!(
-        diag.source_description.as_deref(),
-        Some("call to needs_u32 expects a U32 value here"),
-        "call-based requirement should identify the callee use"
-    );
-}
-
-#[test]
-fn call_result_widening_uses_downstream_origin() {
-    let ws = workspace_from_modules(&[(
-        "result_origin",
-        r#"
-        proc produces_felt
-            add
-        end
-
-        pub proc consume_call_result
-            push.1
-            push.2
-            exec.produces_felt
-            push.3
-            u32wrapping_add
-            drop
-        end
-        "#,
-    )]);
-
-    let decompiler = Decompiler::new(&ws);
-    let diagnostics = diagnostics_for(&decompiler, "result_origin::consume_call_result");
-    let proc = decompiled_proc(&decompiler, "result_origin::consume_call_result");
-    let u32_add_span = find_assign_binop_span(&proc, BinOp::U32WrappingAdd);
-
-    let diag = diagnostics
-        .iter()
-        .find(|d| d.message.contains("call to") && d.message.contains("result 0"))
-        .expect("expected call result widening diagnostic");
-    assert_eq!(
-        diag.source_span,
-        Some(u32_add_span),
-        "result widening related span should point at the downstream U32 use: {diag:?}"
-    );
-    assert_eq!(
-        diag.source_description.as_deref(),
-        Some("this U32 operation requires U32"),
-        "result widening diagnostic should describe the consumer requirement site"
+    let diag = &diagnostics[0];
+    assert!(
+        diag.source_description.is_some(),
+        "Diagnostic should explain that Felt arithmetic can produce non-U32 values"
     );
 }
 

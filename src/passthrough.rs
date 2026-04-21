@@ -306,11 +306,10 @@ mod tests {
         // proc foo: takes 1 input, duplicates it, then adds 1 to the copy.
         // Stack: [x] -> [x, x] -> [x, x, 1] -> [x, x+1]
         // The top of the stack is computed (x+1), the bottom is the original
-        // input (passthrough). Signature: 1 input, 1 output.
+        // input (passthrough). Signature: 1 input, 2 outputs.
         let source = "proc foo\n  dup.0\n  push.1\n  add\nend\n";
         let map = passthrough_map_for(source, "foo");
-        // The single output (the computed value on top) should be None.
-        assert_eq!(map, vec![None]);
+        assert_eq!(map, vec![Some(0), None]);
     }
 
     #[test]

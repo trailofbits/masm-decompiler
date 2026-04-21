@@ -137,23 +137,21 @@ pub fn assign_var_names(stmts: &[Stmt]) -> HashMap<Var, String> {
 
     let mut names = HashMap::new();
     let mut name_counts = HashMap::new();
-
-    for name in alias_names.values() {
-        name_counts.entry(name.clone()).or_insert(1);
-    }
+    let mut used_names = HashSet::new();
     for (var, name) in alias_names {
+        used_names.insert(name.clone());
         names.insert(var, name);
     }
 
     for var in usage.vars_in_order.iter() {
         if is_reserved_var(var, &input_ids) {
-            assign_name_for_var(var, &mut names, &mut name_counts);
+            assign_name_for_var(var, &mut names, &mut name_counts, &mut used_names);
         }
     }
 
     for var in usage.vars_in_order.iter() {
         if !names.contains_key(var) {
-            assign_name_for_var(var, &mut names, &mut name_counts);
+            assign_name_for_var(var, &mut names, &mut name_counts, &mut used_names);
         }
     }
 
@@ -335,18 +333,25 @@ fn assign_name_for_var(
     var: &Var,
     names: &mut HashMap<Var, String>,
     name_counts: &mut HashMap<String, usize>,
+    used_names: &mut HashSet<String>,
 ) {
     if names.contains_key(var) {
         return;
     }
     let base = base_name_for_var(var);
-    let count = name_counts.entry(base.clone()).or_insert(0);
-    let name = if *count == 0 {
-        base.clone()
-    } else {
-        format!("{base}_{}", *count)
+    let next = name_counts.entry(base.clone()).or_insert(0);
+    let name = loop {
+        let candidate = if *next == 0 {
+            base.clone()
+        } else {
+            format!("{base}_{}", *next)
+        };
+        if used_names.insert(candidate.clone()) {
+            break candidate;
+        }
+        *next += 1;
     };
-    *count += 1;
+    *next += 1;
     names.insert(var.clone(), name);
 }
 
@@ -399,37 +404,133 @@ fn format_index_expr_for_name(expr: &IndexExpr) -> String {
 }
 
 fn collect_phi_alias_names(stmts: &[Stmt]) -> HashMap<Var, String> {
-    let mut aliases = HashMap::new();
+    let mut aliases = PhiAliasClasses::default();
     for stmt in stmts {
         collect_phi_alias_names_stmt(stmt, &mut aliases);
     }
-    aliases
+    aliases.into_alias_names()
 }
 
-fn collect_phi_alias_names_stmt(stmt: &Stmt, aliases: &mut HashMap<Var, String>) {
+#[derive(Debug, Default)]
+struct PhiAliasClasses {
+    parents: HashMap<Var, Var>,
+    preferred_names: HashMap<Var, String>,
+}
+
+impl PhiAliasClasses {
+    fn ensure_var(&mut self, var: &Var) {
+        self.parents
+            .entry(var.clone())
+            .or_insert_with(|| var.clone());
+        self.preferred_names
+            .entry(var.clone())
+            .or_insert_with(|| base_name_for_var(var));
+    }
+
+    fn find(&mut self, var: &Var) -> Var {
+        self.ensure_var(var);
+        let parent = self
+            .parents
+            .get(var)
+            .cloned()
+            .expect("phi alias parent should exist");
+        if parent == *var {
+            return parent;
+        }
+        let root = self.find(&parent);
+        self.parents.insert(var.clone(), root.clone());
+        root
+    }
+
+    fn union_with_preferred(&mut self, preferred_base: &str, vars: &[&Var]) {
+        if vars.is_empty() {
+            return;
+        }
+
+        let mut roots = Vec::with_capacity(vars.len());
+        for var in vars {
+            roots.push(self.find(var));
+        }
+        roots.sort();
+        roots.dedup();
+
+        let canonical_name = roots
+            .iter()
+            .filter_map(|root| self.preferred_names.get(root))
+            .cloned()
+            .chain(std::iter::once(preferred_base.to_string()))
+            .min()
+            .expect("phi alias group should have at least one name");
+        let canonical_root = roots[0].clone();
+
+        for root in roots.into_iter().skip(1) {
+            self.parents.insert(root.clone(), canonical_root.clone());
+            self.preferred_names.remove(&root);
+        }
+        self.preferred_names.insert(canonical_root, canonical_name);
+    }
+
+    fn into_alias_names(mut self) -> HashMap<Var, String> {
+        let vars: Vec<Var> = self.parents.keys().cloned().collect();
+        let mut groups: HashMap<Var, Vec<Var>> = HashMap::new();
+        for var in vars {
+            let root = self.find(&var);
+            groups.entry(root).or_default().push(var);
+        }
+
+        let mut roots = groups.keys().cloned().collect::<Vec<_>>();
+        roots.sort();
+
+        let mut aliases = HashMap::new();
+        let mut name_counts = HashMap::new();
+        for root in roots {
+            let base = self
+                .preferred_names
+                .get(&root)
+                .cloned()
+                .unwrap_or_else(|| base_name_for_var(&root));
+            let count = name_counts.entry(base.clone()).or_insert(0);
+            let alias = if *count == 0 {
+                base.clone()
+            } else {
+                format!("{base}_{count}")
+            };
+            *count += 1;
+
+            let mut group = groups
+                .remove(&root)
+                .expect("phi alias group should exist for root");
+            group.sort();
+            for var in group {
+                aliases.insert(var, alias.clone());
+            }
+        }
+
+        aliases
+    }
+}
+
+fn collect_phi_alias_names_stmt(stmt: &Stmt, aliases: &mut PhiAliasClasses) {
     match stmt {
         Stmt::Repeat { body, phis, .. } => {
             for phi in phis {
                 let base = base_name_for_var(&phi.init);
-                aliases
-                    .entry(phi.init.clone())
-                    .or_insert_with(|| base.clone());
-                aliases
-                    .entry(phi.dest.clone())
-                    .or_insert_with(|| base.clone());
-                aliases
-                    .entry(phi.step.clone())
-                    .or_insert_with(|| base.clone());
+                aliases.union_with_preferred(&base, &[&phi.init, &phi.dest, &phi.step]);
             }
             for stmt in body {
                 collect_phi_alias_names_stmt(stmt, aliases);
             }
         }
         Stmt::If {
+            phis,
             then_body,
             else_body,
             ..
         } => {
+            for phi in phis {
+                let base = base_name_for_var(&phi.dest);
+                aliases.union_with_preferred(&base, &[&phi.then_var, &phi.dest, &phi.else_var]);
+            }
             for stmt in then_body {
                 collect_phi_alias_names_stmt(stmt, aliases);
             }
@@ -440,15 +541,7 @@ fn collect_phi_alias_names_stmt(stmt: &Stmt, aliases: &mut HashMap<Var, String>)
         Stmt::While { body, phis, .. } => {
             for phi in phis {
                 let base = base_name_for_var(&phi.init);
-                aliases
-                    .entry(phi.init.clone())
-                    .or_insert_with(|| base.clone());
-                aliases
-                    .entry(phi.dest.clone())
-                    .or_insert_with(|| base.clone());
-                aliases
-                    .entry(phi.step.clone())
-                    .or_insert_with(|| base.clone());
+                aliases.union_with_preferred(&base, &[&phi.init, &phi.dest, &phi.step]);
             }
             for stmt in body {
                 collect_phi_alias_names_stmt(stmt, aliases);
@@ -1312,5 +1405,168 @@ fn write_call_like(kind: &str, call: &Call, f: &mut CodeWriter) {
         f.write_line(&format!("({outs}) = {head}({args});"));
     } else {
         f.write_line(&format!("{outs} = {head}({args});"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{assign_var_names, collect_phi_alias_names};
+    use crate::ir::{Expr, IfPhi, IndexExpr, LoopPhi, LoopVar, Stmt, ValueId, Var};
+    use miden_assembly_syntax::debuginfo::SourceSpan;
+
+    #[test]
+    fn nested_if_phi_reuses_existing_alias_class() {
+        let loop_init = Var::new(ValueId::new(1), 0);
+        let loop_dest = loop_init.with_subscript(IndexExpr::LoopVar(0));
+        let loop_step = loop_init.with_subscript(IndexExpr::Add(
+            Box::new(IndexExpr::LoopVar(0)),
+            Box::new(IndexExpr::Const(1)),
+        ));
+        let branch_else = Var::new(ValueId::new(2), 0);
+        let merged = Var::new(ValueId::new(3), 0);
+
+        let stmts = vec![Stmt::Repeat {
+            span: SourceSpan::UNKNOWN,
+            loop_var: LoopVar::new(0),
+            loop_count: 2,
+            body: vec![Stmt::If {
+                span: SourceSpan::UNKNOWN,
+                cond: Expr::True,
+                then_body: vec![],
+                else_body: vec![],
+                phis: vec![IfPhi {
+                    dest: merged.clone(),
+                    then_var: loop_step.clone(),
+                    else_var: branch_else.clone(),
+                }],
+            }],
+            phis: vec![LoopPhi {
+                dest: loop_dest.clone(),
+                init: loop_init.clone(),
+                step: loop_step.clone(),
+            }],
+        }];
+
+        let aliases = collect_phi_alias_names(&stmts);
+        let canonical = aliases
+            .get(&merged)
+            .expect("merged if-phi value should have an alias")
+            .clone();
+
+        assert_eq!(aliases.get(&loop_init), Some(&canonical));
+        assert_eq!(aliases.get(&loop_dest), Some(&canonical));
+        assert_eq!(aliases.get(&loop_step), Some(&canonical));
+        assert_eq!(aliases.get(&branch_else), Some(&canonical));
+    }
+
+    #[test]
+    fn disconnected_phi_groups_with_same_base_keep_distinct_aliases() {
+        let lhs_init = Var::new(ValueId::new(10), 0);
+        let lhs_dest = Var::new(ValueId::new(11), 0);
+        let lhs_step = Var::new(ValueId::new(12), 0);
+
+        let rhs_init = Var::new(ValueId::new(20), 0);
+        let rhs_dest = Var::new(ValueId::new(21), 0);
+        let rhs_step = Var::new(ValueId::new(22), 0);
+
+        let stmts = vec![
+            Stmt::While {
+                span: SourceSpan::UNKNOWN,
+                cond: Expr::True,
+                body: vec![],
+                phis: vec![LoopPhi {
+                    dest: lhs_dest.clone(),
+                    init: lhs_init.clone(),
+                    step: lhs_step.clone(),
+                }],
+            },
+            Stmt::While {
+                span: SourceSpan::UNKNOWN,
+                cond: Expr::True,
+                body: vec![],
+                phis: vec![LoopPhi {
+                    dest: rhs_dest.clone(),
+                    init: rhs_init.clone(),
+                    step: rhs_step.clone(),
+                }],
+            },
+        ];
+
+        let aliases = collect_phi_alias_names(&stmts);
+        let lhs_alias = aliases
+            .get(&lhs_init)
+            .expect("lhs group should get an alias")
+            .clone();
+        let rhs_alias = aliases
+            .get(&rhs_init)
+            .expect("rhs group should get an alias")
+            .clone();
+
+        assert_eq!(aliases.get(&lhs_dest), Some(&lhs_alias));
+        assert_eq!(aliases.get(&lhs_step), Some(&lhs_alias));
+        assert_eq!(aliases.get(&rhs_dest), Some(&rhs_alias));
+        assert_eq!(aliases.get(&rhs_step), Some(&rhs_alias));
+        assert_ne!(lhs_alias, rhs_alias);
+    }
+
+    #[test]
+    fn plain_variables_do_not_reuse_phi_component_suffixes() {
+        let lhs_init = Var::new(ValueId::new(30), 0);
+        let lhs_dest = Var::new(ValueId::new(31), 0);
+        let lhs_step = Var::new(ValueId::new(32), 0);
+
+        let rhs_init = Var::new(ValueId::new(40), 0);
+        let rhs_dest = Var::new(ValueId::new(41), 0);
+        let rhs_step = Var::new(ValueId::new(42), 0);
+
+        let plain_input = Var::new(ValueId::new(99), 0);
+        let stmts = vec![
+            Stmt::While {
+                span: SourceSpan::UNKNOWN,
+                cond: Expr::True,
+                body: vec![],
+                phis: vec![LoopPhi {
+                    dest: lhs_dest.clone(),
+                    init: lhs_init.clone(),
+                    step: lhs_step.clone(),
+                }],
+            },
+            Stmt::While {
+                span: SourceSpan::UNKNOWN,
+                cond: Expr::True,
+                body: vec![],
+                phis: vec![LoopPhi {
+                    dest: rhs_dest.clone(),
+                    init: rhs_init.clone(),
+                    step: rhs_step.clone(),
+                }],
+            },
+            Stmt::Return {
+                span: SourceSpan::UNKNOWN,
+                values: vec![plain_input.clone()],
+            },
+        ];
+
+        let names = assign_var_names(&stmts);
+        let lhs_name = names
+            .get(&lhs_init)
+            .expect("lhs group should get a stable name")
+            .clone();
+        let rhs_name = names
+            .get(&rhs_init)
+            .expect("rhs group should get a stable name")
+            .clone();
+        let plain_name = names
+            .get(&plain_input)
+            .expect("plain input should get a stable name")
+            .clone();
+
+        assert_eq!(names.get(&lhs_dest), Some(&lhs_name));
+        assert_eq!(names.get(&lhs_step), Some(&lhs_name));
+        assert_eq!(names.get(&rhs_dest), Some(&rhs_name));
+        assert_eq!(names.get(&rhs_step), Some(&rhs_name));
+        assert_ne!(lhs_name, rhs_name);
+        assert_ne!(plain_name, lhs_name);
+        assert_ne!(plain_name, rhs_name);
     }
 }

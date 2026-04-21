@@ -1,0 +1,59 @@
+#! Stdlib-shaped `u128::wrapping_mul` reproducer for `u32wrapping_madd`.
+#! The input values are represented using 32-bit limbs, but this is not checked.
+#! Stack transition:
+#! [b0, b1, b2, b3, a0, a1, a2, a3, ...] -> [c0, c1, c2, c3, ...]
+pub proc wrapping_mul(b: u128, a: u128) -> u128
+    # move a limbs to front for easier access
+    movup.7 movup.7 movup.7 movup.7
+
+    # === column 0: c0 ===
+    dup.4 dup.1
+    u32widening_mul
+    movdn.9
+
+    # === column 1: c1 ===
+    dup.5 dup.3
+    u32widening_madd
+    dup.7 dup.3
+    u32widening_madd
+    movdn.11
+    u32widening_add
+    swap movdn.11
+
+    # === column 2: c2 ===
+    dup.5 dup.4
+    u32widening_madd
+    dup.7 dup.4
+    u32widening_madd
+    dup.9 dup.4
+    u32widening_madd
+    movdn.13
+    u32widening_add3
+    movup.13
+    u32widening_add
+    swap movup.2 add
+    swap
+
+    # === column 3: c3 (overflow discarded) ===
+    swap drop
+    dup.5 dup.5
+    u32wrapping_madd
+    dup.6 dup.4
+    u32wrapping_madd
+    dup.7 dup.3
+    u32wrapping_madd
+    dup.8 dup.2
+    u32wrapping_madd
+
+    movup.9
+    movup.10
+    movup.11
+    movup.3
+    swapw
+    dropw
+    swapw
+    dropw
+    movdn.3
+    movdn.2
+    swap
+end
