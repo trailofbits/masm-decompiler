@@ -278,7 +278,7 @@ fn infers_while_with_condition_produced() {
 #[test]
 fn infers_while_condition_from_body() {
     // Body manufactures the next condition by duplicating an input. When the
-    // loop exits, the remaining input is still semantically visible.
+    // loop exits, the remaining value is still visible to the caller.
     let ws = workspace_from_modules(&[(
         "loop_body_cond",
         r#"
@@ -382,9 +382,9 @@ fn infers_correct_number_of_arguments_for_testz() {
         ProcSignature::Known {
             inputs, outputs, ..
         } => {
-            // testz consumes 4 arguments (1 word)
+            // testz consumes 4 arguments (1 word) and leaves the preserved word
+            // visible below the boolean result.
             assert_eq!(*inputs, 4);
-            // testz preserves the input word and produces one Bool.
             assert_eq!(*outputs, 5);
         }
         ProcSignature::Unknown => panic!("expected known signature"),
@@ -414,6 +414,31 @@ fn infers_preserved_outputs_for_test_eq() {
             assert_eq!(*inputs, 8);
             // test_eq preserves both input words and produces one Bool.
             assert_eq!(*outputs, 9);
+        }
+        ProcSignature::Unknown => panic!("expected known signature"),
+    }
+}
+
+#[test]
+fn infers_correct_stack_effect_for_swapdw() {
+    let ws = workspace_from_modules(&[(
+        "swapdw_fixture",
+        r#"
+        proc uses_swapdw
+            swapdw
+        end
+        "#,
+    )]);
+    let cg = CallGraph::from(&ws);
+    let sigs = infer_signatures(&ws, &cg);
+    let sig = sigs.get("swapdw_fixture::uses_swapdw").expect("sig");
+
+    match sig {
+        ProcSignature::Known {
+            inputs, outputs, ..
+        } => {
+            assert_eq!(*inputs, 8);
+            assert_eq!(*outputs, 8);
         }
         ProcSignature::Unknown => panic!("expected known signature"),
     }
