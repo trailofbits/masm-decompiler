@@ -56,9 +56,9 @@ fn intrinsic_args_reflect_required_depth() {
 /// arguments, so that passthrough inputs are visible in the decompiled output.
 ///
 /// The helper procedure `dup.2; add` has composed stack effect
-/// `known(1, 1).with_required_depth(3)`: it reads 3 elements but only
-/// consumes 1 and produces 1. With the correct lifting, all 3 elements
-/// should appear as call arguments.
+/// `known(1, 3).with_required_depth(3)`: it reads 3 elements, preserves 2 of
+/// them, and leaves all 3 visible on return. With the correct lifting, all 3
+/// elements should appear as call arguments and call results.
 #[test]
 fn exec_call_args_reflect_required_depth() {
     let ws = workspace_from_modules(&[(
@@ -97,7 +97,7 @@ fn exec_call_args_reflect_required_depth() {
     assert_eq!(
         call.results.len(),
         3,
-        "exec.helper should expose the full semantic outputs, got {}",
+        "exec.helper should have 3 visible results, got {}",
         call.results.len()
     );
 }

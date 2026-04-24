@@ -248,7 +248,7 @@ impl From<&Instruction> for StackEffect {
             SwapW1 => StackEffect::known(8, 8),
             SwapW2 => StackEffect::known(12, 12),
             SwapW3 => StackEffect::known(16, 16),
-            SwapDw => StackEffect::known(16, 16),
+            SwapDw => StackEffect::known(8, 8),
 
             CSwap => StackEffect::known(3, 2),
             CSwapW => StackEffect::known(9, 8),

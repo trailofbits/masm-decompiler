@@ -156,7 +156,8 @@ pub type SignatureMap = HashMap<SymbolPath, ProcSignature>;
 ///
 /// Required depth tracks the required stack depth compared to the depth at
 /// procedure entry. This is the number of inputs to the procedure. The number
-/// of outputs is given by the full stack height on exit.
+/// of outputs is given by the full stack height on exit, including preserved
+/// inputs that remain visible to the caller.
 ///
 /// If the procedure contains branches with different stack effects, non-neutral
 /// while loops, or calls to procedures with unknown stack effects, the analysis
