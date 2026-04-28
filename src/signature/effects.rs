@@ -248,7 +248,7 @@ impl From<&Instruction> for StackEffect {
             SwapW1 => StackEffect::known(8, 8),
             SwapW2 => StackEffect::known(12, 12),
             SwapW3 => StackEffect::known(16, 16),
-            SwapDw => StackEffect::known(8, 8),
+            SwapDw => StackEffect::known(16, 16),
 
             CSwap => StackEffect::known(3, 2),
             CSwapW => StackEffect::known(9, 8),
@@ -447,6 +447,14 @@ mod tests {
         );
         assert_eq!(
             StackEffect::from(&Instruction::HornerExt),
+            StackEffect::known(16, 16)
+        );
+    }
+
+    #[test]
+    fn swapdw_swaps_four_words() {
+        assert_eq!(
+            StackEffect::from(&Instruction::SwapDw),
             StackEffect::known(16, 16)
         );
     }

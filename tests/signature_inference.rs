@@ -437,8 +437,8 @@ fn infers_correct_stack_effect_for_swapdw() {
         ProcSignature::Known {
             inputs, outputs, ..
         } => {
-            assert_eq!(*inputs, 8);
-            assert_eq!(*outputs, 8);
+            assert_eq!(*inputs, 16);
+            assert_eq!(*outputs, 16);
         }
         ProcSignature::Unknown => panic!("expected known signature"),
     }
