@@ -268,7 +268,7 @@ const U64_DIV_EVENT = event("stdlib::math::u64::u64_div")
 pub proc div(b: u64, a: u64) -> u64
     emit.U64_DIV_EVENT  # push the quotient and the remainder onto the advice stack
 
-    adv_push.2          # pop the quotient from the advice stack and assert it consists of
+    adv_push adv_push   # pop the quotient from the advice stack and assert it consists of
     u32assert2          # 32-bit limbs
 
     dup.3               # multiply quotient by the divisor and make sure the resulting value
@@ -290,7 +290,7 @@ pub proc div(b: u64, a: u64) -> u64
     eq.0
     assert
 
-    adv_push.2          # pop the remainder from the advice stack and assert it consists of
+    adv_push adv_push   # pop the remainder from the advice stack and assert it consists of
     u32assert2          # 32-bit limbs
 
     movup.7             # make sure the divisor is greater than the remainder. this also consumes
@@ -325,7 +325,7 @@ end
 pub proc mod(b: u64, a: u64) -> u64
     emit.U64_DIV_EVENT  # push the quotient and the remainder onto the advice stack
 
-    adv_push.2          # pop the quotient from the advice stack and assert it consists of
+    adv_push adv_push   # pop the quotient from the advice stack and assert it consists of
     u32assert2          # 32-bit limbs
 
     dup.3               # multiply quotient by the divisor and make sure the resulting value
@@ -347,7 +347,7 @@ pub proc mod(b: u64, a: u64) -> u64
     eq.0
     assert
 
-    adv_push.2          # pop the quotient from the advice stack and assert it consists of
+    adv_push adv_push   # pop the quotient from the advice stack and assert it consists of
     u32assert2          # 32-bit limbs
 
     movup.5             # make sure the divisor is greater than the remainder. this also consumes
@@ -382,7 +382,7 @@ end
 pub proc divmod(b: u64, a: u64) -> (remainder: u64, quotient: u64)
     emit.U64_DIV_EVENT  # push the quotient and the remainder onto the advice stack
 
-    adv_push.2          # pop the quotient from the advice stack and assert it consists of
+    adv_push adv_push   # pop the quotient from the advice stack and assert it consists of
     u32assert2          # 32-bit limbs
 
     dup.3               # multiply quotient by the divisor and make sure the resulting value
@@ -404,7 +404,7 @@ pub proc divmod(b: u64, a: u64) -> (remainder: u64, quotient: u64)
     eq.0
     assert
 
-    adv_push.2          # pop the quotient from the advice stack and assert it consists of
+    adv_push adv_push   # pop the quotient from the advice stack and assert it consists of
     u32assert2          # 32-bit limbs
 
     movup.7             # make sure the divisor is greater than the remainder. this also consumes

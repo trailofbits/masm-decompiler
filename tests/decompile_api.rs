@@ -285,7 +285,7 @@ fn formatter_prints_typed_signatures() {
         end
 
         pub proc unknown_out
-            adv_push.1
+            adv_push
         end
         "#,
     )]);
