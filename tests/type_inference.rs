@@ -71,7 +71,7 @@ fn setup_decompiler() -> Decompiler<'static> {
         end
 
         pub proc caller_unknown_bool
-            adv_push.1
+            adv_push
             exec.needs_bool
         end
 

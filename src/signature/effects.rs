@@ -377,7 +377,7 @@ impl From<&Instruction> for StackEffect {
 
             AdvLoadW => StackEffect::known(4, 4).with_required_depth(4),
             AdvPipe => StackEffect::known(13, 13).with_required_depth(13),
-            AdvPush(Immediate::Value(values)) => StackEffect::known(0, *values.inner() as usize),
+            AdvPush => StackEffect::known(0, 1),
 
             SysEvent(_) => StackEffect::known(0, 0),
 

@@ -1054,27 +1054,13 @@ fn lift_adv_inst(
                 load: AdvLoad { outputs: pushed },
             }]))
         }
-        Instruction::AdvPush(imm) => {
-            let count = match imm {
-                Immediate::Value(value_span) => *value_span.inner() as usize,
-                Immediate::Constant(_) => {
-                    return Err(LiftingError::UnsupportedInstruction {
-                        span,
-                        instruction: inst.clone(),
-                    });
-                }
-            };
-            if count == 0 || count > 16 {
-                return Err(LiftingError::UnsupportedInstruction {
-                    span,
-                    instruction: inst.clone(),
-                });
-            }
+        Instruction::AdvPush => {
+            let count = 1;
             let (_, pushed) = stack.apply_checked(0, count, 0, span, inst.to_string())?;
             Ok(Some(vec![Stmt::Intrinsic {
                 span,
                 intrinsic: Intrinsic {
-                    name: format!("adv_push.{imm}"),
+                    name: "adv_push".to_string(),
                     args: Vec::new(),
                     results: pushed,
                 },
