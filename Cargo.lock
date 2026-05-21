@@ -1458,9 +1458,9 @@ dependencies = [
 
 [[package]]
 name = "p3-challenger"
-version = "0.5.0"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "685fe948f1c038881f814556d3d9658ea47766e4d16a687aa09e001df2f3b126"
+checksum = "8972ccd1d5dc90e46cdb1f2ab4ee2bae49b3917e5e98aa533f0c2b779c010445"
 dependencies = [
  "p3-field",
  "p3-maybe-rayon",
@@ -1485,9 +1485,9 @@ dependencies = [
 
 [[package]]
 name = "p3-dft"
-version = "0.5.0"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e08de44b5c241e7a4c038df1540e37038c83767e2f4b9fa4f5fd627c2916879"
+checksum = "17771aca44632f9cc11f2718d7ea7ec06794946c4190ef3a985bfc893f14c18a"
 dependencies = [
  "itertools",
  "p3-field",
@@ -1500,9 +1500,9 @@ dependencies = [
 
 [[package]]
 name = "p3-field"
-version = "0.5.0"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdb3bfc3a1ba51a757e9a7a7bd753a27886e8c05c38c4b6a43d59cd86c20a53f"
+checksum = "6f3eb24d0591fd4d282d89cbe4e4efba5571c699375006f80b2cbf53ce83461c"
 dependencies = [
  "itertools",
  "num-bigint",
@@ -1547,9 +1547,9 @@ dependencies = [
 
 [[package]]
 name = "p3-matrix"
-version = "0.5.0"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbb6f8655e789cf8eebd5ef821311f97030e39d00ca59bd085aa66aca297d35a"
+checksum = "ea9c94c0714944e7b8a9a62e6340b1e3e1d3f8ecfd3e35c08798360200e73eff"
 dependencies = [
  "itertools",
  "p3-field",
@@ -1562,15 +1562,15 @@ dependencies = [
 
 [[package]]
 name = "p3-maybe-rayon"
-version = "0.5.0"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3494f57fb29307865df3cda8974dbff9a21a2dfe67309ff9b8f4397e05dce67"
+checksum = "eebc233a34b1ab0273f35b4052fa2eeb3114b22ba4575bd7da00716e878ffb77"
 
 [[package]]
 name = "p3-mds"
-version = "0.5.0"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "712356f8cb7ee1a44004f7d31960a3ab28728f5da6b41acb373844ff477a78dd"
+checksum = "6b5441fa8116246ec9e6c835f15273cb27777ca572960ec87476b67fef13e01e"
 dependencies = [
  "p3-dft",
  "p3-field",
@@ -1677,9 +1677,9 @@ dependencies = [
 
 [[package]]
 name = "p3-monty-31"
-version = "0.5.0"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "136c964a854ff2c466a8c3d37b9575e0ef39ba6592e31c134f2557a777039094"
+checksum = "8724f330ea6d19dd4f2436aa0f88b5fcbf88f0f55ca7fccd3fea8b736dbcddad"
 dependencies = [
  "itertools",
  "num-bigint",
@@ -1701,9 +1701,9 @@ dependencies = [
 
 [[package]]
 name = "p3-poseidon1"
-version = "0.5.0"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffe427e925ad0e85fd0e36ba53a3ab162dbeadc8507c31b7a513531df42d73e9"
+checksum = "04e2a562fea210baae390a32f9ecf0dd8724ae3f4352d1c8e413077b6f00a162"
 dependencies = [
  "p3-field",
  "p3-symmetric",
@@ -1712,9 +1712,9 @@ dependencies = [
 
 [[package]]
 name = "p3-poseidon2"
-version = "0.5.0"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "530f98868eeb1c776cabba3f96d363142f90745f53fe508c86edce8ba11f3c5a"
+checksum = "06394851c161d17e4aa4ad2aad5557d32f14cadd1dc838f965d8e1821a63b8c5"
 dependencies = [
  "p3-field",
  "p3-mds",
@@ -1725,9 +1725,9 @@ dependencies = [
 
 [[package]]
 name = "p3-symmetric"
-version = "0.5.0"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "631318d0025f045682a8508ccfd9227604b62fe76b7ebb7d0e5cf9c43e3d590c"
+checksum = "9ac1a276d421f8ef3361bb7d8c39a02c93c6b3f10eeaa559cc4c50222f9a5b82"
 dependencies = [
  "itertools",
  "p3-field",
@@ -1737,9 +1737,9 @@ dependencies = [
 
 [[package]]
 name = "p3-util"
-version = "0.5.0"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46ae22dbaa5e923be05afc0cc57f4b27ef80cdcabad5bfbc62250a9672151211"
+checksum = "d08a58162a4c264269ef454f0b28dcda89939490eecacb2b2cf5b00f719b80f6"
 dependencies = [
  "serde",
  "transpose",
